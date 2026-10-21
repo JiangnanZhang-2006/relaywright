@@ -78,7 +78,8 @@ async function main(): Promise<void> {
   }
 
   const token = createDaemonToken();
-  await session.start();
+  // Listen and publish daemon.json before the browser launches. A Chrome for Testing
+  // download can take longer than the client's health timeout.
   http = await listen(
     createApp({
       token,
@@ -96,6 +97,7 @@ async function main(): Promise<void> {
     version: packageVersion(),
   });
   logDaemon(`ready port=${http.port}`);
+  session.warmUp();
 }
 
 process.on('unhandledRejection', (err) => {

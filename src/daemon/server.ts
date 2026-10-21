@@ -4,13 +4,13 @@ import { serve, type ServerType } from '@hono/node-server';
 import type { Server } from 'node:http';
 import { z } from 'zod';
 import { errorText, logDaemon, packageVersion } from '../config/paths.js';
-import type { BrowserSession, PageBody, StatusBody } from '../session/browser.js';
+import { RelayError, relayStatus, type RelayErrorCode } from '../errors.js';
+import { ActSchema, issuesText, SnapshotQuery, WaitSchema } from '../protocol.js';
+import type { BrowserControl } from '../session/browser.js';
 
 const NavigateBody = z.object({
   url: z.string().min(1),
 });
-
-type BrowserControl = Pick<BrowserSession, 'status' | 'navigate' | 'snapshot'>;
 
 export interface AppOptions {
   token: string;
@@ -36,12 +36,18 @@ export function createApp(options: AppOptions): Hono {
     await next();
   });
 
-  app.get('/health', (c) => c.json({ ok: true, pid: process.pid, version: packageVersion() }));
+  app.get('/health', (c) =>
+    c.json({
+      ok: true,
+      pid: process.pid,
+      version: packageVersion(),
+      browser: options.session.browserState(),
+    }),
+  );
 
   app.get('/status', async (c) => {
     try {
-      const status: StatusBody = await options.session.status();
-      return c.json(status);
+      return c.json(await options.session.status());
     } catch (err) {
       return browserError(c, err);
     }
@@ -50,12 +56,9 @@ export function createApp(options: AppOptions): Hono {
   app.post('/navigate', async (c) => {
     try {
       const body = NavigateBody.safeParse(await readJson(c));
-      if (!body.success) {
-        return jsonError(c, 400, 'bad_request', body.error.issues.map((issue) => issue.message).join('; '));
-      }
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
       const url = parseHttpUrl(body.data.url);
-      const page: PageBody = await options.session.navigate(url);
-      return c.json(page);
+      return c.json(await options.session.navigate(url));
     } catch (err) {
       return browserError(c, err);
     }
@@ -63,8 +66,32 @@ export function createApp(options: AppOptions): Hono {
 
   app.get('/snapshot', async (c) => {
     try {
-      const page: PageBody = await options.session.snapshot();
-      return c.json(page);
+      const parsed = SnapshotQuery.safeParse({
+        mode: emptyAsUndefined(c.req.query('mode')) ?? 'full',
+        maxRows: emptyAsUndefined(c.req.query('maxRows')) === undefined ? undefined : Number(c.req.query('maxRows')),
+      });
+      if (!parsed.success) return jsonError(c, 400, 'bad_request', issuesText(parsed.error));
+      return c.json(await options.session.snapshot({ mode: parsed.data.mode, maxRows: parsed.data.maxRows }));
+    } catch (err) {
+      return browserError(c, err);
+    }
+  });
+
+  app.post('/act', async (c) => {
+    try {
+      const body = ActSchema.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return c.json(await options.session.act(body.data));
+    } catch (err) {
+      return browserError(c, err);
+    }
+  });
+
+  app.post('/wait', async (c) => {
+    try {
+      const body = WaitSchema.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return c.json(await options.session.waitFor(body.data));
     } catch (err) {
       return browserError(c, err);
     }
@@ -111,7 +138,7 @@ function closeServer(server: ServerType): Promise<void> {
 
 class HttpError extends Error {
   constructor(
-    readonly status: 400 | 401 | 404 | 500 | 504,
+    readonly status: 400 | 401 | 404 | 409 | 500 | 503 | 504,
     readonly code: string,
     message: string,
   ) {
@@ -143,15 +170,20 @@ function parseHttpUrl(value: string): string {
 
 function browserError(c: Context, err: unknown): Response {
   if (err instanceof HttpError) return jsonError(c, err.status, err.code, err.message);
+  if (err instanceof RelayError) {
+    logDaemon(`${err.code}: ${err.message}`);
+    return jsonError(c, relayStatus(err.code), err.code, err.message);
+  }
   const timeout = err instanceof Error && err.name === 'TimeoutError';
   const message = errorText(err);
   logDaemon(`${timeout ? 'timeout' : 'browser_error'}: ${message}`);
-  return jsonError(c, timeout ? 504 : 500, timeout ? 'timeout' : 'browser_error', message);
+  const code: RelayErrorCode | 'browser_error' = timeout ? 'timeout' : 'browser_error';
+  return jsonError(c, timeout ? 504 : 500, code, message);
 }
 
 function jsonError(
   c: Context,
-  status: 400 | 401 | 404 | 500 | 504,
+  status: 400 | 401 | 404 | 409 | 500 | 503 | 504,
   code: string,
   message: string,
 ): Response {
@@ -166,4 +198,9 @@ function bearerOk(header: string | undefined, token: string): boolean {
   const expected = Buffer.from(token);
   if (presented.length !== expected.length) return false;
   return timingSafeEqual(presented, expected);
+}
+
+function emptyAsUndefined(value: string | undefined): string | undefined {
+  if (value === undefined || value === '') return undefined;
+  return value;
 }

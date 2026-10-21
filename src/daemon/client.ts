@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { daemonJsonPath, daemonLockPath, daemonLogPath, ensureHomeLayout, errorText, logDaemon, relaywrightHome } from '../config/paths.js';
+import { PageSchema, StatusSchema, WaitResultSchema, type DaemonStatus, type PageBody, type WaitBody } from '../protocol.js';
 
 const START_TIMEOUT_MS = 20_000;
 const POLL_MS = 200;
@@ -19,29 +20,23 @@ const DaemonInfoSchema = z.object({
 });
 
 export type DaemonInfo = z.infer<typeof DaemonInfoSchema>;
+export type { DaemonStatus };
+export type PageView = PageBody;
 
-const StatusSchema = z.object({
+const HealthSchema = z.object({
+  ok: z.literal(true),
   pid: z.number(),
-  uptime: z.number(),
-  browser: z.object({
-    executablePath: z.string(),
-    version: z.string(),
-  }),
-  page: z.object({
-    url: z.string(),
-    title: z.string(),
-  }),
+  browser: z
+    .object({
+      state: z.enum(['idle', 'resolving', 'downloading', 'launching', 'ready', 'error']),
+      percent: z.number().optional(),
+      message: z.string().optional(),
+    })
+    .optional(),
 });
 
-export type DaemonStatus = z.infer<typeof StatusSchema>;
-
-const PageSchema = z.object({
-  url: z.string(),
-  title: z.string(),
-  snapshot: z.string(),
-});
-
-export type PageView = z.infer<typeof PageSchema>;
+const BROWSER_DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
+const BROWSER_START_TIMEOUT_MS = 60_000;
 
 export class DaemonStartError extends Error {
   constructor(message: string) {
@@ -197,14 +192,66 @@ export async function navigate(url: string): Promise<PageView> {
     await authorized(info, '/navigate', {
       method: 'POST',
       body: { url: parsed },
-      timeoutMs: 45_000,
+      timeoutMs: 70_000,
     }),
   );
 }
 
-export async function getSnapshot(): Promise<PageView> {
+export async function getSnapshot(options?: { mode?: 'full' | 'diff'; maxRows?: number }): Promise<PageView> {
   const info = await ensureDaemon();
-  return PageSchema.parse(await authorized(info, '/snapshot'));
+  const params = new URLSearchParams();
+  if (options?.mode) params.set('mode', options.mode);
+  if (options?.maxRows !== undefined) params.set('maxRows', String(options.maxRows));
+  const query = params.size > 0 ? `?${params.toString()}` : '';
+  return PageSchema.parse(await authorized(info, `/snapshot${query}`, { timeoutMs: 45_000 }));
+}
+
+export async function act(input: { action: string; ref?: string; value?: string; key?: string }): Promise<PageView> {
+  const info = await ensureDaemon();
+  return PageSchema.parse(
+    await authorized(info, '/act', {
+      method: 'POST',
+      body: input,
+      timeoutMs: 60_000,
+    }),
+  );
+}
+
+export async function waitFor(input: { text?: string; ref?: string; url?: string; timeoutMs?: number }): Promise<WaitBody> {
+  const info = await ensureDaemon();
+  const timeoutMs = input.timeoutMs ?? 10_000;
+  return WaitResultSchema.parse(
+    await authorized(info, '/wait', {
+      method: 'POST',
+      body: input,
+      timeoutMs: Math.min(90_000, timeoutMs + 20_000),
+    }),
+  );
+}
+
+export async function waitForBrowserReady(info: DaemonInfo): Promise<void> {
+  const started = Date.now();
+  let sawDownload = false;
+  let lastPercent = -1;
+  for (;;) {
+    const health = await fetchHealthBody(info);
+    const state = health?.browser?.state ?? 'idle';
+    if (state === 'downloading') {
+      sawDownload = true;
+      const percent = health?.browser?.percent ?? 0;
+      if (percent !== lastPercent) {
+        process.stderr.write(`downloading Chrome for Testing ${percent}%\n`);
+        lastPercent = percent;
+      }
+    }
+    if (state === 'ready') return;
+    if (state === 'error') throw new Error(health?.browser?.message || 'Browser failed to start');
+    const limit = sawDownload ? BROWSER_DOWNLOAD_TIMEOUT_MS : BROWSER_START_TIMEOUT_MS;
+    if (Date.now() - started > limit) {
+      throw new Error(`Browser was not ready within ${Math.round(limit / 1000)}s (state ${state}).`);
+    }
+    await delay(200);
+  }
 }
 
 export async function stopDaemon(): Promise<'stopped' | 'not_running'> {
@@ -295,8 +342,24 @@ function parseJson(text: string): unknown {
 
 function errorMessage(data: unknown): string | null {
   if (!data || typeof data !== 'object' || !('error' in data)) return null;
-  const error = (data as { error?: { message?: unknown } }).error;
-  return typeof error?.message === 'string' ? error.message : null;
+  const error = (data as { error?: { code?: unknown; message?: unknown } }).error;
+  if (!error || typeof error.message !== 'string') return null;
+  if (typeof error.code === 'string' && error.code.length > 0) return `${error.code}: ${error.message}`;
+  return error.message;
+}
+
+async function fetchHealthBody(info: DaemonInfo): Promise<z.infer<typeof HealthSchema> | null> {
+  try {
+    const response = await fetch(`http://127.0.0.1:${info.port}/health`, {
+      signal: AbortSignal.timeout(1_000),
+    });
+    if (!response.ok) return null;
+    const parsed = HealthSchema.safeParse(await response.json());
+    if (!parsed.success || parsed.data.pid !== info.pid) return null;
+    return parsed.data;
+  } catch {
+    return null;
+  }
 }
 
 interface LaunchSpec {

@@ -1,15 +1,19 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
+import { installChromeForTesting, whichBrowser } from '../browser/resolve.js';
 import { errorText, packageVersion } from '../config/paths.js';
+import { normalizeActArgs } from './act-args.js';
 import {
+  act,
   type DaemonStatus,
   ensureDaemon,
   findHealthyDaemon,
   getSnapshot,
-  getStatus,
   navigate,
   readStatus,
   stopDaemon,
+  waitFor,
+  waitForBrowserReady,
 } from '../daemon/client.js';
 
 function wantsJson(command: Command): boolean {
@@ -50,16 +54,22 @@ function addJson(command: Command): Command {
 }
 
 function statusText(status: DaemonStatus, port: number, version: string): string {
-  return [
+  const lines = [
     `pid: ${status.pid}`,
     `port: ${port}`,
     `uptime: ${status.uptime}s`,
     `version: ${version}`,
-    `browser: ${status.browser.executablePath}`,
-    `browserVersion: ${status.browser.version}`,
-    `page: ${status.page.title}`,
-    `url: ${status.page.url}`,
-  ].join('\n');
+    `browserState: ${status.browser.state}`,
+  ];
+  if (status.browser.percent !== undefined) lines.push(`browserPercent: ${status.browser.percent}`);
+  if (status.browser.message) lines.push(`browserError: ${status.browser.message}`);
+  if (status.browser.executablePath) lines.push(`browser: ${status.browser.executablePath}`);
+  if (status.browser.version) lines.push(`browserVersion: ${status.browser.version}`);
+  if (status.page) {
+    lines.push(`page: ${status.page.title}`);
+    lines.push(`url: ${status.page.url}`);
+  }
+  return lines.join('\n');
 }
 
 function statusJson(status: DaemonStatus, port: number, version: string, startedAt: string): Record<string, unknown> {
@@ -71,7 +81,7 @@ function statusJson(status: DaemonStatus, port: number, version: string, started
     pid: status.pid,
     uptime: status.uptime,
     browser: status.browser,
-    page: status.page,
+    page: status.page ?? null,
   };
 }
 
@@ -88,7 +98,10 @@ program.addHelpText(
 Examples:
   relaywright daemon start
   relaywright open https://example.com
-  relaywright snapshot --json
+  relaywright snapshot --diff
+  relaywright act click e3
+  relaywright act select e1 2025-2026
+  relaywright act type e5 张三 --key Enter
   relaywright daemon stop
 `,
 );
@@ -99,7 +112,7 @@ addJson(daemon);
 addJson(
   daemon
     .command('start')
-    .description('Start the daemon if it is not already running')
+    .description('Start the daemon if it is not already running, then wait until the browser is ready')
     .addHelpText(
       'after',
       `
@@ -113,7 +126,8 @@ Examples:
   return guard(command, async () => {
     const already = await findHealthyDaemon();
     const info = await ensureDaemon();
-    const status = await getStatus();
+    await waitForBrowserReady(info);
+    const status = await readStatus(info);
     const label = already ? 'daemon: already running' : 'daemon: started';
     emit(command, `${label}\n${statusText(status, info.port, info.version)}`, {
       ...statusJson(status, info.port, info.version, info.startedAt),
@@ -149,7 +163,7 @@ Examples:
 addJson(
   daemon
     .command('status')
-    .description('Show whether the daemon is running')
+    .description('Show whether the daemon is running. Does not wait for the browser to finish launching.')
     .addHelpText(
       'after',
       `
@@ -167,7 +181,59 @@ Examples:
       return;
     }
     const status = await readStatus(info);
-    emit(command, `daemon: running\n${statusText(status, info.port, info.version)}`, statusJson(status, info.port, info.version, info.startedAt));
+    emit(
+      command,
+      `daemon: running\n${statusText(status, info.port, info.version)}`,
+      statusJson(status, info.port, info.version, info.startedAt),
+    );
+  });
+});
+
+const browser = program.command('browser').description('Resolve or install the Chromium executable');
+addJson(browser);
+
+addJson(
+  browser
+    .command('which')
+    .description('Print the resolved browser executable and its source. Does not download anything.')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright browser which
+  relaywright browser which --json
+`,
+    ),
+).action(function (this: Command) {
+  const command = this;
+  return guard(command, async () => {
+    const resolved = await whichBrowser();
+    const pathText = resolved.path ?? '(not installed)';
+    emit(command, `source: ${resolved.source}\npath: ${pathText}`, resolved);
+  });
+});
+
+addJson(
+  browser
+    .command('install')
+    .description('Download Chrome for Testing into ~/.relaywright/browsers')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright browser install
+`,
+    ),
+).action(function (this: Command) {
+  const command = this;
+  return guard(command, async () => {
+    let last = -1;
+    const path = await installChromeForTesting((percent) => {
+      if (percent === last) return;
+      last = percent;
+      process.stderr.write(`downloading Chrome for Testing ${percent}%\n`);
+    });
+    emit(command, path, { path, source: 'cached-cft' });
   });
 });
 
@@ -215,20 +281,89 @@ Examples:
 addJson(
   program
     .command('snapshot')
-    .description('Print a snapshot of the current page')
+    .description('Print a snapshot of the current page. --diff is against the last snapshot from any client.')
+    .option('--diff', 'print only changes since the last snapshot')
+    .option('--max-rows <n>', 'maximum data rows to render for each table', (value) => Number(value))
     .addHelpText(
       'after',
       `
 Examples:
   relaywright snapshot
-  relaywright snapshot --json
+  relaywright snapshot --diff
+  relaywright snapshot --max-rows 8 --json
 `,
     ),
 ).action(function (this: Command) {
   const command = this;
   return guard(command, async () => {
-    const page = await getSnapshot();
+    const diff = command.getOptionValue('diff') === true;
+    const maxRows = command.getOptionValue('maxRows') as number | undefined;
+    if (maxRows !== undefined && (!Number.isInteger(maxRows) || maxRows < 1 || maxRows > 50)) {
+      throw new Error('--max-rows must be an integer from 1 to 50');
+    }
+    const page = await getSnapshot({ mode: diff ? 'diff' : 'full', maxRows });
     emit(command, page.snapshot, page);
+  });
+});
+
+addJson(
+  program
+    .command('act')
+    .description('Click, type, select, press, or scroll using a ref from the latest snapshot')
+    .argument('<action>', 'click, type, select, press, or scroll')
+    .argument('[ref]', 'element ref such as e3')
+    .argument('[value]', 'text, option, or up/down')
+    .option('--key <key>', 'key to press after type, or the key for press')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright act click e3
+  relaywright act select e1 2025-2026
+  relaywright act type e5 张三 --key Enter
+  relaywright act press Enter
+  relaywright act scroll down
+`,
+    ),
+).action(function (this: Command, action: string, ref?: string, value?: string) {
+  const command = this;
+  return guard(command, async () => {
+    const key = command.getOptionValue('key') as string | undefined;
+    const input = normalizeActArgs(action, ref, value, key);
+    const page = await act(input);
+    emit(command, page.snapshot, page);
+  });
+});
+
+addJson(
+  program
+    .command('wait')
+    .description('Wait until text, a ref, or a URL substring matches, then print a diff snapshot')
+    .option('--text <text>', 'page text to wait for')
+    .option('--ref <ref>', 'ref that must be visible')
+    .option('--url <url>', 'URL substring to wait for')
+    .option('--timeout <ms>', 'timeout in milliseconds (default 10000, max 60000)', (value) => Number(value))
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright wait --text 课表
+  relaywright wait --ref e3 --timeout 5000
+  relaywright wait --url example.com --json
+`,
+    ),
+).action(function (this: Command) {
+  const command = this;
+  return guard(command, async () => {
+    const text = command.getOptionValue('text') as string | undefined;
+    const ref = command.getOptionValue('ref') as string | undefined;
+    const url = command.getOptionValue('url') as string | undefined;
+    const timeoutMs = command.getOptionValue('timeout') as number | undefined;
+    if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000)) {
+      throw new Error('--timeout must be an integer from 1 to 60000');
+    }
+    const result = await waitFor({ text, ref, url, timeoutMs });
+    emit(command, `matched: ${result.matched}\n${result.snapshot}`, result);
   });
 });
 
