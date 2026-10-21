@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+*.log
+.env
+.env.*
+.DS_Store
+
+# 本地运行数据，可能包含会话和个人信息
+.relaywright/
+downloads/
+traces/
+bench/results/
