@@ -1,0 +1,33 @@
+{
+  "name": "relaywright",
+  "version": "0.1.0",
+  "description": "Chromium browser control for agents, with an MCP server and a CLI sharing one local daemon.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "relaywright": "dist/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli/index.ts",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.5",
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@puppeteer/browsers": "^3.2.5",
+    "commander": "^15.0.0",
+    "hono": "^4.13.13",
+    "puppeteer-core": "^25.15.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}
