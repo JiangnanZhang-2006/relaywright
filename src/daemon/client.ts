@@ -6,7 +6,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { daemonJsonPath, daemonLockPath, daemonLogPath, ensureHomeLayout, errorText, logDaemon, relaywrightHome } from '../config/paths.js';
-import { PageSchema, StatusSchema, WaitResultSchema, type DaemonStatus, type PageBody, type WaitBody } from '../protocol.js';
+import { explainDaemonError, formatBuildMismatch, readBuildFingerprint } from './build.js';
+import { PageSchema, StatusSchema, TabsCommandSchema, TabsListSchema, WaitResultSchema, type DaemonStatus, type PageBody, type TabsCommand, type TabsList, type WaitBody } from '../protocol.js';
 import {
   MatrixResultSchema,
   SaveResultSchema,
@@ -32,6 +33,12 @@ const DaemonInfoSchema = z.object({
   token: z.string().min(1),
   startedAt: z.string().min(1),
   version: z.string().min(1),
+  build: z
+    .object({
+      entry: z.string().min(1),
+      builtAt: z.string().min(1),
+    })
+    .optional(),
 });
 
 export type DaemonInfo = z.infer<typeof DaemonInfoSchema>;
@@ -41,6 +48,12 @@ export type PageView = PageBody;
 const HealthSchema = z.object({
   ok: z.literal(true),
   pid: z.number(),
+  build: z
+    .object({
+      entry: z.string().min(1),
+      builtAt: z.string().min(1),
+    })
+    .optional(),
   browser: z
     .object({
       state: z.enum(['idle', 'resolving', 'downloading', 'launching', 'ready', 'error']),
@@ -63,6 +76,11 @@ export class DaemonStartError extends Error {
 }
 
 let cached: DaemonInfo | null = null;
+let mismatchLine: string | null = null;
+
+export function daemonMismatchLine(): string | null {
+  return mismatchLine;
+}
 
 /** This module is imported by the MCP server. It must not write to stdout. */
 function diag(message: string): void {
@@ -159,12 +177,16 @@ export async function fetchHealth(info: DaemonInfo, timeoutMs = 1_000): Promise<
 }
 
 export async function findHealthyDaemon(): Promise<DaemonInfo | null> {
-  if (cached && (await fetchHealth(cached))) return cached;
+  if (cached && (await fetchHealth(cached))) {
+    await noteFingerprint(cached);
+    return cached;
+  }
   cached = null;
   const info = readDaemonInfo();
   if (!info || !isPidAlive(info.pid)) return null;
   if (!(await fetchHealth(info))) return null;
   cached = info;
+  await noteFingerprint(info);
   return info;
 }
 
@@ -186,6 +208,7 @@ export async function ensureDaemon(): Promise<DaemonInfo> {
   const child = spawnDaemon(spec);
   const ready = await waitForHealthy(START_TIMEOUT_MS, child);
   if (ready) {
+    await noteFingerprint(ready);
     diag(`daemon ready pid=${ready.pid} port=${ready.port}`);
     return ready;
   }
@@ -242,6 +265,15 @@ export async function waitFor(input: { text?: string; ref?: string; url?: string
       timeoutMs: Math.min(90_000, timeoutMs + 20_000),
     }),
   );
+}
+
+export async function browserTabs(input: TabsCommand): Promise<TabsList | PageBody> {
+  const parsed = TabsCommandSchema.parse(input);
+  const info = await ensureDaemon();
+  if (parsed.action === 'list') return TabsListSchema.parse(await authorized(info, '/tabs'));
+  const data = await authorized(info, '/tabs', { method: 'POST', body: parsed, timeoutMs: 70_000 });
+  if (parsed.action === 'close') return TabsListSchema.parse(data);
+  return PageSchema.parse(data);
 }
 
 const SKILL_RUN_TIMEOUT_MS = 10 * 60_000;
@@ -349,6 +381,13 @@ export async function stopDaemon(): Promise<'stopped' | 'not_running'> {
   throw new Error(`Daemon pid ${info.pid} did not exit after shutdown.\nLog: ${daemonLogPath()}`);
 }
 
+export async function restartDaemon(): Promise<DaemonInfo> {
+  await stopDaemon();
+  mismatchLine = null;
+  cached = null;
+  return ensureDaemon();
+}
+
 export function createDaemonToken(): string {
   return randomBytes(32).toString('hex');
 }
@@ -393,7 +432,8 @@ async function authorized(info: DaemonInfo, path: string, options: RequestOption
     }
   }
   if (!response.ok) {
-    throw new Error(errorMessage(data) ?? `Daemon request failed (${response.status})`);
+    const message = errorMessage(data) ?? `Daemon request failed (${response.status})`;
+    throw new Error(explainDaemonError(message, response.status, errorCode(data), mismatchLine));
   }
   return data;
 }
@@ -412,6 +452,18 @@ function errorMessage(data: unknown): string | null {
   if (!error || typeof error.message !== 'string') return null;
   if (typeof error.code === 'string' && error.code.length > 0) return `${error.code}: ${error.message}`;
   return error.message;
+}
+
+function errorCode(data: unknown): string | null {
+  if (!data || typeof data !== 'object' || !('error' in data)) return null;
+  const code = (data as { error?: { code?: unknown } }).error?.code;
+  return typeof code === 'string' ? code : null;
+}
+
+async function noteFingerprint(info: DaemonInfo): Promise<void> {
+  const health = await fetchHealthBody(info);
+  const stored = readDaemonInfo()?.build ?? info.build;
+  mismatchLine = formatBuildMismatch(readBuildFingerprint(), health?.build, stored);
 }
 
 async function fetchHealthBody(info: DaemonInfo): Promise<z.infer<typeof HealthSchema> | null> {

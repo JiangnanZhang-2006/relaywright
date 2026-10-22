@@ -4,6 +4,8 @@ import { z } from 'zod';
 import { errorText, packageVersion } from '../config/paths.js';
 import {
   act,
+  browserTabs,
+  daemonMismatchLine,
   getSnapshot,
   listSkills,
   navigate,
@@ -12,7 +14,7 @@ import {
   showSkill,
   waitFor,
 } from '../daemon/client.js';
-import { ActSchema, issuesText, WaitSchema } from '../protocol.js';
+import { ActSchema, issuesText, TabsCommandSchema, WaitSchema } from '../protocol.js';
 import { formatRunReport } from '../skills/format.js';
 import { CheckSchema, RunSkillInputSchema, SaveSkillInputSchema } from '../skills/schema.js';
 
@@ -36,7 +38,7 @@ export async function startMcpServer(): Promise<void> {
     async ({ url }) => {
       try {
         const page = await navigate(url);
-        return { content: [{ type: 'text', text: withStep(pageText(page.snapshot), page.step) }] };
+        return ok(withStep(pageText(page.snapshot), page.step));
       } catch (err) {
         return toolError(err);
       }
@@ -55,7 +57,7 @@ export async function startMcpServer(): Promise<void> {
     async ({ mode, max_rows }) => {
       try {
         const page = await getSnapshot({ mode: mode ?? 'full', maxRows: max_rows });
-        return { content: [{ type: 'text', text: pageText(page.snapshot) }] };
+        return ok(pageText(page.snapshot));
       } catch (err) {
         return toolError(err);
       }
@@ -78,7 +80,7 @@ export async function startMcpServer(): Promise<void> {
       if (!parsed.success) return toolError(new Error(issuesText(parsed.error)));
       try {
         const page = await act(parsed.data);
-        return { content: [{ type: 'text', text: withStep(pageText(page.snapshot), page.step) }] };
+        return ok(withStep(pageText(page.snapshot), page.step));
       } catch (err) {
         return toolError(err);
       }
@@ -107,7 +109,7 @@ export async function startMcpServer(): Promise<void> {
       try {
         const result = await waitFor(parsed.data);
         const body = `matched: ${result.matched}\n${pageText(result.snapshot)}`;
-        return { content: [{ type: 'text', text: result.matched ? withStep(body, result.step) : body }] };
+        return ok(result.matched ? withStep(body, result.step) : body);
       } catch (err) {
         return toolError(err);
       }
@@ -134,7 +136,7 @@ export async function startMcpServer(): Promise<void> {
       try {
         const saved = await saveSkill(parsed.data);
         const warnings = saved.warnings.length === 0 ? 'warnings: 0' : saved.warnings.map((warning) => `- ${warning}`).join('\n');
-        return { content: [{ type: 'text', text: `saved: ${saved.name} v${saved.version}\npath: ${saved.path}\n${warnings}\n\n${saved.yaml}` }] };
+        return ok(`saved: ${saved.name} v${saved.version}\npath: ${saved.path}\n${warnings}\n\n${saved.yaml}`);
       } catch (err) {
         return toolError(err);
       }
@@ -150,7 +152,7 @@ export async function startMcpServer(): Promise<void> {
       try {
         const skills = await listSkills();
         const text = skills.length === 0 ? 'no skills' : skills.map((skill) => `${skill.name} v${skill.version} ${skill.description}`).join('\n');
-        return { content: [{ type: 'text', text }] };
+        return ok(text);
       } catch (err) {
         return toolError(err);
       }
@@ -169,7 +171,7 @@ export async function startMcpServer(): Promise<void> {
     async ({ name, version }) => {
       try {
         const doc = await showSkill(name, version);
-        return { content: [{ type: 'text', text: doc.yaml }] };
+        return ok(doc.yaml);
       } catch (err) {
         return toolError(err);
       }
@@ -196,7 +198,30 @@ export async function startMcpServer(): Promise<void> {
       if (!parsed.success) return toolError(new Error(issuesText(parsed.error)));
       try {
         const report = await runSkill(args.name, parsed.data);
-        return { content: [{ type: 'text', text: formatRunReport(report.results) }] };
+        return ok(formatRunReport(report.results));
+      } catch (err) {
+        return toolError(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'browser_tabs',
+    {
+      description: 'List, select, close, or open tabs. list marks the active tab with *.',
+      inputSchema: {
+        action: z.enum(['list', 'select', 'close', 'new']),
+        index: z.number().int().positive().optional().describe('1-based tab index for select or close.'),
+        url: z.string().optional().describe('http(s) URL for new.'),
+      },
+    },
+    async (args) => {
+      const parsed = TabsCommandSchema.safeParse(args);
+      if (!parsed.success) return toolError(new Error(issuesText(parsed.error)));
+      try {
+        const result = await browserTabs(parsed.data);
+        if ('snapshot' in result) return ok(pageText(result.snapshot));
+        return ok(result.text);
       } catch (err) {
         return toolError(err);
       }
@@ -205,6 +230,10 @@ export async function startMcpServer(): Promise<void> {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
+}
+
+function ok(text: string): { content: [{ type: 'text'; text: string }] } {
+  return { content: [{ type: 'text', text: toolText(text) }] };
 }
 
 function pageText(snapshot: string): string {
@@ -216,9 +245,15 @@ function withStep(text: string, step?: number): string {
   return `${text}\n(step ${step})`;
 }
 
+function toolText(text: string): string {
+  const warning = daemonMismatchLine();
+  if (!warning || text.includes(warning)) return text;
+  return `${text}\n${warning}`;
+}
+
 function toolError(err: unknown): { isError: true; content: [{ type: 'text'; text: string }] } {
   return {
     isError: true,
-    content: [{ type: 'text', text: errorText(err) }],
+    content: [{ type: 'text', text: toolText(errorText(err)) }],
   };
 }

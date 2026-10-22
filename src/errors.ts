@@ -50,3 +50,7 @@ export function relayStatus(code: RelayErrorCode): 400 | 404 | 409 | 500 | 503 |
 export function browserDownloadingMessage(percent: number): string {
   return `Browser is downloading (${percent}%). Retry shortly, or run: relaywright browser install`;
 }
+
+export function staleTabRefMessage(ref: string): string {
+  return `The active tab changed. Ref ${ref} is from a previous tab. Take a new snapshot.`;
+}

@@ -1,11 +1,13 @@
+import type { Page } from 'puppeteer-core';
 import puppeteer, { type Browser } from 'puppeteer-core';
 import { resolveBrowserForLaunch, type ResolvedBrowser } from '../browser/resolve.js';
 import { defaultProfileDir, ensureHomeLayout, errorText, logDaemon } from '../config/paths.js';
-import { browserDownloadingMessage, RelayError } from '../errors.js';
-import type { ActInput, DaemonStatus, PageBody, WaitInput } from '../protocol.js';
+import { browserDownloadingMessage, RelayError, staleTabRefMessage } from '../errors.js';
+import { ensureTabHeader, switchBanner } from '../perception/snapshot.js';
+import type { ActInput, DaemonStatus, PageBody, TabsCommand, TabsList, WaitInput } from '../protocol.js';
 import { observedLines, TraceLog } from '../recorder/trace.js';
 import { valueForTrace } from '../recorder/redact.js';
-import type { TraceView } from '../recorder/types.js';
+import type { DescribedTarget, TraceView } from '../recorder/types.js';
 import { buildSkill } from '../skills/save.js';
 import type { MatrixResult, RunSkillInput, SaveSkillInput, SaveSkillResult, SkillDocument, SkillHistory, SkillSummary } from '../skills/schema.js';
 import { runMatrix } from '../skills/run.js';
@@ -16,7 +18,9 @@ import {
   skillHistory as storedSkillHistory,
   writeSkill as writeStoredSkill,
 } from '../skills/store.js';
-import { PageController } from './page.js';
+import { PageController, type ReplayPage } from './page.js';
+import { formatTabList, POPUP_GRACE_MS, TabSet } from './tabs.js';
+import { bounded } from './timeout.js';
 
 export type { PageBody };
 
@@ -41,6 +45,7 @@ export interface BrowserControl {
   snapshot(options?: { mode?: 'full' | 'diff'; maxRows?: number }): Promise<PageBody>;
   act(input: ActInput): Promise<PageBody>;
   waitFor(input: WaitInput): Promise<PageBody & { matched: boolean }>;
+  tabs(input: TabsCommand): Promise<TabsList | PageBody>;
   trace(): TraceView;
   clearTrace(): TraceView;
   saveSkill(input: SaveSkillInput): SaveSkillResult;
@@ -59,16 +64,18 @@ export interface BrowserSessionOptions {
 }
 
 const READY_WAIT_MS = 30_000;
+const TITLE_TIMEOUT_MS = 3_000;
 
 export class BrowserSession implements BrowserControl {
   private phase: BrowserPhase = { state: 'idle' };
   private attempt: Promise<void> | null = null;
   private browser: Browser | null = null;
-  private controller: PageController | null = null;
+  private tabSet: TabSet | null = null;
   private executablePath = '';
   private browserVersion = '';
   private closed = false;
   private replayDepth = 0;
+  private lastActionPage: Page | null = null;
   private readonly traceLog = new TraceLog();
   private readonly resolveExecutable: NonNullable<BrowserSessionOptions['resolveExecutable']>;
   private readonly launchBrowser: LaunchFn;
@@ -98,13 +105,13 @@ export class BrowserSession implements BrowserControl {
       uptime: Math.round(process.uptime() * 10) / 10,
       browser,
     };
-    if (!this.isReady()) return body;
+    if (!this.isReady() || !this.tabSet) return body;
     browser.executablePath = this.executablePath;
     browser.version = this.browserVersion;
     try {
-      const page = await this.currentPage();
-      if (!page) return body;
-      body.page = { url: page.url(), title: await page.title() };
+      const controller = await this.prepareController();
+      const title = await bounded(controller.pageHandle().title(), TITLE_TIMEOUT_MS, 'title').catch(() => '');
+      body.page = { url: controller.currentUrl(), title };
     } catch (err) {
       logDaemon(`status page read failed: ${errorText(err)}`);
     }
@@ -112,55 +119,113 @@ export class BrowserSession implements BrowserControl {
   }
 
   async navigate(url: string): Promise<PageBody> {
-    const controller = await this.controllerReady();
+    const controller = await this.prepareController();
     const urlBefore = controller.currentUrl();
-    const page = await controller.navigate(url);
-    return this.record(page, {
+    const actionPage = controller.pageHandle();
+    const page = await controller.navigate(url, this.tabset().tabHint());
+    const shown = this.present(page);
+    return this.record(shown, {
       action: 'goto',
       urlBefore,
-      urlAfter: page.url,
+      urlAfter: shown.url,
       value: url,
-      observed: observedLines(page.snapshot),
+      observed: observedLines(shown.snapshot),
+      tabUrl: this.noteTab(actionPage, urlBefore),
     });
   }
 
   async snapshot(options?: { mode?: 'full' | 'diff'; maxRows?: number }): Promise<PageBody> {
-    const controller = await this.controllerReady();
-    return controller.snapshot(options?.mode ?? 'full', options?.maxRows);
+    const controller = await this.prepareController();
+    const kind = this.tabset().peekSwitch();
+    const mode = options?.mode ?? 'full';
+    const body = await controller.snapshot(kind ? 'full' : mode, options?.maxRows, this.tabset().tabHint());
+    return this.present(body);
   }
 
   async act(input: ActInput): Promise<PageBody> {
-    const controller = await this.controllerReady();
+    const controller = await this.prepareController();
     const urlBefore = controller.currentUrl();
-    const described = input.ref ? await controller.describeRef(input.ref) : undefined;
-    const page = await controller.act(input);
-    return this.record(page, {
+    const actionPage = controller.pageHandle();
+    const described = input.ref ? await this.describe(controller, input.ref) : undefined;
+    const since = this.tabset().generation();
+    await controller.performInput(input);
+    const switched = await this.tabset().waitForPopup(since, actionPage, input.action === 'click' ? POPUP_GRACE_MS : 0);
+    const current = switched ? await this.tabset().current() : controller;
+    const kind = this.tabset().peekSwitch();
+    const body = await current.snapshot(kind || switched ? 'full' : 'diff', undefined, this.tabset().tabHint());
+    const shown = this.present(body);
+    return this.record(shown, {
       action: input.action,
       urlBefore,
-      urlAfter: page.url,
+      urlAfter: shown.url,
       target: described?.target,
       value: valueForTrace(input.action, input.value, described ? { ...described.target, sensitive: described.sensitive } : undefined),
       key: input.key,
-      observed: observedLines(page.snapshot),
+      observed: observedLines(shown.snapshot),
+      tabUrl: this.noteTab(actionPage, urlBefore),
     });
   }
 
   async waitFor(input: WaitInput): Promise<PageBody & { matched: boolean }> {
-    const controller = await this.controllerReady();
+    const controller = await this.prepareController();
     const urlBefore = controller.currentUrl();
-    const described = input.ref ? await controller.describeRef(input.ref) : undefined;
-    const result = await controller.waitFor(input);
-    if (!result.matched) return result;
-    return this.record(result, {
+    const actionPage = controller.pageHandle();
+    const described = input.ref ? await this.describe(controller, input.ref) : undefined;
+    const since = this.tabset().generation();
+    let result = await controller.waitFor(input);
+    const switched = await this.tabset().waitForPopup(since, actionPage, 0);
+    if (switched) {
+      const current = await this.tabset().current();
+      const body = await current.snapshot('full', undefined, this.tabset().tabHint());
+      result = { matched: result.matched, url: body.url, title: body.title, snapshot: body.snapshot };
+    }
+    const shown = this.present(result);
+    const withMatch = { ...shown, matched: result.matched };
+    if (!result.matched) return withMatch;
+    return this.record(withMatch, {
       action: 'wait',
       urlBefore,
-      urlAfter: result.url,
+      urlAfter: shown.url,
       target: described?.target,
       value: input.text,
       url: input.url,
       timeout_ms: input.timeoutMs,
-      observed: observedLines(result.snapshot),
+      observed: observedLines(shown.snapshot),
+      tabUrl: this.noteTab(actionPage, urlBefore),
     });
+  }
+
+  async tabs(input: TabsCommand): Promise<TabsList | PageBody> {
+    await this.ensureReady();
+    const tabs = this.tabset();
+    if (input.action === 'list') {
+      if (this.replayDepth > 0) await tabs.current();
+      else await tabs.prepare();
+      const described = await tabs.describe();
+      return { tabs: described, text: formatTabList(described) };
+    }
+    if (input.action === 'select') {
+      if (input.index === undefined) throw new RelayError('bad_request', 'index is required for select');
+      const controller = await tabs.select(input.index);
+      return this.present(await controller.snapshot('full', undefined, tabs.tabHint()));
+    }
+    if (input.action === 'new') {
+      const controller = await tabs.openBlank();
+      if (input.url) {
+        const body = await controller.navigate(parseHttpUrl(input.url), tabs.tabHint());
+        return this.present(body);
+      }
+      return this.present(await controller.snapshot('full', undefined, tabs.tabHint()));
+    }
+    await tabs.closeIndex(input.index);
+    const described = await tabs.describe();
+    return { tabs: described, text: formatTabList(described) };
+  }
+
+  async openPages(): Promise<Page[]> {
+    await this.ensureReady();
+    await this.tabset().reconcile();
+    return this.tabset().pages();
   }
 
   trace(): TraceView {
@@ -168,6 +233,7 @@ export class BrowserSession implements BrowserControl {
   }
 
   clearTrace(): TraceView {
+    this.lastActionPage = null;
     return this.traceLog.clear();
   }
 
@@ -200,26 +266,84 @@ export class BrowserSession implements BrowserControl {
   }
 
   async runSkill(name: string, input: RunSkillInput): Promise<MatrixResult> {
-    const controller = await this.controllerReady();
+    await this.ensureReady();
     const skill = readStoredSkill(name).skill;
-    // Replay uses the same page but must not append to the exploration trace.
     this.replayDepth += 1;
     try {
-      return await runMatrix(controller, skill, input);
+      return await runMatrix(this.replayPage(), skill, input);
     } finally {
       this.replayDepth -= 1;
+      this.tabSet?.consumeSwitch();
     }
   }
 
   async close(): Promise<void> {
     this.closed = true;
+    const tabs = this.tabSet;
+    this.tabSet = null;
+    if (tabs) await tabs.dispose().catch(() => undefined);
     const browser = this.browser;
     this.browser = null;
-    if (this.controller) {
-      await this.controller.dispose().catch(() => undefined);
-      this.controller = null;
-    }
     if (browser) await browser.close().catch(() => undefined);
+  }
+
+  private replayPage(): ReplayPage {
+    const session = this;
+    let current: PageController | null = null;
+    const use = async (): Promise<PageController> => {
+      current = await session.prepareController();
+      return current;
+    };
+    return {
+      navigate: async (url) => (await use()).navigate(url),
+      capture: async () => (await use()).capture(),
+      currentUrl: () => {
+        if (!current) throw new Error('Replay has not opened a page');
+        return current.currentUrl();
+      },
+      pageText: async () => (await use()).pageText(),
+      queryCss: async (css, frame) => (await use()).queryCss(css, frame),
+      performBackend: async (backend, input) => {
+        const page = await use();
+        const opener = page.pageHandle();
+        const since = session.tabset().generation();
+        await page.performBackend(backend, input);
+        await session.tabset().waitForPopup(since, opener, input.action === 'click' ? POPUP_GRACE_MS : 0);
+        current = await session.prepareController();
+      },
+      performInput: async (input) => {
+        const page = await use();
+        const opener = page.pageHandle();
+        const since = session.tabset().generation();
+        await page.performInput(input);
+        await session.tabset().waitForPopup(since, opener, input.action === 'click' ? POPUP_GRACE_MS : 0);
+        current = await session.prepareController();
+      },
+      waitFor: async (input) => (await use()).waitFor(input),
+      excerpt: async () => (await use()).excerpt(),
+    };
+  }
+
+  private present<T extends PageBody>(body: T): T {
+    const tabs = this.tabSet;
+    const kind = tabs?.consumeSwitch() ?? null;
+    let snapshot = ensureTabHeader(body.snapshot, tabs?.tabHint());
+    if (kind) snapshot = `${switchBanner(kind, body.title)}\n${snapshot}`;
+    return { ...body, snapshot };
+  }
+
+  private noteTab(page: Page, url: string): string | undefined {
+    const previous = this.lastActionPage;
+    this.lastActionPage = page;
+    if (!previous || previous === page) return undefined;
+    return url;
+  }
+
+  private async describe(controller: PageController, ref: string): Promise<DescribedTarget> {
+    if (!controller.hasRef(ref) && this.tabset().hasRefElsewhere(controller, ref)) {
+      throw new RelayError('stale_ref', staleTabRefMessage(ref));
+    }
+    return controller.describeRef(ref);
   }
 
   private record<T extends PageBody>(page: T, input: Parameters<TraceLog['append']>[0]): T {
@@ -228,14 +352,17 @@ export class BrowserSession implements BrowserControl {
     return { ...page, step: step.n };
   }
 
-  private async controllerReady(): Promise<PageController> {
+  private tabset(): TabSet {
+    const tabs = this.tabSet;
+    if (!tabs) throw new Error('Browser is not connected');
+    return tabs;
+  }
+
+  private async prepareController(): Promise<PageController> {
     await this.ensureReady();
-    if (this.controller) return this.controller;
-    const browser = this.browser;
-    if (!browser?.connected) throw new Error('Browser is not connected');
-    const page = await acquirePage(browser);
-    this.controller = await PageController.attach(page);
-    return this.controller;
+    const tabs = this.tabset();
+    if (this.replayDepth > 0) return tabs.current();
+    return tabs.prepare();
   }
 
   private async ensureReady(): Promise<void> {
@@ -288,14 +415,7 @@ export class BrowserSession implements BrowserControl {
   }
 
   private isReady(): boolean {
-    return this.phase.state === 'ready' && this.browser?.connected === true;
-  }
-
-  private async currentPage() {
-    const browser = this.browser;
-    if (!browser?.connected) return null;
-    const open = (await browser.pages()).filter((candidate) => !candidate.isClosed());
-    return open[0] ?? null;
+    return this.phase.state === 'ready' && this.browser?.connected === true && this.tabSet !== null;
   }
 
   private async launchAttempt(): Promise<void> {
@@ -320,23 +440,35 @@ export class BrowserSession implements BrowserControl {
         handleSIGTERM: false,
         handleSIGHUP: false,
         timeout: 45_000,
-        args: ['--no-first-run', '--no-default-browser-check', '--disable-sync'],
+        args: ['--no-first-run', '--no-default-browser-check', '--disable-sync', '--disable-popup-blocking'],
       });
       if (this.closed) {
         await browser.close().catch(() => undefined);
         return;
       }
+      this.browser = browser;
       browser.on('disconnected', () => {
         logDaemon('browser disconnected');
         if (this.browser === browser) {
           this.browser = null;
-          this.controller = null;
+          const open = this.tabSet;
+          this.tabSet = null;
+          void open?.dispose().catch(() => undefined);
           if (!this.closed && this.phase.state === 'ready') {
             this.phase = { state: 'error', message: 'Browser disconnected' };
           }
         }
       });
-      this.browser = browser;
+      const tabs = new TabSet(browser);
+      this.tabSet = tabs;
+      await tabs.start();
+      if (this.closed) {
+        await tabs.dispose().catch(() => undefined);
+        await browser.close().catch(() => undefined);
+        this.browser = null;
+        return;
+      }
+      this.tabSet = tabs;
       this.executablePath = resolved.path;
       this.browserVersion = await browser.version();
       this.phase = { state: 'ready' };
@@ -346,19 +478,27 @@ export class BrowserSession implements BrowserControl {
       const message = errorText(err);
       logDaemon(`browser launch failed: ${message}`);
       this.phase = { state: 'error', message };
+      const tabs = this.tabSet;
+      this.tabSet = null;
+      void tabs?.dispose().catch(() => undefined);
+      const browser = this.browser;
       this.browser = null;
-      this.controller = null;
+      if (browser) await browser.close().catch(() => undefined);
     }
   }
 }
 
-async function acquirePage(browser: Browser) {
-  const open = (await browser.pages()).filter((candidate) => !candidate.isClosed());
-  if (open.length === 0) return browser.newPage();
-  const [first, ...extra] = open;
-  if (!first) return browser.newPage();
-  await Promise.all(extra.map((candidate) => candidate.close().catch(() => undefined)));
-  return first;
+function parseHttpUrl(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new RelayError('bad_request', `Invalid URL: ${value}`);
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new RelayError('bad_request', `Only http and https URLs are supported, got ${url.protocol}`);
+  }
+  return url.toString();
 }
 
 function delay(ms: number): Promise<void> {

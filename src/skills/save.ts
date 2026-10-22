@@ -83,6 +83,7 @@ export function buildSkill(steps: readonly TraceStep[], input: {
       warnings.push(`${id} relies only on name`);
     }
     if (draft.drifted) warnings.push(`${id} runs after a navigation away from the start URL`);
+    if (draft.tabUrl) warnings.push(`${id} runs in tab ${draft.tabUrl}`);
     if (JSON.stringify(draft.step).includes('{{secret}}')) {
       warnings.push(`${id} types a secret; replay is refused until the vault exists (drop it with --from/--to)`);
     }
@@ -108,6 +109,7 @@ interface Draft {
   step: Record<string, unknown>;
   css?: { value: string; unique: boolean };
   drifted?: boolean;
+  tabUrl?: string;
 }
 
 function exampleParams(params: Record<string, string>): ExampleParam[] {
@@ -153,7 +155,7 @@ function expectDraft(check: CheckInput): Draft {
 function actionDraft(step: TraceStep, apply: (value: string) => string, drifted: boolean): Draft {
   const target = step.target ? toSkillTarget(step.target) : undefined;
   const css = step.target ? { value: step.target.css, unique: step.target.cssUnique } : undefined;
-  const base = { targetName: target?.name, css, drifted };
+  const base = { targetName: target?.name, css, drifted, tabUrl: step.tabUrl };
   switch (step.action) {
     case 'goto':
       return { action: 'goto', ...base, step: { goto: { url: apply(step.value || step.urlAfter) } } };

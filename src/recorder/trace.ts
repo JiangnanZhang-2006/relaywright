@@ -12,10 +12,15 @@ function createTraceId(): string {
   return `${Date.now()}-${serial}`;
 }
 
+const LEAD = /^\((?:navigated: full snapshot|switched to (?:new )?tab:.*)\)$/;
+
 export function observedLines(snapshot: string): string[] {
   const lines = snapshot.split('\n');
-  const body = lines[0] === '(navigated: full snapshot)' ? lines.slice(2) : lines.slice(1);
-  return body.slice(0, OBSERVED_CAP);
+  let index = 0;
+  while (index < lines.length && LEAD.test(lines[index] ?? '')) index += 1;
+  // The next line is the page header, whether or not a switch banner preceded it.
+  index += 1;
+  return lines.slice(index, index + OBSERVED_CAP);
 }
 
 export interface TraceAppend {
@@ -26,6 +31,7 @@ export interface TraceAppend {
   value?: string;
   key?: string;
   url?: string;
+  tabUrl?: string;
   timeout_ms?: number;
   observed: string[];
 }
@@ -62,6 +68,7 @@ export class TraceLog {
     if (input.value !== undefined) step.value = input.value;
     if (input.key !== undefined) step.key = input.key;
     if (input.url !== undefined) step.url = input.url;
+    if (input.tabUrl !== undefined) step.tabUrl = input.tabUrl;
     if (input.timeout_ms !== undefined) step.timeout_ms = input.timeout_ms;
     this.steps.push(step);
     mkdirSync(this.dir, { recursive: true });

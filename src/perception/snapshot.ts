@@ -98,10 +98,16 @@ export interface FrameInput {
   adaptedSelects?: readonly AdaptedSelect[];
 }
 
+export interface TabHint {
+  count: number;
+  active: number;
+}
+
 export interface SnapshotInput {
   title: string;
   url: string;
   nodes: readonly AxNode[];
+  tabs?: TabHint;
   passwordBackendNodeIds?: ReadonlySet<number>;
   maxLines?: number;
   maxRows?: number;
@@ -137,14 +143,30 @@ export function renderSnapshot(input: SnapshotInput): string {
 }
 
 export function renderSnapshotParts(input: SnapshotInput): RenderResult {
-  const header = pageHeader(input.title, input.url);
+  const header = pageHeader(input.title, input.url, input.tabs);
   const body = renderBody(input);
   const maxLines = input.maxLines ?? DEFAULT_MAX_SNAPSHOT_LINES;
   return { header, lines: body.lines, text: formatLines(header, body.lines, maxLines), items: body.items, tables: body.tables };
 }
 
-export function pageHeader(title: string, url: string): string {
-  return `page: ${compact(title)}  url: ${compact(url)}`;
+export function pageHeader(title: string, url: string, tabs?: TabHint): string {
+  return `page: ${compact(title)}  url: ${compact(url)}${tabSuffix(tabs)}`;
+}
+
+export function ensureTabHeader(snapshot: string, tabs?: TabHint): string {
+  const suffix = tabSuffix(tabs);
+  if (!suffix) return snapshot;
+  return snapshot.replace(/^(page:.*)$/m, (line) => (line.includes('  tabs:') ? line : `${line}${suffix}`));
+}
+
+export function switchBanner(kind: 'new' | 'user', title: string): string {
+  const label = kind === 'new' ? 'switched to new tab' : 'switched to tab';
+  return `(${label}: ${title})`;
+}
+
+function tabSuffix(tabs: TabHint | undefined): string {
+  if (!tabs || tabs.count < 2) return '';
+  return `  tabs: ${tabs.count} (active ${tabs.active})`;
 }
 
 export function formatLines(header: string, body: readonly string[], maxLines = DEFAULT_MAX_SNAPSHOT_LINES): string {

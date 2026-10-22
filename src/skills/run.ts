@@ -1,7 +1,7 @@
 import type { ActInput } from '../actions/perform.js';
 import { RelayError } from '../errors.js';
 import type { ModelItem } from '../perception/snapshot.js';
-import type { PageController } from '../session/page.js';
+import type { ReplayPage } from '../session/page.js';
 import { chooseLocator, type LocatorKind } from './locate.js';
 import {
   stepTarget,
@@ -46,7 +46,7 @@ export function summaryExitCode(results: readonly { outcome: string }[]): 0 | 30
   return results.some((result) => result.outcome === 'broken') ? 30 : 0;
 }
 
-export async function runMatrix(page: PageController, skill: Skill, input: RunSkillInput): Promise<MatrixResult> {
+export async function runMatrix(page: ReplayPage, skill: Skill, input: RunSkillInput): Promise<MatrixResult> {
   const combos = expandMatrix(input.matrix, input.params ?? {});
   for (const params of combos) bindSkill(skill, params);
   const results: SkillRunResult[] = [];
@@ -57,7 +57,7 @@ export async function runMatrix(page: PageController, skill: Skill, input: RunSk
 }
 
 export async function runSkill(
-  page: PageController,
+  page: ReplayPage,
   skill: Skill,
   params: Record<string, string>,
   options?: { startUrl?: string },
@@ -119,7 +119,7 @@ function shouldRun(step: SkillStep, outcome: Running): boolean {
   return outcome === 'undecided' || outcome === 'ok';
 }
 
-async function runStep(page: PageController, step: SkillStep): Promise<OneStep> {
+async function runStep(page: ReplayPage, step: SkillStep): Promise<OneStep> {
   try {
     if (step.goto) {
       await page.navigate(step.goto.url);
@@ -133,7 +133,7 @@ async function runStep(page: PageController, step: SkillStep): Promise<OneStep> 
   }
 }
 
-async function runAct(page: PageController, step: SkillStep): Promise<OneStep> {
+async function runAct(page: ReplayPage, step: SkillStep): Promise<OneStep> {
   const target = stepTarget(step);
   const optional = Boolean(step.press || step.scroll) && !target;
   let locator: LocatorKind | undefined;
@@ -165,7 +165,7 @@ async function runAct(page: PageController, step: SkillStep): Promise<OneStep> {
   return { status: 'done', locator };
 }
 
-async function runWait(page: PageController, step: SkillStep): Promise<OneStep> {
+async function runWait(page: ReplayPage, step: SkillStep): Promise<OneStep> {
   const wait = step.wait;
   if (!wait) return { status: 'done' };
   if (!wait.target) {
@@ -186,7 +186,7 @@ async function runWait(page: PageController, step: SkillStep): Promise<OneStep> 
   }
 }
 
-async function runExpect(page: PageController, step: SkillStep): Promise<OneStep> {
+async function runExpect(page: ReplayPage, step: SkillStep): Promise<OneStep> {
   const expect = step.expect;
   if (!expect) return { status: 'done' };
   const model = await page.capture();
@@ -199,12 +199,12 @@ async function runExpect(page: PageController, step: SkillStep): Promise<OneStep
   return { status: 'failed', broken: await report(page, step, 'expect_unmatched'), outcome: 'broken' };
 }
 
-async function locate(page: PageController, items: readonly ModelItem[], target: SkillTarget) {
+async function locate(page: ReplayPage, items: readonly ModelItem[], target: SkillTarget) {
   const cssBackends = target.css ? await page.queryCss(target.css, target.frame) : [];
   return chooseLocator(items, target, cssBackends);
 }
 
-async function report(page: PageController, step: SkillStep, reason: string): Promise<BrokenReport> {
+async function report(page: ReplayPage, step: SkillStep, reason: string): Promise<BrokenReport> {
   let excerpt = '';
   try {
     excerpt = await page.excerpt();

@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>教学管理信息服务平台</title>
+  <style>
+    body { font-family: sans-serif; margin: 16px; color: #222; }
+    h1 { font-size: 20px; margin: 0 0 12px; }
+    .top-nav { cursor: default; display: flex; gap: 8px; margin-bottom: 8px; background: #0b5cab; padding: 8px; }
+    .nav-item { cursor: pointer; padding: 6px 10px; color: #fff; }
+    #submenu { cursor: default; margin: 8px 0 0 12px; padding: 8px; background: #f7f7f7; border: 1px solid #ddd; }
+    #submenu a { display: block; margin: 4px 0; color: #0b5cab; }
+  </style>
+</head>
+<body>
+  <h1>教学管理信息服务平台</h1>
+  <div class="top-nav">
+    <div class="nav-item" id="nav-apply">报名申请</div>
+    <div class="nav-item" id="nav-query">信息查询</div>
+    <div class="nav-item" id="nav-eval">教学评价</div>
+  </div>
+  <div id="submenu" hidden>
+    <a id="link-timetable" href="javascript:void(0)" onclick="window.open('index.html?gnmkdm=N2151&amp;layout=default','_blank')">个人课表查询</a>
+    <a id="link-timetable-blank" target="_blank" href="index.html?gnmkdm=N2151">个人课表查询(新窗口)</a>
+  </div>
+  <script>
+    document.getElementById('nav-query').addEventListener('click', function () {
+      document.getElementById('submenu').hidden = false;
+    });
+  </script>
+</body>
+</html>

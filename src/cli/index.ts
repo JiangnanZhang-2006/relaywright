@@ -9,7 +9,9 @@ import { CheckSchema, type CheckInput } from '../skills/schema.js';
 import { z } from 'zod';
 import {
   act,
+  browserTabs,
   clearTrace,
+  daemonMismatchLine,
   type DaemonStatus,
   ensureDaemon,
   findHealthyDaemon,
@@ -17,7 +19,9 @@ import {
   getTrace,
   listSkills,
   navigate,
+  parseHttpUrl,
   readStatus,
+  restartDaemon,
   rollbackSkill,
   runSkill,
   saveSkill,
@@ -55,12 +59,16 @@ function fail(command: Command, err: unknown): never {
   } else {
     process.stderr.write(`Error: ${message}\n`);
   }
+  const warning = daemonMismatchLine();
+  if (warning && !message.includes(warning)) process.stderr.write(`${warning}\n`);
   process.exit(1);
 }
 
 async function guard(command: Command, fn: () => Promise<void>): Promise<void> {
   try {
     await fn();
+    const warning = daemonMismatchLine();
+    if (warning) process.stderr.write(`${warning}\n`);
   } catch (err) {
     fail(command, err);
   }
@@ -82,6 +90,10 @@ function statusText(status: DaemonStatus, port: number, version: string): string
   if (status.browser.message) lines.push(`browserError: ${status.browser.message}`);
   if (status.browser.executablePath) lines.push(`browser: ${status.browser.executablePath}`);
   if (status.browser.version) lines.push(`browserVersion: ${status.browser.version}`);
+  if (status.build) {
+    lines.push(`build: ${status.build.entry}`);
+    lines.push(`builtAt: ${status.build.builtAt}`);
+  }
   if (status.page) {
     lines.push(`page: ${status.page.title}`);
     lines.push(`url: ${status.page.url}`);
@@ -99,6 +111,8 @@ function statusJson(status: DaemonStatus, port: number, version: string, started
     uptime: status.uptime,
     browser: status.browser,
     page: status.page ?? null,
+    build: status.build ?? null,
+    mismatch: daemonMismatchLine() !== null,
   };
 }
 
@@ -176,6 +190,32 @@ Examples:
       return;
     }
     emit(command, 'daemon: stopped', { running: false, stopped: true });
+  });
+});
+
+addJson(
+  daemon
+    .command('restart')
+    .description('Stop the daemon and start it again. This closes the browser and its logins.')
+    .addHelpText(
+      'after',
+      `
+Closes the browser and drops its logins.
+Examples:
+  relaywright daemon restart
+  relaywright daemon restart --json
+`,
+    ),
+).action(function (this: Command) {
+  const command = this;
+  return guard(command, async () => {
+    const info = await restartDaemon();
+    await waitForBrowserReady(info);
+    const status = await readStatus(info);
+    emit(command, `daemon: restarted\n${statusText(status, info.port, info.version)}`, {
+      ...statusJson(status, info.port, info.version, info.startedAt),
+      restarted: true,
+    });
   });
 });
 
@@ -383,6 +423,95 @@ Examples:
     }
     const result = await waitFor({ text, ref, url, timeoutMs });
     emit(command, withStep(`matched: ${result.matched}\n${result.snapshot}`, result.step), result);
+  });
+});
+
+const tabs = program.command('tabs').description('List, select, close, or open browser tabs');
+addJson(tabs);
+
+addJson(
+  tabs
+    .command('list', { isDefault: true })
+    .description('List open tabs. The active tab is marked with *')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright tabs
+  relaywright tabs list --json
+`,
+    ),
+).action(function (this: Command) {
+  const command = this;
+  return guard(command, async () => {
+    const listed = await browserTabs({ action: 'list' });
+    if (!('text' in listed)) throw new Error('Expected a tab list');
+    emit(command, listed.text, listed);
+  });
+});
+
+addJson(
+  tabs
+    .command('select')
+    .description('Make a tab active and print its snapshot')
+    .argument('<index>', '1-based tab index', (value) => parseStepFlag('index', value))
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright tabs select 2
+`,
+    ),
+).action(function (this: Command, index: number) {
+  const command = this;
+  return guard(command, async () => {
+    const page = await browserTabs({ action: 'select', index });
+    if (!('snapshot' in page)) throw new Error('Expected a page snapshot');
+    emit(command, page.snapshot, page);
+  });
+});
+
+addJson(
+  tabs
+    .command('close')
+    .description('Close a tab. Omit the index to close the active tab')
+    .argument('[index]', '1-based tab index', (value) => parseStepFlag('index', value))
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright tabs close
+  relaywright tabs close 2
+`,
+    ),
+).action(function (this: Command, index?: number) {
+  const command = this;
+  return guard(command, async () => {
+    const listed = await browserTabs({ action: 'close', ...(index === undefined ? {} : { index }) });
+    if (!('text' in listed)) throw new Error('Expected a tab list');
+    emit(command, listed.text, listed);
+  });
+});
+
+addJson(
+  tabs
+    .command('new')
+    .description('Open a tab and print its snapshot')
+    .argument('[url]', 'absolute http(s) URL')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright tabs new
+  relaywright tabs new https://example.com
+`,
+    ),
+).action(function (this: Command, url?: string) {
+  const command = this;
+  return guard(command, async () => {
+    const page = await browserTabs({ action: 'new', ...(url ? { url: parseHttpUrl(url) } : {}) });
+    if (!('snapshot' in page)) throw new Error('Expected a page snapshot');
+    emit(command, page.snapshot, page);
   });
 });
 

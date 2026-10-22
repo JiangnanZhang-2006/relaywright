@@ -5,8 +5,9 @@ import { loadDocument } from '../perception/capture.js';
 import { BROWSER_HELPERS } from '../perception/inspect-script.js';
 import { diffLines } from '../perception/diff.js';
 import { RefRegistry } from '../perception/registry.js';
-import { formatLines, renderSnapshotParts, type ModelItem, type TableFact } from '../perception/snapshot.js';
+import { formatLines, renderSnapshotParts, type ModelItem, type TabHint, type TableFact } from '../perception/snapshot.js';
 import type { PageBody, WaitInput } from '../protocol.js';
+import { bounded, runPaint } from './timeout.js';
 import { describeBackend, findFrameId, queryCssBackends, type FrameNode } from '../recorder/dom.js';
 import { isSensitive } from '../recorder/redact.js';
 import type { DescribedTarget, FrameRef, TargetDescriptor } from '../recorder/types.js';
@@ -19,11 +20,25 @@ const NAV_DETECT_MS = 500;
 const LOAD_CAP_MS = 15_000;
 const IDLE_CAP_MS = 5_000;
 const IDLE_QUIET_MS = 500;
+const CALL_TIMEOUT_MS = 8_000;
+const EVAL_TIMEOUT_MS = 3_000;
 
 export interface PageModel {
   items: ModelItem[];
   tables: TableFact[];
   url: string;
+}
+
+export interface ReplayPage {
+  navigate(url: string): Promise<PageBody>;
+  capture(): Promise<PageModel>;
+  currentUrl(): string;
+  pageText(): Promise<string>;
+  queryCss(css: string, frame?: FrameRef): Promise<number[]>;
+  performBackend(backend: number, input: Omit<ActInput, 'ref'>): Promise<void>;
+  performInput(input: ActInput): Promise<void>;
+  waitFor(input: WaitInput): Promise<WaitBody>;
+  excerpt(): Promise<string>;
 }
 
 export class PageController {
@@ -41,11 +56,11 @@ export class PageController {
   ) {}
 
   static async attach(page: Page): Promise<PageController> {
-    const cdp = await page.createCDPSession();
+    const cdp = await bounded(page.createCDPSession(), CALL_TIMEOUT_MS, 'cdp');
     const controller = new PageController(page, cdp);
-    await cdp.send('Page.enable');
-    await cdp.send('DOM.enable').catch(() => undefined);
-    const { frameTree } = await cdp.send('Page.getFrameTree');
+    await bounded(cdp.send('Page.enable'), CALL_TIMEOUT_MS, 'Page.enable');
+    await bounded(cdp.send('DOM.enable'), CALL_TIMEOUT_MS, 'DOM.enable').catch(() => undefined);
+    const { frameTree } = await bounded(cdp.send('Page.getFrameTree'), CALL_TIMEOUT_MS, 'frame tree');
     controller.loaderId = frameTree.frame.loaderId;
     cdp.on('Page.frameNavigated', (event) => {
       // Same-document history updates use navigatedWithinDocument and keep the loader id.
@@ -69,16 +84,30 @@ export class PageController {
     await this.cdp.detach().catch(() => undefined);
   }
 
-  async navigate(url: string): Promise<PageBody> {
+  async navigate(url: string, tabs?: TabHint): Promise<PageBody> {
     await this.page.goto(url, { waitUntil: 'networkidle2', timeout: 30_000 });
-    return this.snapshot('full');
+    return this.snapshot('full', undefined, tabs);
   }
 
-  async snapshot(mode: 'full' | 'diff', maxRows?: number): Promise<PageBody> {
+  pageHandle(): Page {
+    return this.page;
+  }
+
+  hasRef(ref: string): boolean {
+    return this.registry.resolve(ref) !== undefined;
+  }
+
+  /** The next diff has no baseline, so it is returned as a full snapshot. */
+  forgetBaseline(): void {
+    this.baseline = null;
+    this.navigatedSinceBaseline = false;
+  }
+
+  async snapshot(mode: 'full' | 'diff', maxRows?: number, tabs?: TabHint): Promise<PageBody> {
     await this.paint();
-    const title = await this.page.title();
+    const title = await bounded(this.page.title(), EVAL_TIMEOUT_MS, 'title');
     const url = this.page.url();
-    const rendered = await this.render(title, url, maxRows);
+    const rendered = await this.render(title, url, maxRows, tabs);
     const previous = this.baseline;
     const navigated = previous !== null && this.navigatedSinceBaseline;
     this.baseline = rendered.lines;
@@ -109,7 +138,7 @@ export class PageController {
   async describeRef(ref: string): Promise<DescribedTarget> {
     const backend = this.resolveRef(ref);
     const item = this.model.items.find((entry) => entry.ref === ref) ?? this.model.items.find((entry) => entry.backend === backend);
-    const dom = await describeBackend(this.cdp, backend);
+    const dom = await bounded(describeBackend(this.cdp, backend), CALL_TIMEOUT_MS, 'describe element');
     if (!dom) throw new RelayError('stale_ref', `Ref ${ref} no longer matches an element. Take a new snapshot.`);
     const name = item?.name ?? '';
     const label = item?.label;
@@ -132,28 +161,29 @@ export class PageController {
   async capture(): Promise<PageModel> {
     await this.paint();
     const url = this.page.url();
-    const rendered = await this.render(await this.page.title(), url);
+    const rendered = await this.render(await bounded(this.page.title(), EVAL_TIMEOUT_MS, 'title'), url);
     this.baseline = rendered.lines;
     this.navigatedSinceBaseline = false;
     return { items: rendered.items, tables: rendered.tables, url };
   }
 
   async queryCss(css: string, frame?: FrameRef): Promise<number[]> {
-    const listed = await this.cdp.send('Page.getFrameTree');
-    const frameId = findFrameId(listed.frameTree as FrameNode, frame);
-    if (!frameId) return [];
-    return queryCssBackends(this.cdp, frameId, css);
+    return bounded(this.queryCssInner(css, frame), CALL_TIMEOUT_MS, 'query css');
   }
 
   async performInput(input: ActInput): Promise<void> {
     const before = this.loaderId;
-    await performAction(
-      {
-        page: this.page,
-        cdp: this.cdp,
-        resolve: (ref) => this.resolveRef(ref),
-      },
-      input,
+    await bounded(
+      performAction(
+        {
+          page: this.page,
+          cdp: this.cdp,
+          resolve: (ref) => this.resolveRef(ref),
+        },
+        input,
+      ),
+      CALL_TIMEOUT_MS,
+      'action',
     );
     await this.settle(before);
   }
@@ -181,8 +211,15 @@ export class PageController {
     return { matched, url: page.url, title: page.title, snapshot: page.snapshot };
   }
 
-  private async render(title: string, url: string, maxRows?: number) {
-    const loaded = await loadDocument(this.cdp);
+  private async queryCssInner(css: string, frame?: FrameRef): Promise<number[]> {
+    const listed = await this.cdp.send('Page.getFrameTree');
+    const frameId = findFrameId(listed.frameTree as FrameNode, frame);
+    if (!frameId) return [];
+    return queryCssBackends(this.cdp, frameId, css);
+  }
+
+  private async render(title: string, url: string, maxRows?: number, tabs?: TabHint) {
+    const loaded = await bounded(loadDocument(this.cdp), CALL_TIMEOUT_MS, 'snapshot');
     const rendered = renderSnapshotParts({
       title,
       url,
@@ -193,6 +230,7 @@ export class PageController {
       adaptedSelects: loaded.main.adaptedSelects,
       frames: loaded.frames,
       maxRows,
+      tabs,
       registry: this.registry,
     });
     this.model = { items: rendered.items, tables: rendered.tables };
@@ -217,12 +255,13 @@ export class PageController {
   private async matches(input: WaitInput): Promise<boolean> {
     if (input.url && !this.page.url().includes(input.url)) return false;
     if (input.text) {
-      const text = await readPageText(this.page);
+      const text = await readPageText(this.page).catch(() => '');
       if (!text.includes(input.text)) return false;
     }
     if (input.ref) {
       const backend = this.resolveRef(input.ref);
-      if (!(await this.refVisible(backend))) return false;
+      const visible = await bounded(this.refVisible(backend), EVAL_TIMEOUT_MS, 'ref').catch(() => false);
+      if (!visible) return false;
     }
     return true;
   }
@@ -273,12 +312,14 @@ export class PageController {
 
   private async waitForLoad(timeoutMs: number): Promise<void> {
     if (timeoutMs <= 0) return;
-    const ready = await this.page
-      .evaluate(() => {
+    const ready = await bounded(
+      this.page.evaluate(() => {
         const doc = (globalThis as unknown as { document?: { readyState?: string } }).document;
         return doc?.readyState ?? 'complete';
-      })
-      .catch(() => 'complete');
+      }),
+      EVAL_TIMEOUT_MS,
+      'readyState',
+    ).catch(() => 'complete');
     if (ready === 'complete') return;
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
@@ -295,20 +336,13 @@ export class PageController {
 
   private async paint(): Promise<void> {
     if (this.disposed) return;
-    await this.page
-      .evaluate(
-        () =>
-          new Promise<void>((resolve) => {
-            const view = globalThis as unknown as { requestAnimationFrame: (cb: () => void) => void };
-            view.requestAnimationFrame(() => view.requestAnimationFrame(() => resolve()));
-          }),
-      )
-      .catch(() => undefined);
+    // requestAnimationFrame does not run in a hidden tab, so this must be raced.
+    await runPaint((fn) => this.page.evaluate(fn));
   }
 }
 
 async function readPageText(page: Page): Promise<string> {
-  return page.evaluate(() => {
+  return bounded(page.evaluate(() => {
     const parts: string[] = [];
     const visit = (view: {
       document?: {
@@ -331,7 +365,7 @@ async function readPageText(page: Page): Promise<string> {
     };
     visit(globalThis as unknown as { document?: { body?: { innerText?: string }; querySelectorAll: (selector: string) => Iterable<{ contentWindow?: unknown }> } });
     return parts.join('\n');
-  });
+  }), EVAL_TIMEOUT_MS, 'page text');
 }
 
 function delay(ms: number): Promise<void> {

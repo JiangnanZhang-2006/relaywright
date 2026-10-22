@@ -35,6 +35,7 @@ function control(partial: Partial<BrowserControl> & Pick<BrowserControl, 'browse
       throw new RelayError('skill_not_found', 'not used');
     },
     runSkill: fail,
+    tabs: async () => ({ tabs: [], text: '' }),
     ...partial,
   };
 }

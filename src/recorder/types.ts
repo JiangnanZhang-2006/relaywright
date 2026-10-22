@@ -36,6 +36,8 @@ export const TraceStepSchema = z.object({
   key: z.string().optional(),
   /** Wait condition URL. Not the page URL. */
   url: z.string().optional(),
+  /** Set when this step ran in a different tab than the previous step. */
+  tabUrl: z.string().optional(),
   timeout_ms: z.number().int().positive().optional(),
   observed: z.array(z.string()),
 });

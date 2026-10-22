@@ -11,6 +11,7 @@ import {
 import { listen, createApp, type ListeningServer } from './server.js';
 import { BrowserSession } from '../session/browser.js';
 import { daemonJsonPath, ensureHomeLayout, errorText, logDaemon, packageVersion } from '../config/paths.js';
+import { readBuildFingerprint } from './build.js';
 
 let ownsRuntime = false;
 let shuttingDown = false;
@@ -78,12 +79,14 @@ async function main(): Promise<void> {
   }
 
   const token = createDaemonToken();
+  const build = readBuildFingerprint();
   // Listen and publish daemon.json before the browser launches. A Chrome for Testing
   // download can take longer than the client's health timeout.
   http = await listen(
     createApp({
       token,
       session,
+      build,
       onShutdown: () => {
         void shutdown('http');
       },
@@ -95,6 +98,7 @@ async function main(): Promise<void> {
     token,
     startedAt: new Date().toISOString(),
     version: packageVersion(),
+    build,
   });
   logDaemon(`ready port=${http.port}`);
   session.warmUp();

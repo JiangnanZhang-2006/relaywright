@@ -5,7 +5,7 @@ import type { Server } from 'node:http';
 import { z } from 'zod';
 import { errorText, logDaemon, packageVersion } from '../config/paths.js';
 import { RelayError, relayStatus, type RelayErrorCode } from '../errors.js';
-import { ActSchema, issuesText, SnapshotQuery, WaitSchema } from '../protocol.js';
+import { ActSchema, issuesText, SnapshotQuery, TabsCommandSchema, WaitSchema } from '../protocol.js';
 import type { BrowserControl } from '../session/browser.js';
 import { RunSkillInputSchema, SaveSkillInputSchema } from '../skills/schema.js';
 
@@ -21,6 +21,7 @@ export interface AppOptions {
   token: string;
   session: BrowserControl;
   onShutdown: () => void;
+  build?: { entry: string; builtAt: string };
 }
 
 export function createApp(options: AppOptions): Hono {
@@ -47,12 +48,14 @@ export function createApp(options: AppOptions): Hono {
       pid: process.pid,
       version: packageVersion(),
       browser: options.session.browserState(),
+      ...(options.build ? { build: options.build } : {}),
     }),
   );
 
   app.get('/status', async (c) => {
     try {
-      return c.json(await options.session.status());
+      const status = await options.session.status();
+      return c.json(options.build ? { ...status, build: options.build } : status);
     } catch (err) {
       return browserError(c, err);
     }
@@ -97,6 +100,24 @@ export function createApp(options: AppOptions): Hono {
       const body = WaitSchema.safeParse(await readJson(c));
       if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
       return c.json(await options.session.waitFor(body.data));
+    } catch (err) {
+      return browserError(c, err);
+    }
+  });
+
+  app.get('/tabs', async (c) => {
+    try {
+      return c.json(await options.session.tabs({ action: 'list' }));
+    } catch (err) {
+      return browserError(c, err);
+    }
+  });
+
+  app.post('/tabs', async (c) => {
+    try {
+      const body = TabsCommandSchema.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return c.json(await options.session.tabs(body.data));
     } catch (err) {
       return browserError(c, err);
     }

@@ -2,6 +2,11 @@ import { z } from 'zod';
 
 export const BrowserStateName = z.enum(['idle', 'resolving', 'downloading', 'launching', 'ready', 'error']);
 
+export const BuildFingerprintSchema = z.object({
+  entry: z.string().min(1),
+  builtAt: z.string().min(1),
+});
+
 export const StatusSchema = z.object({
   pid: z.number(),
   uptime: z.number(),
@@ -18,6 +23,7 @@ export const StatusSchema = z.object({
       title: z.string(),
     })
     .optional(),
+  build: BuildFingerprintSchema.optional(),
 });
 
 export type DaemonStatus = z.infer<typeof StatusSchema>;
@@ -80,6 +86,39 @@ export const WaitSchema = z
   });
 
 export type WaitInput = z.infer<typeof WaitSchema>;
+
+export const TabInfoSchema = z.object({
+  index: z.number().int().positive(),
+  title: z.string(),
+  url: z.string(),
+  active: z.boolean(),
+});
+
+export type TabInfo = z.infer<typeof TabInfoSchema>;
+
+export const TabsListSchema = z.object({
+  tabs: z.array(TabInfoSchema),
+  text: z.string(),
+});
+
+export type TabsList = z.infer<typeof TabsListSchema>;
+
+export const TabsCommandSchema = z
+  .object({
+    action: z.enum(['list', 'select', 'close', 'new']),
+    index: z.number().int().positive().optional(),
+    url: z.string().min(1).optional(),
+  })
+  .superRefine((input, ctx) => {
+    if (input.action === 'select' && input.index === undefined) {
+      ctx.addIssue({ code: 'custom', message: 'index is required for select', path: ['index'] });
+    }
+    if (input.url !== undefined && input.action !== 'new') {
+      ctx.addIssue({ code: 'custom', message: 'url is only valid for new', path: ['url'] });
+    }
+  });
+
+export type TabsCommand = z.infer<typeof TabsCommandSchema>;
 
 export function issuesText(error: { issues: { message: string }[] }): string {
   return error.issues.map((issue) => issue.message).join('; ');
