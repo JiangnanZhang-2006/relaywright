@@ -85,7 +85,9 @@ export class PageController {
   }
 
   async navigate(url: string, tabs?: TabHint): Promise<PageBody> {
-    await this.page.goto(url, { waitUntil: 'networkidle2', timeout: 30_000 });
+    // Login pages long-poll (QR codes), so network idle may never come; settle has its own cap.
+    await this.page.goto(url, { waitUntil: 'load', timeout: 30_000 });
+    await this.settle(this.loaderId);
     return this.snapshot('full', undefined, tabs);
   }
 

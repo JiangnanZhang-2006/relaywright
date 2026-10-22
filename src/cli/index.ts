@@ -52,7 +52,8 @@ function withStep(text: string, step?: number): string {
   return `${text}\n(step ${step})`;
 }
 
-function fail(command: Command, err: unknown): never {
+// Exit by exitCode, never process.exit(): on Windows, exiting while fetch sockets close trips a libuv assertion.
+function fail(command: Command, err: unknown): void {
   const message = errorText(err);
   if (wantsJson(command)) {
     process.stdout.write(`${JSON.stringify({ ok: false, error: { message } }, null, 2)}\n`);
@@ -61,7 +62,7 @@ function fail(command: Command, err: unknown): never {
   }
   const warning = daemonMismatchLine();
   if (warning && !message.includes(warning)) process.stderr.write(`${warning}\n`);
-  process.exit(1);
+  process.exitCode = 1;
 }
 
 async function guard(command: Command, fn: () => Promise<void>): Promise<void> {
@@ -312,7 +313,7 @@ Examples:
     .then(({ startMcpServer }) => startMcpServer())
     .catch((err: unknown) => {
       process.stderr.write(`Error: ${errorText(err)}\n`);
-      process.exit(1);
+      process.exitCode = 1;
     });
 });
 
@@ -675,7 +676,7 @@ Examples:
       ...(startUrl ? { startUrl } : {}),
     });
     emit(command, formatRunReport(report.results), report);
-    if (report.exit_code !== 0) process.exit(report.exit_code);
+    if (report.exit_code !== 0) process.exitCode = report.exit_code;
   });
 });
 
@@ -775,5 +776,5 @@ function readChecks(path: string): CheckInput[] {
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   process.stderr.write(`Error: ${errorText(err)}\n`);
-  process.exit(1);
+  process.exitCode = 1;
 });
