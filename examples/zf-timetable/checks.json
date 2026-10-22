@@ -1,0 +1,9 @@
+[
+  {
+    "after_step": 4,
+    "any": [
+      { "outcome": "empty", "when": { "text_present": "该学年学期尚无您的课表" }, "message": "{{year}} 第 {{term}} 学期尚未排课" },
+      { "outcome": "ok", "when": { "text_present": "{{year}}学年第{{term}}学期", "table_rows_min": 1 } }
+    ]
+  }
+]

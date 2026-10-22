@@ -1,0 +1,44 @@
+name: zf-timetable
+description: 查询指定学年学期的个人课表
+version: 1
+start_url: https://jwxt.wzu.edu.cn/jwglxt/kbcx/xskbcx_cxXskbcxIndex.html?gnmkdm=N2151&layout=default
+params:
+  year:
+    type: string
+    example: 2025-2026
+  term:
+    type: string
+    example: "1"
+steps:
+  - id: s1-select-学年
+    select:
+      target:
+        role: combobox
+        name: 学年
+        css: "#xnm"
+      value: "{{year}}"
+  - id: s2-select-学期
+    select:
+      target:
+        role: combobox
+        name: 学期
+        css: "#xqm"
+      value: "{{term}}"
+  - id: s3-click-查询
+    click:
+      target:
+        role: button
+        name:  查询
+        css: "#search_go"
+        text: 查询
+  - id: s4-expect
+    expect:
+      any:
+        - outcome: empty
+          when:
+            text_present: 该学年学期尚无您的课表
+          message: "{{year}} 第 {{term}} 学期尚未排课"
+        - outcome: ok
+          when:
+            text_present: "{{year}}学年第{{term}}学期"
+            table_rows_min: 1
