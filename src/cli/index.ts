@@ -1,16 +1,28 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import { installChromeForTesting, whichBrowser } from '../browser/resolve.js';
-import { errorText, packageVersion } from '../config/paths.js';
+import { errorText, packageVersion, readTextFile } from '../config/paths.js';
 import { normalizeActArgs } from './act-args.js';
+import { issuesText } from '../protocol.js';
+import { formatRunReport, formatSkillList, formatTrace } from '../skills/format.js';
+import { CheckSchema, type CheckInput } from '../skills/schema.js';
+import { z } from 'zod';
 import {
   act,
+  clearTrace,
   type DaemonStatus,
   ensureDaemon,
   findHealthyDaemon,
   getSnapshot,
+  getTrace,
+  listSkills,
   navigate,
   readStatus,
+  rollbackSkill,
+  runSkill,
+  saveSkill,
+  showSkill,
+  skillHistory,
   stopDaemon,
   waitFor,
   waitForBrowserReady,
@@ -29,6 +41,11 @@ function emit(command: Command, text: string, json: unknown): void {
     return;
   }
   process.stdout.write(text.endsWith('\n') ? text : `${text}\n`);
+}
+
+function withStep(text: string, step?: number): string {
+  if (!step) return text;
+  return `${text}\n(step ${step})`;
 }
 
 function fail(command: Command, err: unknown): never {
@@ -90,6 +107,8 @@ program
   .name('relaywright')
   .description('Control one shared Chromium through a local daemon, from the CLI or an MCP client.')
   .version(packageVersion())
+  // Options after a subcommand belong to that subcommand, so `skill show --version 1` is not the root version flag.
+  .enablePositionalOptions()
   .showHelpAfterError();
 addJson(program);
 program.addHelpText(
@@ -274,7 +293,7 @@ Examples:
   const command = this;
   return guard(command, async () => {
     const page = await navigate(url);
-    emit(command, page.snapshot, page);
+    emit(command, withStep(page.snapshot, page.step), page);
   });
 });
 
@@ -331,7 +350,7 @@ Examples:
     const key = command.getOptionValue('key') as string | undefined;
     const input = normalizeActArgs(action, ref, value, key);
     const page = await act(input);
-    emit(command, page.snapshot, page);
+    emit(command, withStep(page.snapshot, page.step), page);
   });
 });
 
@@ -363,9 +382,267 @@ Examples:
       throw new Error('--timeout must be an integer from 1 to 60000');
     }
     const result = await waitFor({ text, ref, url, timeoutMs });
-    emit(command, `matched: ${result.matched}\n${result.snapshot}`, result);
+    emit(command, withStep(`matched: ${result.matched}\n${result.snapshot}`, result.step), result);
   });
 });
+
+const trace = program.command('trace').description('Show or clear the exploration trace for the shared page');
+addJson(trace);
+
+addJson(
+  trace
+    .command('show')
+    .description('Print the current trace')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright trace show
+  relaywright trace show --json
+`,
+    ),
+).action(function (this: Command) {
+  const command = this;
+  return guard(command, async () => {
+    const current = await getTrace();
+    emit(command, formatTrace(current), current);
+  });
+});
+
+addJson(
+  trace
+    .command('clear')
+    .description('Start a new trace. The previous trace file is kept.')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright trace clear
+`,
+    ),
+).action(function (this: Command) {
+  const command = this;
+  return guard(command, async () => {
+    const current = await clearTrace();
+    emit(command, `trace: ${current.id}\nsteps: 0`, current);
+  });
+});
+
+const skill = program.command('skill').description('Save and replay deterministic browser skills');
+addJson(skill);
+
+addJson(
+  skill
+    .command('list')
+    .description('List saved skills')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright skill list
+  relaywright skill list --json
+`,
+    ),
+).action(function (this: Command) {
+  const command = this;
+  return guard(command, async () => {
+    const skills = await listSkills();
+    emit(command, formatSkillList(skills), { skills });
+  });
+});
+
+addJson(
+  skill
+    .command('show')
+    .description('Print a skill YAML file')
+    .argument('<name>', 'skill name')
+    .option('--version <n>', 'read a saved version instead of the current skill', (value) => parseStepFlag('--version', value))
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright skill show zf-timetable
+  relaywright skill show zf-timetable --version 1
+`,
+    ),
+).action(function (this: Command, name: string) {
+  const command = this;
+  return guard(command, async () => {
+    const version = command.getOptionValue('version') as number | undefined;
+    const doc = await showSkill(name, version);
+    emit(command, doc.yaml, doc);
+  });
+});
+
+addJson(
+  skill
+    .command('history')
+    .description('List saved versions of a skill')
+    .argument('<name>', 'skill name')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright skill history zf-timetable
+`,
+    ),
+).action(function (this: Command, name: string) {
+  const command = this;
+  return guard(command, async () => {
+    const history = await skillHistory(name);
+    const lines = [`${history.name}`, `current: ${history.current}`, ...history.versions.map((version) => `v${version}`)];
+    emit(command, lines.join('\n'), history);
+  });
+});
+
+addJson(
+  skill
+    .command('rollback')
+    .description('Make an older saved version the current skill')
+    .argument('<name>', 'skill name')
+    .requiredOption('--to <version>', 'version number to restore', (value) => parseStepFlag('--to', value))
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright skill rollback zf-timetable --to 1
+`,
+    ),
+).action(function (this: Command, name: string) {
+  const command = this;
+  return guard(command, async () => {
+    const to = command.getOptionValue('to') as number;
+    const doc = await rollbackSkill(name, to);
+    emit(command, `rolled back ${doc.name} to v${doc.version}`, doc);
+  });
+});
+
+addJson(
+  skill
+    .command('run')
+    .description('Replay a skill. Exit 30 when any parameter combination is broken.')
+    .argument('<name>', 'skill name')
+    .option('--param <pair>', 'fixed parameter key=value (repeatable)', collect, [])
+    .option('--matrix <pair>', 'parameter axis key=v1,v2 (repeatable)', collect, [])
+    .option('--start-url <url>', 'open this URL instead of the skill start_url')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright skill run zf-timetable --param year=2025-2026 --param term=2
+  relaywright skill run zf-timetable --matrix year=2025-2026,2026-2027 --matrix term=1,2
+  relaywright skill run zf-timetable --start-url http://127.0.0.1:8765/zf-mock/v2/ --param year=2025-2026 --param term=2
+`,
+    ),
+).action(function (this: Command, name: string) {
+  const command = this;
+  return guard(command, async () => {
+    const params = pairs(command.getOptionValue('param') as string[], '--param year=2025-2026');
+    const matrix = matrixPairs(command.getOptionValue('matrix') as string[]);
+    const startUrl = command.getOptionValue('startUrl') as string | undefined;
+    const report = await runSkill(name, {
+      ...(Object.keys(params).length > 0 ? { params } : {}),
+      ...(Object.keys(matrix).length > 0 ? { matrix } : {}),
+      ...(startUrl ? { startUrl } : {}),
+    });
+    emit(command, formatRunReport(report.results), report);
+    if (report.exit_code !== 0) process.exit(report.exit_code);
+  });
+});
+
+addJson(
+  skill
+    .command('save')
+    .description('Save the current trace as a skill')
+    .argument('<name>', 'skill name')
+    .requiredOption('--description <text>', 'what the skill does')
+    .option('--param <pair>', 'parameter example key=value from the trace (repeatable)', collect, [])
+    .option('--from <n>', 'first trace step to keep', (value) => parseStepFlag('--from', value))
+    .option('--to <n>', 'last trace step to keep', (value) => parseStepFlag('--to', value))
+    .option('--check-file <path>', 'JSON file of expect checks')
+    .option('--overwrite', 'replace an existing skill and keep the previous version')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright skill save zf-timetable --description "查询指定学年学期的个人课表" --param year=2025-2026 --param term=2
+  relaywright skill save zf-timetable --description "查询课表" --param year=2025-2026 --check-file checks.json --overwrite
+`,
+    ),
+).action(function (this: Command, name: string) {
+  const command = this;
+  return guard(command, async () => {
+    const description = command.getOptionValue('description') as string;
+    const params = pairs(command.getOptionValue('param') as string[], '--param year=2025-2026');
+    const from = command.getOptionValue('from') as number | undefined;
+    const to = command.getOptionValue('to') as number | undefined;
+    const checkFile = command.getOptionValue('checkFile') as string | undefined;
+    const overwrite = command.getOptionValue('overwrite') === true;
+    const checks = checkFile ? readChecks(checkFile) : undefined;
+    const saved = await saveSkill({
+      name,
+      description,
+      params,
+      ...(from !== undefined ? { from_step: from } : {}),
+      ...(to !== undefined ? { to_step: to } : {}),
+      ...(checks ? { checks } : {}),
+      ...(overwrite ? { overwrite: true } : {}),
+    });
+    const warningText = saved.warnings.length === 0 ? 'warnings: 0' : `warnings:\n${saved.warnings.map((warning) => `- ${warning}`).join('\n')}`;
+    emit(command, `saved: ${saved.name} v${saved.version}\npath: ${saved.path}\n${warningText}\n\n${saved.yaml}`, saved);
+  });
+});
+
+function collect(value: string, previous: string[] = []): string[] {
+  return [...previous, value];
+}
+
+function parseStepFlag(flag: string, value: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) throw new Error(`${flag} must be a positive integer`);
+  return parsed;
+}
+
+function pairs(values: string[], example: string): Record<string, string> {
+  const params: Record<string, string> = {};
+  for (const raw of values) {
+    const index = raw.indexOf('=');
+    if (index <= 0) throw new Error(`Expected key=value, got ${JSON.stringify(raw)}\nExample: ${example}`);
+    params[raw.slice(0, index)] = raw.slice(index + 1);
+  }
+  return params;
+}
+
+function matrixPairs(values: string[]): Record<string, string[]> {
+  const matrix: Record<string, string[]> = {};
+  for (const raw of values) {
+    const index = raw.indexOf('=');
+    if (index <= 0) {
+      throw new Error(`Expected key=v1,v2, got ${JSON.stringify(raw)}\nExample: --matrix term=1,2`);
+    }
+    const key = raw.slice(0, index);
+    const items = raw
+      .slice(index + 1)
+      .split(',')
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+    if (items.length === 0) throw new Error(`matrix ${key} has no values`);
+    matrix[key] = items;
+  }
+  return matrix;
+}
+
+function readChecks(path: string): CheckInput[] {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readTextFile(path));
+  } catch (err) {
+    throw new Error(`Could not read checks file: ${errorText(err)}`);
+  }
+  const parsed = z.array(CheckSchema).safeParse(raw);
+  if (!parsed.success) throw new Error(issuesText(parsed.error));
+  return parsed.data;
+}
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   process.stderr.write(`Error: ${errorText(err)}\n`);

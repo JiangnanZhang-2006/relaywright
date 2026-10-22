@@ -7,6 +7,21 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { daemonJsonPath, daemonLockPath, daemonLogPath, ensureHomeLayout, errorText, logDaemon, relaywrightHome } from '../config/paths.js';
 import { PageSchema, StatusSchema, WaitResultSchema, type DaemonStatus, type PageBody, type WaitBody } from '../protocol.js';
+import {
+  MatrixResultSchema,
+  SaveResultSchema,
+  SkillDocumentSchema,
+  SkillHistorySchema,
+  SkillListSchema,
+  type MatrixResult,
+  type RunSkillInput,
+  type SaveSkillInput,
+  type SaveSkillResult,
+  type SkillDocument,
+  type SkillHistory,
+  type SkillSummary,
+} from '../skills/schema.js';
+import { TraceViewSchema, type TraceView } from '../recorder/types.js';
 
 const START_TIMEOUT_MS = 20_000;
 const POLL_MS = 200;
@@ -225,6 +240,57 @@ export async function waitFor(input: { text?: string; ref?: string; url?: string
       method: 'POST',
       body: input,
       timeoutMs: Math.min(90_000, timeoutMs + 20_000),
+    }),
+  );
+}
+
+const SKILL_RUN_TIMEOUT_MS = 10 * 60_000;
+
+export async function getTrace(): Promise<TraceView> {
+  const info = await ensureDaemon();
+  return TraceViewSchema.parse(await authorized(info, '/trace'));
+}
+
+export async function clearTrace(): Promise<TraceView> {
+  const info = await ensureDaemon();
+  return TraceViewSchema.parse(await authorized(info, '/trace/clear', { method: 'POST', body: {} }));
+}
+
+export async function saveSkill(input: SaveSkillInput): Promise<SaveSkillResult> {
+  const info = await ensureDaemon();
+  return SaveResultSchema.parse(await authorized(info, '/skills/save', { method: 'POST', body: input, timeoutMs: 30_000 }));
+}
+
+export async function listSkills(): Promise<SkillSummary[]> {
+  const info = await ensureDaemon();
+  return SkillListSchema.parse(await authorized(info, '/skills')).skills;
+}
+
+export async function showSkill(name: string, version?: number): Promise<SkillDocument> {
+  const info = await ensureDaemon();
+  const query = version === undefined ? '' : `?version=${version}`;
+  return SkillDocumentSchema.parse(await authorized(info, `/skills/${encodeURIComponent(name)}${query}`));
+}
+
+export async function skillHistory(name: string): Promise<SkillHistory> {
+  const info = await ensureDaemon();
+  return SkillHistorySchema.parse(await authorized(info, `/skills/${encodeURIComponent(name)}/history`));
+}
+
+export async function rollbackSkill(name: string, to: number): Promise<SkillDocument> {
+  const info = await ensureDaemon();
+  return SkillDocumentSchema.parse(
+    await authorized(info, `/skills/${encodeURIComponent(name)}/rollback`, { method: 'POST', body: { to } }),
+  );
+}
+
+export async function runSkill(name: string, input: RunSkillInput): Promise<MatrixResult> {
+  const info = await ensureDaemon();
+  return MatrixResultSchema.parse(
+    await authorized(info, `/skills/${encodeURIComponent(name)}/run`, {
+      method: 'POST',
+      body: input,
+      timeoutMs: SKILL_RUN_TIMEOUT_MS,
     }),
   );
 }

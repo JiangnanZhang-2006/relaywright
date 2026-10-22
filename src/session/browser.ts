@@ -3,6 +3,19 @@ import { resolveBrowserForLaunch, type ResolvedBrowser } from '../browser/resolv
 import { defaultProfileDir, ensureHomeLayout, errorText, logDaemon } from '../config/paths.js';
 import { browserDownloadingMessage, RelayError } from '../errors.js';
 import type { ActInput, DaemonStatus, PageBody, WaitInput } from '../protocol.js';
+import { observedLines, TraceLog } from '../recorder/trace.js';
+import { valueForTrace } from '../recorder/redact.js';
+import type { TraceView } from '../recorder/types.js';
+import { buildSkill } from '../skills/save.js';
+import type { MatrixResult, RunSkillInput, SaveSkillInput, SaveSkillResult, SkillDocument, SkillHistory, SkillSummary } from '../skills/schema.js';
+import { runMatrix } from '../skills/run.js';
+import {
+  listSkills as listStoredSkills,
+  readSkill as readStoredSkill,
+  rollbackSkill as rollbackStoredSkill,
+  skillHistory as storedSkillHistory,
+  writeSkill as writeStoredSkill,
+} from '../skills/store.js';
 import { PageController } from './page.js';
 
 export type { PageBody };
@@ -28,6 +41,14 @@ export interface BrowserControl {
   snapshot(options?: { mode?: 'full' | 'diff'; maxRows?: number }): Promise<PageBody>;
   act(input: ActInput): Promise<PageBody>;
   waitFor(input: WaitInput): Promise<PageBody & { matched: boolean }>;
+  trace(): TraceView;
+  clearTrace(): TraceView;
+  saveSkill(input: SaveSkillInput): SaveSkillResult;
+  listSkills(): SkillSummary[];
+  readSkill(name: string, version?: number): SkillDocument;
+  skillHistory(name: string): SkillHistory;
+  rollbackSkill(name: string, to: number): SkillDocument;
+  runSkill(name: string, input: RunSkillInput): Promise<MatrixResult>;
 }
 
 type LaunchFn = typeof puppeteer.launch;
@@ -47,6 +68,8 @@ export class BrowserSession implements BrowserControl {
   private executablePath = '';
   private browserVersion = '';
   private closed = false;
+  private replayDepth = 0;
+  private readonly traceLog = new TraceLog();
   private readonly resolveExecutable: NonNullable<BrowserSessionOptions['resolveExecutable']>;
   private readonly launchBrowser: LaunchFn;
 
@@ -90,7 +113,15 @@ export class BrowserSession implements BrowserControl {
 
   async navigate(url: string): Promise<PageBody> {
     const controller = await this.controllerReady();
-    return controller.navigate(url);
+    const urlBefore = controller.currentUrl();
+    const page = await controller.navigate(url);
+    return this.record(page, {
+      action: 'goto',
+      urlBefore,
+      urlAfter: page.url,
+      value: url,
+      observed: observedLines(page.snapshot),
+    });
   }
 
   async snapshot(options?: { mode?: 'full' | 'diff'; maxRows?: number }): Promise<PageBody> {
@@ -100,12 +131,84 @@ export class BrowserSession implements BrowserControl {
 
   async act(input: ActInput): Promise<PageBody> {
     const controller = await this.controllerReady();
-    return controller.act(input);
+    const urlBefore = controller.currentUrl();
+    const described = input.ref ? await controller.describeRef(input.ref) : undefined;
+    const page = await controller.act(input);
+    return this.record(page, {
+      action: input.action,
+      urlBefore,
+      urlAfter: page.url,
+      target: described?.target,
+      value: valueForTrace(input.action, input.value, described ? { ...described.target, sensitive: described.sensitive } : undefined),
+      key: input.key,
+      observed: observedLines(page.snapshot),
+    });
   }
 
   async waitFor(input: WaitInput): Promise<PageBody & { matched: boolean }> {
     const controller = await this.controllerReady();
-    return controller.waitFor(input);
+    const urlBefore = controller.currentUrl();
+    const described = input.ref ? await controller.describeRef(input.ref) : undefined;
+    const result = await controller.waitFor(input);
+    if (!result.matched) return result;
+    return this.record(result, {
+      action: 'wait',
+      urlBefore,
+      urlAfter: result.url,
+      target: described?.target,
+      value: input.text,
+      url: input.url,
+      timeout_ms: input.timeoutMs,
+      observed: observedLines(result.snapshot),
+    });
+  }
+
+  trace(): TraceView {
+    return this.traceLog.view();
+  }
+
+  clearTrace(): TraceView {
+    return this.traceLog.clear();
+  }
+
+  saveSkill(input: SaveSkillInput): SaveSkillResult {
+    const built = buildSkill(this.traceLog.view().steps, input);
+    const stored = writeStoredSkill(built.skill, input.overwrite === true);
+    return {
+      name: built.skill.name,
+      version: stored.version,
+      path: stored.path,
+      yaml: stored.yaml,
+      warnings: built.warnings,
+    };
+  }
+
+  listSkills(): SkillSummary[] {
+    return listStoredSkills();
+  }
+
+  readSkill(name: string, version?: number): SkillDocument {
+    return readStoredSkill(name, version);
+  }
+
+  skillHistory(name: string): SkillHistory {
+    return storedSkillHistory(name);
+  }
+
+  rollbackSkill(name: string, to: number): SkillDocument {
+    return rollbackStoredSkill(name, to);
+  }
+
+  async runSkill(name: string, input: RunSkillInput): Promise<MatrixResult> {
+    const controller = await this.controllerReady();
+    const skill = readStoredSkill(name).skill;
+    // Replay uses the same page but must not append to the exploration trace.
+    this.replayDepth += 1;
+    try {
+      return await runMatrix(controller, skill, input);
+    } finally {
+      this.replayDepth -= 1;
+    }
   }
 
   async close(): Promise<void> {
@@ -117,6 +220,12 @@ export class BrowserSession implements BrowserControl {
       this.controller = null;
     }
     if (browser) await browser.close().catch(() => undefined);
+  }
+
+  private record<T extends PageBody>(page: T, input: Parameters<TraceLog['append']>[0]): T {
+    if (this.replayDepth > 0) return page;
+    const step = this.traceLog.append(input);
+    return { ...page, step: step.n };
   }
 
   private async controllerReady(): Promise<PageController> {

@@ -1,0 +1,71 @@
+import { appendFileSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { tracesDir } from '../config/paths.js';
+import type { TargetDescriptor, TraceAction, TraceStep, TraceView } from './types.js';
+
+const OBSERVED_CAP = 20;
+
+let serial = 0;
+
+function createTraceId(): string {
+  serial += 1;
+  return `${Date.now()}-${serial}`;
+}
+
+export function observedLines(snapshot: string): string[] {
+  const lines = snapshot.split('\n');
+  const body = lines[0] === '(navigated: full snapshot)' ? lines.slice(2) : lines.slice(1);
+  return body.slice(0, OBSERVED_CAP);
+}
+
+export interface TraceAppend {
+  action: TraceAction;
+  urlBefore: string;
+  urlAfter: string;
+  target?: TargetDescriptor;
+  value?: string;
+  key?: string;
+  url?: string;
+  timeout_ms?: number;
+  observed: string[];
+}
+
+export class TraceLog {
+  private id: string;
+  private readonly steps: TraceStep[] = [];
+
+  constructor(private readonly dir: string = tracesDir()) {
+    mkdirSync(this.dir, { recursive: true });
+    this.id = createTraceId();
+  }
+
+  view(): TraceView {
+    return { id: this.id, path: join(this.dir, `${this.id}.jsonl`), steps: this.steps.map((step) => ({ ...step })) };
+  }
+
+  clear(): TraceView {
+    this.id = createTraceId();
+    this.steps.length = 0;
+    return this.view();
+  }
+
+  append(input: TraceAppend): TraceStep {
+    const step: TraceStep = {
+      n: this.steps.length + 1,
+      at: new Date().toISOString(),
+      action: input.action,
+      urlBefore: input.urlBefore,
+      urlAfter: input.urlAfter,
+      observed: input.observed.slice(0, OBSERVED_CAP),
+    };
+    if (input.target) step.target = input.target;
+    if (input.value !== undefined) step.value = input.value;
+    if (input.key !== undefined) step.key = input.key;
+    if (input.url !== undefined) step.url = input.url;
+    if (input.timeout_ms !== undefined) step.timeout_ms = input.timeout_ms;
+    this.steps.push(step);
+    mkdirSync(this.dir, { recursive: true });
+    appendFileSync(join(this.dir, `${this.id}.jsonl`), `${JSON.stringify(step)}\n`, 'utf8');
+    return step;
+  }
+}

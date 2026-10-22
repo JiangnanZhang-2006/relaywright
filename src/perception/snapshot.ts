@@ -62,8 +62,33 @@ export interface AdaptedSelect {
   options: readonly SelectOption[];
 }
 
+export interface FrameRef {
+  name: string;
+  url: string;
+}
+
+export interface ModelItem {
+  ref: string;
+  backend: number;
+  role: string;
+  name: string;
+  value?: string;
+  text?: string;
+  label?: string;
+  frame?: FrameRef;
+  redacted?: boolean;
+}
+
+export interface TableFact {
+  name: string;
+  rows: number;
+  frame?: FrameRef;
+}
+
 export interface FrameInput {
   label: string;
+  name?: string;
+  url?: string;
   outOfProcess?: boolean;
   nodes?: readonly AxNode[];
   passwordBackendNodeIds?: ReadonlySet<number>;
@@ -91,6 +116,8 @@ export interface RenderResult {
   header: string;
   lines: string[];
   text: string;
+  items: ModelItem[];
+  tables: TableFact[];
 }
 
 interface TreeIndex {
@@ -102,6 +129,7 @@ interface PreparedTable {
   summary: string;
   rowLines: string[];
   omitted: Set<string>;
+  rows: number;
 }
 
 export function renderSnapshot(input: SnapshotInput): string {
@@ -110,9 +138,9 @@ export function renderSnapshot(input: SnapshotInput): string {
 
 export function renderSnapshotParts(input: SnapshotInput): RenderResult {
   const header = pageHeader(input.title, input.url);
-  const lines = renderBody(input);
+  const body = renderBody(input);
   const maxLines = input.maxLines ?? DEFAULT_MAX_SNAPSHOT_LINES;
-  return { header, lines, text: formatLines(header, lines, maxLines) };
+  return { header, lines: body.lines, text: formatLines(header, body.lines, maxLines), items: body.items, tables: body.tables };
 }
 
 export function pageHeader(title: string, url: string): string {
@@ -126,11 +154,15 @@ export function formatLines(header: string, body: readonly string[], maxLines = 
   return [header, ...lines].join('\n');
 }
 
-function renderBody(input: SnapshotInput): string[] {
+function renderBody(input: SnapshotInput): { lines: string[]; items: ModelItem[]; tables: TableFact[] } {
   const lines: string[] = [];
+  const items: ModelItem[] = [];
+  const tables: TableFact[] = [];
   const assign = refAssigner(input.registry);
   renderTree(
     lines,
+    items,
+    tables,
     input.nodes,
     {
       passwordBackendNodeIds: input.passwordBackendNodeIds ?? new Set<number>(),
@@ -140,13 +172,17 @@ function renderBody(input: SnapshotInput): string[] {
       maxRows: input.maxRows ?? DEFAULT_MAX_TABLE_ROWS,
     },
     assign,
+    undefined,
   );
   for (const frame of input.frames ?? []) {
     const suffix = frame.outOfProcess ? ' (out-of-process, not inspected)' : '';
     lines.push(`--- frame ${quote(frame.label)}${suffix}`);
     if (frame.outOfProcess) continue;
+    const frameRef = frame.name || frame.url ? { name: frame.name ?? '', url: frame.url ?? '' } : undefined;
     renderTree(
       lines,
+      items,
+      tables,
       frame.nodes ?? [],
       {
         passwordBackendNodeIds: frame.passwordBackendNodeIds ?? new Set<number>(),
@@ -156,9 +192,10 @@ function renderBody(input: SnapshotInput): string[] {
         maxRows: input.maxRows ?? DEFAULT_MAX_TABLE_ROWS,
       },
       assign,
+      frameRef,
     );
   }
-  return lines;
+  return { lines, items, tables };
 }
 
 interface TreeOptions {
@@ -169,7 +206,15 @@ interface TreeOptions {
   maxRows: number;
 }
 
-function renderTree(lines: string[], nodes: readonly AxNode[], options: TreeOptions, assign: (backend: number | undefined) => string): void {
+function renderTree(
+  lines: string[],
+  items: ModelItem[],
+  tableFacts: TableFact[],
+  nodes: readonly AxNode[],
+  options: TreeOptions,
+  assign: (backend: number | undefined) => string,
+  frame: FrameRef | undefined,
+): void {
   const index = indexTree(nodes);
   const selectIds = new Set(options.adaptedSelects.map((item) => item.selectBackendNodeId));
   const subtreeOwner = new Map<number, AdaptedSelect>();
@@ -179,10 +224,14 @@ function renderTree(lines: string[], nodes: readonly AxNode[], options: TreeOpti
   }
   const tables = new Map<string, PreparedTable>();
   const omitted = new Set<string>();
+  const remember = (item: ModelItem): void => {
+    items.push(frame ? { ...item, frame } : item);
+  };
   for (const node of nodes) {
     if (!TABLE_ROLES.has(roleOf(node)) || node.ignored) continue;
     const prepared = prepareTable(node, index, options.maxRows);
     tables.set(node.nodeId, prepared);
+    tableFacts.push(frame ? { name: compact(axText(node.name)), rows: prepared.rows, frame } : { name: compact(axText(node.name)), rows: prepared.rows });
     for (const id of prepared.omitted) omitted.add(id);
   }
   const interactiveChild = markInteractive(index, selectIds, subtreeOwner, omitted);
@@ -213,7 +262,16 @@ function renderTree(lines: string[], nodes: readonly AxNode[], options: TreeOpti
     if (backend !== undefined && subtreeOwner.has(backend)) {
       const adapted = subtreeOwner.get(backend);
       if (adapted && !placedSelects.has(adapted.selectBackendNodeId)) {
-        lines.push(formatCombobox(adapted, assign(adapted.selectBackendNodeId)));
+        const ref = assign(adapted.selectBackendNodeId);
+        lines.push(formatCombobox(adapted, ref));
+        remember({
+          ref,
+          backend: adapted.selectBackendNodeId,
+          role: 'combobox',
+          name: adapted.label,
+          label: adapted.label,
+          value: compact(adapted.selectedText),
+        });
         placedSelects.add(adapted.selectBackendNodeId);
       }
       for (const child of index.childrenOf(node)) bury(child);
@@ -231,8 +289,21 @@ function renderTree(lines: string[], nodes: readonly AxNode[], options: TreeOpti
     if (!node.ignored && interactive) {
       const rendered = describeInteractive(node, options.passwordBackendNodeIds);
       if (rendered) {
-        lines.push(formatInteractive(rendered, assign(backend)));
-        if (backend !== undefined) renderedBackends.add(backend);
+        const ref = assign(backend);
+        lines.push(formatInteractive(rendered, ref));
+        if (backend !== undefined) {
+          const redacted = rendered.value === '[redacted]' || isPassword(node, role, options.passwordBackendNodeIds);
+          remember({
+            ref,
+            backend,
+            role: rendered.role,
+            name: rendered.name,
+            ...(rendered.value !== undefined ? { value: rendered.value } : {}),
+            ...(rendered.name ? { text: rendered.name } : {}),
+            ...(redacted ? { redacted: true } : {}),
+          });
+          renderedBackends.add(backend);
+        }
       }
     } else if (
       backend !== undefined &&
@@ -244,7 +315,9 @@ function renderTree(lines: string[], nodes: readonly AxNode[], options: TreeOpti
       // Ignored generics are still the clickable element; their text lives on StaticText children.
       const text = clickableText(node, index, options.clickableLabels.get(backend));
       if (text) {
-        lines.push(`[${assign(backend)}] clickable ${quote(text)}`);
+        const ref = assign(backend);
+        lines.push(`[${ref}] clickable ${quote(text)}`);
+        remember({ ref, backend, role: 'clickable', name: text, text });
         renderedBackends.add(backend);
       }
     } else if (!node.ignored && role === 'heading') {
@@ -265,14 +338,25 @@ function renderTree(lines: string[], nodes: readonly AxNode[], options: TreeOpti
 
   for (const adapted of options.adaptedSelects) {
     if (placedSelects.has(adapted.selectBackendNodeId)) continue;
-    lines.push(formatCombobox(adapted, assign(adapted.selectBackendNodeId)));
+    const ref = assign(adapted.selectBackendNodeId);
+    lines.push(formatCombobox(adapted, ref));
+    remember({
+      ref,
+      backend: adapted.selectBackendNodeId,
+      role: 'combobox',
+      name: adapted.label,
+      label: adapted.label,
+      value: compact(adapted.selectedText),
+    });
     placedSelects.add(adapted.selectBackendNodeId);
   }
   for (const backend of options.clickableBackendNodeIds) {
     if (renderedBackends.has(backend) || subtreeOwner.has(backend) || selectIds.has(backend)) continue;
     const text = clip(compact(options.clickableLabels.get(backend) ?? ''), CLICKABLE_TEXT_MAX);
     if (!text) continue;
-    lines.push(`[${assign(backend)}] clickable ${quote(text)}`);
+    const ref = assign(backend);
+    lines.push(`[${ref}] clickable ${quote(text)}`);
+    remember({ ref, backend, role: 'clickable', name: text, text });
     renderedBackends.add(backend);
   }
 }
@@ -369,6 +453,7 @@ function prepareTable(table: AxNode, index: TreeIndex, maxRows: number): Prepare
     summary: `table ${quote(compact(axText(table.name)))} rows=${dataRows.length} cols: ${cols.join(' | ')}`,
     rowLines,
     omitted,
+    rows: dataRows.length,
   };
 }
 

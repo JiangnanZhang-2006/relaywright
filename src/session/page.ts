@@ -5,8 +5,11 @@ import { loadDocument } from '../perception/capture.js';
 import { BROWSER_HELPERS } from '../perception/inspect-script.js';
 import { diffLines } from '../perception/diff.js';
 import { RefRegistry } from '../perception/registry.js';
-import { formatLines, renderSnapshotParts } from '../perception/snapshot.js';
+import { formatLines, renderSnapshotParts, type ModelItem, type TableFact } from '../perception/snapshot.js';
 import type { PageBody, WaitInput } from '../protocol.js';
+import { describeBackend, findFrameId, queryCssBackends, type FrameNode } from '../recorder/dom.js';
+import { isSensitive } from '../recorder/redact.js';
+import type { DescribedTarget, FrameRef, TargetDescriptor } from '../recorder/types.js';
 
 export interface WaitBody extends PageBody {
   matched: boolean;
@@ -17,6 +20,12 @@ const LOAD_CAP_MS = 15_000;
 const IDLE_CAP_MS = 5_000;
 const IDLE_QUIET_MS = 500;
 
+export interface PageModel {
+  items: ModelItem[];
+  tables: TableFact[];
+  url: string;
+}
+
 export class PageController {
   readonly registry = new RefRegistry();
   private baseline: string[] | null = null;
@@ -24,6 +33,7 @@ export class PageController {
   private loaderId = '';
   private inflight = 0;
   private disposed = false;
+  private model: { items: ModelItem[]; tables: TableFact[] } = { items: [], tables: [] };
 
   private constructor(
     private readonly page: Page,
@@ -83,6 +93,59 @@ export class PageController {
   }
 
   async act(input: ActInput): Promise<PageBody> {
+    await this.performInput(input);
+    return this.snapshot('diff');
+  }
+
+  currentUrl(): string {
+    return this.page.url();
+  }
+
+  pageText(): Promise<string> {
+    return readPageText(this.page);
+  }
+
+  /** Role and name come from the last snapshot model; CSS is read from the live node before it can disappear. */
+  async describeRef(ref: string): Promise<DescribedTarget> {
+    const backend = this.resolveRef(ref);
+    const item = this.model.items.find((entry) => entry.ref === ref) ?? this.model.items.find((entry) => entry.backend === backend);
+    const dom = await describeBackend(this.cdp, backend);
+    if (!dom) throw new RelayError('stale_ref', `Ref ${ref} no longer matches an element. Take a new snapshot.`);
+    const name = item?.name ?? '';
+    const label = item?.label;
+    const role = item?.role ?? dom.tag;
+    const sensitive = isSensitive({ role, name, label, sensitive: dom.password || item?.redacted === true });
+    const target: TargetDescriptor = {
+      role,
+      name,
+      tag: dom.tag,
+      css: dom.css,
+      cssUnique: dom.cssUnique,
+    };
+    if (label && label !== name) target.label = label;
+    if (dom.id) target.id = dom.id;
+    if (dom.text && !sensitive) target.text = dom.text;
+    if (item?.frame) target.frame = item.frame;
+    return { target, sensitive };
+  }
+
+  async capture(): Promise<PageModel> {
+    await this.paint();
+    const url = this.page.url();
+    const rendered = await this.render(await this.page.title(), url);
+    this.baseline = rendered.lines;
+    this.navigatedSinceBaseline = false;
+    return { items: rendered.items, tables: rendered.tables, url };
+  }
+
+  async queryCss(css: string, frame?: FrameRef): Promise<number[]> {
+    const listed = await this.cdp.send('Page.getFrameTree');
+    const frameId = findFrameId(listed.frameTree as FrameNode, frame);
+    if (!frameId) return [];
+    return queryCssBackends(this.cdp, frameId, css);
+  }
+
+  async performInput(input: ActInput): Promise<void> {
     const before = this.loaderId;
     await performAction(
       {
@@ -93,7 +156,16 @@ export class PageController {
       input,
     );
     await this.settle(before);
-    return this.snapshot('diff');
+  }
+
+  async performBackend(backend: number, input: Omit<ActInput, 'ref'>): Promise<void> {
+    const ref = this.registry.refFor(backend);
+    await this.performInput({ ...input, ref });
+  }
+
+  async excerpt(): Promise<string> {
+    const page = await this.snapshot('full');
+    return page.snapshot.split('\n').slice(0, 40).join('\n');
   }
 
   async waitFor(input: WaitInput): Promise<WaitBody> {
@@ -109,9 +181,9 @@ export class PageController {
     return { matched, url: page.url, title: page.title, snapshot: page.snapshot };
   }
 
-  private async render(title: string, url: string, maxRows: number | undefined) {
+  private async render(title: string, url: string, maxRows?: number) {
     const loaded = await loadDocument(this.cdp);
-    return renderSnapshotParts({
+    const rendered = renderSnapshotParts({
       title,
       url,
       nodes: loaded.main.nodes,
@@ -123,6 +195,8 @@ export class PageController {
       maxRows,
       registry: this.registry,
     });
+    this.model = { items: rendered.items, tables: rendered.tables };
+    return rendered;
   }
 
   private resolveRef(ref: string): number {

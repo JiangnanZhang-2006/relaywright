@@ -6,6 +6,10 @@ export const RELAY_ERROR_CODES = [
   'timeout',
   'browser_not_ready',
   'bad_request',
+  'bad_params',
+  'param_unused',
+  'skill_exists',
+  'skill_not_found',
 ] as const;
 
 export type RelayErrorCode = (typeof RELAY_ERROR_CODES)[number];
@@ -21,14 +25,19 @@ export class RelayError extends Error {
   }
 }
 
-export function relayStatus(code: RelayErrorCode): 400 | 409 | 500 | 503 | 504 {
+export function relayStatus(code: RelayErrorCode): 400 | 404 | 409 | 500 | 503 | 504 {
   switch (code) {
     case 'stale_ref':
     case 'occluded':
+    case 'skill_exists':
       return 409;
     case 'no_such_option':
     case 'bad_request':
+    case 'bad_params':
+    case 'param_unused':
       return 400;
+    case 'skill_not_found':
+      return 404;
     case 'timeout':
       return 504;
     case 'browser_not_ready':

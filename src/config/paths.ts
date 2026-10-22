@@ -37,10 +37,20 @@ export function browsersDir(): string {
   return join(relaywrightHome(), 'browsers');
 }
 
+export function tracesDir(): string {
+  return join(relaywrightHome(), 'traces');
+}
+
+export function skillsDir(): string {
+  return join(relaywrightHome(), 'skills');
+}
+
 export function ensureHomeLayout(): void {
   mkdirSync(logsDir(), { recursive: true });
   mkdirSync(defaultProfileDir(), { recursive: true });
   mkdirSync(browsersDir(), { recursive: true });
+  mkdirSync(tracesDir(), { recursive: true });
+  mkdirSync(skillsDir(), { recursive: true });
 }
 
 let cachedVersion: string | undefined;
@@ -52,6 +62,11 @@ export function packageVersion(): string {
   const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version?: string };
   cachedVersion = pkg.version ?? '0.0.0';
   return cachedVersion;
+}
+
+/** Files edited by hand on Windows (Notepad, PowerShell 5 `-Encoding utf8`) often start with a BOM. */
+export function readTextFile(path: string): string {
+  return readFileSync(path, 'utf8').replace(/^\uFEFF/, '');
 }
 
 export function errorText(err: unknown): string {

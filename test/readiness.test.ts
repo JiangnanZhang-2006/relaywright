@@ -19,6 +19,22 @@ function control(partial: Partial<BrowserControl> & Pick<BrowserControl, 'browse
       throw new RelayError('stale_ref', 'Unknown ref e9. Take a new snapshot.');
     },
     waitFor: fail,
+    trace: () => ({ id: 'trace-test', path: 'trace-test.jsonl', steps: [] }),
+    clearTrace: () => ({ id: 'trace-test', path: 'trace-test.jsonl', steps: [] }),
+    saveSkill: () => {
+      throw new RelayError('bad_params', 'not used');
+    },
+    listSkills: () => [],
+    readSkill: () => {
+      throw new RelayError('skill_not_found', 'not used');
+    },
+    skillHistory: () => {
+      throw new RelayError('skill_not_found', 'not used');
+    },
+    rollbackSkill: () => {
+      throw new RelayError('skill_not_found', 'not used');
+    },
+    runSkill: fail,
     ...partial,
   };
 }

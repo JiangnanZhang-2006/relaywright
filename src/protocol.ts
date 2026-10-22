@@ -26,6 +26,7 @@ export const PageSchema = z.object({
   url: z.string(),
   title: z.string(),
   snapshot: z.string(),
+  step: z.number().int().positive().optional(),
 });
 
 export type PageBody = z.infer<typeof PageSchema>;

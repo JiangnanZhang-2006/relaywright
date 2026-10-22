@@ -28,6 +28,8 @@ interface FrameTreeNode {
 
 export interface CapturedTree {
   label: string;
+  name: string;
+  url: string;
   outOfProcess: boolean;
   nodes: AxNode[];
   passwordBackendNodeIds: Set<number>;
@@ -54,9 +56,11 @@ async function appendChild(cdp: CDPSession, tree: FrameTreeNode, into: FrameInpu
 }
 
 function toFrameInput(tree: CapturedTree): FrameInput {
-  if (tree.outOfProcess) return { label: tree.label, outOfProcess: true };
+  if (tree.outOfProcess) return { label: tree.label, name: tree.name, url: tree.url, outOfProcess: true };
   return {
     label: tree.label,
+    name: tree.name,
+    url: tree.url,
     nodes: tree.nodes,
     passwordBackendNodeIds: tree.passwordBackendNodeIds,
     clickableBackendNodeIds: tree.clickableBackendNodeIds,
@@ -78,25 +82,29 @@ async function captureFrame(
     nodes = await axTree(cdp, isMain ? null : frameId);
   } catch (err) {
     if (isMain) throw err;
-    return emptyTree(url || label, true);
+    return emptyTree(url || label, true, name, url);
   }
   try {
     const detected = await inspectFrame(cdp, frameId);
     return {
-      label: isMain ? label : label,
+      label,
+      name: name.trim(),
+      url,
       outOfProcess: false,
       nodes,
       ...detected,
     };
   } catch (err) {
     if (isMain) throw err;
-    return emptyTree(url || label, true);
+    return emptyTree(url || label, true, name, url);
   }
 }
 
-function emptyTree(label: string, outOfProcess: boolean): CapturedTree {
+function emptyTree(label: string, outOfProcess: boolean, name = '', url = ''): CapturedTree {
   return {
     label,
+    name: name.trim(),
+    url,
     outOfProcess,
     nodes: [],
     passwordBackendNodeIds: new Set(),
@@ -113,7 +121,7 @@ async function axTree(cdp: CDPSession, frameId: string | null): Promise<AxNode[]
   return result.nodes as unknown as AxNode[];
 }
 
-async function inspectFrame(cdp: CDPSession, frameId: string): Promise<Omit<CapturedTree, 'label' | 'outOfProcess' | 'nodes'>> {
+async function inspectFrame(cdp: CDPSession, frameId: string): Promise<Omit<CapturedTree, 'label' | 'outOfProcess' | 'nodes' | 'name' | 'url'>> {
   const world = await cdp.send('Page.createIsolatedWorld', { frameId, worldName: 'relaywright' });
   const evaluated = await cdp.send('Runtime.evaluate', {
     expression: INSPECT_EXPRESSION,

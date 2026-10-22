@@ -7,9 +7,14 @@ import { errorText, logDaemon, packageVersion } from '../config/paths.js';
 import { RelayError, relayStatus, type RelayErrorCode } from '../errors.js';
 import { ActSchema, issuesText, SnapshotQuery, WaitSchema } from '../protocol.js';
 import type { BrowserControl } from '../session/browser.js';
+import { RunSkillInputSchema, SaveSkillInputSchema } from '../skills/schema.js';
 
 const NavigateBody = z.object({
   url: z.string().min(1),
+});
+
+const RollbackBody = z.object({
+  to: z.number().int().positive(),
 });
 
 export interface AppOptions {
@@ -92,6 +97,64 @@ export function createApp(options: AppOptions): Hono {
       const body = WaitSchema.safeParse(await readJson(c));
       if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
       return c.json(await options.session.waitFor(body.data));
+    } catch (err) {
+      return browserError(c, err);
+    }
+  });
+
+  app.get('/trace', (c) => c.json(options.session.trace()));
+
+  app.post('/trace/clear', (c) => c.json(options.session.clearTrace()));
+
+  app.post('/skills/save', async (c) => {
+    try {
+      const body = SaveSkillInputSchema.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return c.json(options.session.saveSkill(body.data));
+    } catch (err) {
+      return browserError(c, err);
+    }
+  });
+
+  app.get('/skills', (c) => {
+    try {
+      return c.json({ skills: options.session.listSkills() });
+    } catch (err) {
+      return browserError(c, err);
+    }
+  });
+
+  app.get('/skills/:name/history', (c) => {
+    try {
+      return c.json(options.session.skillHistory(c.req.param('name')));
+    } catch (err) {
+      return browserError(c, err);
+    }
+  });
+
+  app.post('/skills/:name/rollback', async (c) => {
+    try {
+      const body = RollbackBody.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return c.json(options.session.rollbackSkill(c.req.param('name'), body.data.to));
+    } catch (err) {
+      return browserError(c, err);
+    }
+  });
+
+  app.post('/skills/:name/run', async (c) => {
+    try {
+      const body = RunSkillInputSchema.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return c.json(await options.session.runSkill(c.req.param('name'), body.data));
+    } catch (err) {
+      return browserError(c, err);
+    }
+  });
+
+  app.get('/skills/:name', (c) => {
+    try {
+      return c.json(options.session.readSkill(c.req.param('name'), parseVersion(c.req.query('version'))));
     } catch (err) {
       return browserError(c, err);
     }
@@ -203,4 +266,13 @@ function bearerOk(header: string | undefined, token: string): boolean {
 function emptyAsUndefined(value: string | undefined): string | undefined {
   if (value === undefined || value === '') return undefined;
   return value;
+}
+
+function parseVersion(value: string | undefined): number | undefined {
+  if (value === undefined || value === '') return undefined;
+  const version = Number(value);
+  if (!Number.isInteger(version) || version < 1) {
+    throw new RelayError('bad_params', 'version must be a positive integer');
+  }
+  return version;
 }
