@@ -1,6 +1,6 @@
 name: zf-timetable
-description: 查询指定学年学期的个人课表
-version: 1
+description: 导出指定学年学期的个人课表 PDF
+version: 2
 start_url: https://jwxt.wzu.edu.cn/jwglxt/kbcx/xskbcx_cxXskbcxIndex.html?gnmkdm=N2151&layout=default
 params:
   year:
@@ -42,3 +42,13 @@ steps:
           when:
             text_present: "{{year}}学年第{{term}}学期"
             table_rows_min: 1
+  - id: s5-download-输出PDF
+    download:
+      click:
+        target:
+          role: button
+          name:  输出PDF
+          css: "#shcPDF"
+          text: 输出PDF
+      save_as: "{{year}}-{{term}}.pdf"
+      timeout_ms: 30000
