@@ -73,6 +73,7 @@ describe('download file names', () => {
       dedupe: true,
     });
     expect(first.deduped).toBe(false);
+    expect(first.requested).toBe('kb.pdf');
     expect(first.info).toMatchObject({
       name: 'kb.pdf',
       path: join(dir, 'kb.pdf'),
@@ -89,7 +90,36 @@ describe('download file names', () => {
       dedupe: true,
     });
     expect(again.deduped).toBe(true);
+    expect(again.requested).toBe('kb.pdf');
     expect(again.info.name).toBe('kb (1).pdf');
+  });
+
+  it('keeps the sanitized name when dedupe renames the file on disk', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'relaywright-requested-'));
+    const dir = join(root, 'out');
+    const bytes = Buffer.from('%PDF-1.4\n');
+    const first = await publishDownload({
+      sourcePath: writeTemp(root, 'guid-1', bytes),
+      dir,
+      fileName: 'a:b.pdf',
+      url: 'http://127.0.0.1/export.pdf?token=1',
+      dedupe: true,
+    });
+    expect(first.requested).toBe('a_b.pdf');
+    expect(first.info.name).toBe('a_b.pdf');
+    expect(first.deduped).toBe(false);
+
+    const again = await publishDownload({
+      sourcePath: writeTemp(root, 'guid-2', bytes),
+      dir,
+      fileName: 'a:b.pdf',
+      url: 'http://127.0.0.1/export.pdf',
+      dedupe: true,
+    });
+    expect(again.requested).toBe('a_b.pdf');
+    expect(again.info.name).toBe('a_b (1).pdf');
+    expect(again.deduped).toBe(true);
+    expect(again.info.path).toBe(join(dir, 'a_b (1).pdf'));
   });
 });
 

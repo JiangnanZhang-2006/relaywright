@@ -180,13 +180,12 @@ export class BrowserSession implements BrowserControl {
       const body = await this.readSnapshot(kind || switched ? 'full' : 'diff');
       const shown = this.finishPage(body, { downloads: caught.files, lines });
       const produced = input.action === 'click' && caught.files.length > 0;
-      const file = caught.files[0];
       return this.record(shown, {
         action: produced ? 'download' : input.action,
         urlBefore,
         urlAfter: shown.url,
         target: described?.target,
-        value: produced && file ? file.name : valueForTrace(input.action, input.value, described ? { ...described.target, sensitive: described.sensitive } : undefined),
+        value: produced ? caught.requested : valueForTrace(input.action, input.value, described ? { ...described.target, sensitive: described.sensitive } : undefined),
         suggested: produced ? caught.suggested : undefined,
         key: input.key,
         observed: observedLines(shown.snapshot),
@@ -220,6 +219,7 @@ export class BrowserSession implements BrowserControl {
       const done = await this.downloader().waitForComplete(started);
       const lines: string[] = [];
       const files: DownloadInfo[] = [];
+      let requested = '';
       if (done.state === 'canceled') {
         lines.push(canceledLine(done.suggestedFilename));
       } else {
@@ -230,6 +230,7 @@ export class BrowserSession implements BrowserControl {
         });
         files.push(published.info);
         lines.push(downloadLine(published.info));
+        requested = published.requested;
       }
       if (await this.printIncreased(controller, printBefore)) lines.push(PRINT_REQUESTED_LINE);
       const kind = this.tabset().peekSwitch();
@@ -242,7 +243,7 @@ export class BrowserSession implements BrowserControl {
         urlBefore,
         urlAfter: shown.url,
         target: described.target,
-        value: input.save_as ?? file.name,
+        value: input.save_as ?? requested,
         suggested: done.suggestedFilename,
         timeout_ms: timeout,
         observed: observedLines(shown.snapshot),
@@ -277,7 +278,7 @@ export class BrowserSession implements BrowserControl {
           action: 'pdf',
           urlBefore: url,
           urlAfter: url,
-          value: input.save_as ?? published.info.name,
+          value: input.save_as ?? published.requested,
           ...(input.landscape !== undefined ? { landscape: input.landscape } : {}),
           observed: [],
         },
@@ -518,11 +519,12 @@ export class BrowserSession implements BrowserControl {
     return { ...presented, downloads };
   }
 
-  private async finishDownloads(mark: number): Promise<{ files: DownloadInfo[]; lines: string[]; suggested?: string }> {
+  private async finishDownloads(mark: number): Promise<{ files: DownloadInfo[]; lines: string[]; suggested?: string; requested?: string }> {
     const pending = this.downloader().claimSince(mark);
     const files: DownloadInfo[] = [];
     const lines: string[] = [];
     let suggested: string | undefined;
+    let requested: string | undefined;
     for (const item of pending) {
       const done = await this.downloader().waitForComplete(item);
       if (done.state === 'canceled') {
@@ -536,9 +538,12 @@ export class BrowserSession implements BrowserControl {
       });
       files.push(published.info);
       lines.push(downloadLine(published.info));
-      if (!suggested) suggested = done.suggestedFilename;
+      if (!suggested) {
+        suggested = done.suggestedFilename;
+        requested = published.requested;
+      }
     }
-    return { files, lines, suggested };
+    return { files, lines, suggested, requested };
   }
 
   private async readSnapshot(mode: 'full' | 'diff'): Promise<PageBody> {

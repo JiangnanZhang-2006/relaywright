@@ -24,6 +24,8 @@ export interface TrackedDownload {
 
 export interface PublishedDownload {
   info: DownloadInfo;
+  /** Sanitized name the caller asked for, before a collision renamed the file. */
+  requested: string;
   deduped: boolean;
 }
 
@@ -137,9 +139,10 @@ export async function publishDownload(options: {
   dedupe: boolean;
 }): Promise<PublishedDownload> {
   mkdirSync(options.dir, { recursive: true });
+  const requested = sanitizeFilename(options.fileName);
   const allocated = options.dedupe
-    ? allocateFilename(options.dir, options.fileName)
-    : { name: sanitizeFilename(options.fileName), deduped: false };
+    ? allocateFilename(options.dir, requested)
+    : { name: requested, deduped: false };
   const root = resolve(options.dir);
   const dest = resolve(options.dir, allocated.name);
   if (dest !== root && !dest.startsWith(root + sep)) {
@@ -154,7 +157,7 @@ export async function publishDownload(options: {
     url: stripDownloadUrl(options.url),
   };
   if (options.mime) info.mime = options.mime;
-  return { info, deduped: allocated.deduped };
+  return { info, requested, deduped: allocated.deduped };
 }
 
 export async function stageBytes(bytes: Buffer): Promise<string> {

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,6 +24,22 @@ function refFor(snapshot: string, pattern: RegExp): string {
 
 function startsWithPdf(path: string): boolean {
   return readFileSync(path).subarray(0, 5).toString('latin1') === '%PDF-';
+}
+
+/** Leave fileName in the downloads dir and remove "name (n).ext" so the next save is "name (1).ext". */
+function occupy(fileName: string): void {
+  const dir = downloadsDir();
+  mkdirSync(dir, { recursive: true });
+  const dot = fileName.lastIndexOf('.');
+  const base = dot > 0 ? fileName.slice(0, dot) : fileName;
+  const ext = dot > 0 ? fileName.slice(dot) : '';
+  const prefix = `${base} (`;
+  for (const name of readdirSync(dir)) {
+    if (!name.startsWith(prefix) || !name.endsWith(ext)) continue;
+    const middle = name.slice(prefix.length, name.length - ext.length);
+    if (/^\d+\)$/.test(middle)) unlinkSync(join(dir, name));
+  }
+  writeFileSync(join(dir, fileName), 'occupied');
 }
 
 describe.skipIf(!resolved.path)('downloads and pdf', () => {
@@ -76,7 +92,7 @@ describe.skipIf(!resolved.path)('downloads and pdf', () => {
     expect(file.path.startsWith(downloadsDir())).toBe(true);
     expect(startsWithPdf(file.path)).toBe(true);
     expect(saved.snapshot).toContain(`(downloaded: notes-saved.pdf`);
-    expect(browser.trace().steps.at(-1)?.action).toBe('download');
+    expect(browser.trace().steps.at(-1)).toMatchObject({ action: 'download', value: 'notes-saved.pdf' });
 
     const blobbed = await browser.act({ action: 'click', ref: blob });
     const blobFile = blobbed.downloads?.[0];
@@ -84,7 +100,7 @@ describe.skipIf(!resolved.path)('downloads and pdf', () => {
     expect(blobbed.snapshot).toContain('(downloaded:');
     expect(blobFile.name).toContain('blob.pdf');
     expect(startsWithPdf(blobFile.path)).toBe(true);
-    expect(browser.trace().steps.at(-1)).toMatchObject({ action: 'download', suggested: 'blob.pdf' });
+    expect(browser.trace().steps.at(-1)).toMatchObject({ action: 'download', value: 'blob.pdf', suggested: 'blob.pdf' });
 
     const printed = await browser.act({ action: 'click', ref: print });
     expect(printed.snapshot).toContain('(print requested:');
@@ -96,6 +112,30 @@ describe.skipIf(!resolved.path)('downloads and pdf', () => {
     });
   });
 
+  it('records the undeduped name when a download already exists', async () => {
+    const browser = live();
+    const opened = await browser.navigate(downloadsPage);
+    const blob = refFor(opened.snapshot, /\[(e\d+)\] button "下载 Blob"/);
+    occupy('blob.pdf');
+
+    const clicked = await browser.act({ action: 'click', ref: blob });
+    const clickedFile = clicked.downloads?.[0];
+    if (!clickedFile) throw new Error(`blob click produced no download\n${clicked.snapshot}`);
+    expect(clickedFile.name).toBe('blob (1).pdf');
+    expect(startsWithPdf(clickedFile.path)).toBe(true);
+    expect(browser.trace().steps.at(-1)?.value).toBe('blob.pdf');
+    expect(browser.trace().steps.at(-1)?.suggested).toBe('blob.pdf');
+
+    occupy('blob.pdf');
+    const saved = await browser.download({ ref: blob, timeout_ms: 30_000 });
+    const savedFile = saved.downloads?.[0];
+    if (!savedFile) throw new Error(`blob download produced no file\n${saved.snapshot}`);
+    expect(savedFile.name).toBe('blob (1).pdf');
+    expect(startsWithPdf(savedFile.path)).toBe(true);
+    expect(browser.trace().steps.at(-1)?.value).toBe('blob.pdf');
+    expect(browser.trace().steps.at(-1)?.suggested).toBe('blob.pdf');
+  });
+
   it('prints the timetable page to a PDF', async () => {
     const browser = live();
     await browser.navigate(v1);
@@ -104,6 +144,16 @@ describe.skipIf(!resolved.path)('downloads and pdf', () => {
     expect(result.file.name).toBe('timetable.pdf');
     expect(startsWithPdf(result.file.path)).toBe(true);
     expect(browser.trace().steps.at(-1)).toMatchObject({ action: 'pdf', value: 'timetable.pdf' });
+  });
+
+  it('records the page title when a pdf without save_as is deduped', async () => {
+    const browser = live();
+    await browser.navigate(v1);
+    occupy('个人课表查询.pdf');
+    const result = await browser.pdf({});
+    expect(result.file.name).toBe('个人课表查询 (1).pdf');
+    expect(startsWithPdf(result.file.path)).toBe(true);
+    expect(browser.trace().steps.at(-1)).toMatchObject({ action: 'pdf', value: '个人课表查询.pdf' });
   });
 
   it('captures the inline PDF from the 输出PDF dialog and stays usable', async () => {
