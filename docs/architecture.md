@@ -292,7 +292,8 @@ sequenceDiagram
 | `browser_act` | `action`、`ref`、`value?`、`key?` | 执行结果 + 增量 diff |
 | `browser_wait` | `text? \| ref? \| url?`、`timeout_ms?` | 是否满足条件 + 增量 diff |
 | `browser_screenshot` | `ref?`、`full_page?` | 图片（敏感区域已打码） |
-| `browser_download` | `ref`、`save_as` | 文件路径、大小 |
+| `browser_download` | `ref`、`save_as?`、`timeout_ms?` | 文件路径、大小、sha256（不返回文件内容） |
+| `browser_pdf` | `save_as?`、`landscape?` | 把当前页面打印成 PDF，返回文件路径、大小、sha256 |
 
 ### 技能
 
@@ -317,7 +318,7 @@ sequenceDiagram
 |---|---|---|
 | `audit_query` | `since?`、`identity?`、`skill?`、`limit?` | 审计记录摘要 |
 
-一共 14 个工具。可以按 `--toolset browse,skill` 只开放其中几组，进一步节省 token。
+一共 15 个工具。可以按 `--toolset browse,skill` 只开放其中几组，进一步节省 token。
 
 ## 5. CLI
 

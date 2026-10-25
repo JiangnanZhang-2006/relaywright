@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>下载夹具</title>
+</head>
+<body>
+  <p><a id="attachment" href="/zf-mock/attachment.pdf">下载附件</a></p>
+  <p><button type="button" id="blob">下载 Blob</button></p>
+  <p><button type="button" id="print">打印</button></p>
+  <p><button type="button" id="noop">无操作</button></p>
+  <script>
+    document.getElementById('blob').addEventListener('click', function () {
+      var blob = new Blob(['%PDF-1.4\n% blob fixture\n'], { type: 'application/pdf' });
+      var url = URL.createObjectURL(blob);
+      var link = document.createElement('a');
+      link.href = url;
+      link.download = 'blob.pdf';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    });
+    document.getElementById('print').addEventListener('click', function () {
+      window.print();
+    });
+  </script>
+</body>
+</html>

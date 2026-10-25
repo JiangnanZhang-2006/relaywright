@@ -28,7 +28,6 @@ describe.skipIf(!resolved.path)('正方课表夹具', () => {
 
   beforeAll(async () => {
     process.env.RELAYWRIGHT_HOME = mkdtempSync(join(tmpdir(), 'relaywright-e2e-'));
-    process.env.RELAYWRIGHT_HEADLESS = '1';
     server = await startStatic(join(repoRoot, 'fixtures'));
     pageUrl = `http://127.0.0.1:${server.port}/zf-mock/v1/`;
     session = new BrowserSession();

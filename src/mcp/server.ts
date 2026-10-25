@@ -6,15 +6,17 @@ import {
   act,
   browserTabs,
   daemonMismatchLine,
+  download,
   getSnapshot,
   listSkills,
   navigate,
+  printPdf,
   runSkill,
   saveSkill,
   showSkill,
   waitFor,
 } from '../daemon/client.js';
-import { ActSchema, issuesText, TabsCommandSchema, WaitSchema } from '../protocol.js';
+import { ActSchema, DownloadSchema, issuesText, PdfSchema, TabsCommandSchema, WaitSchema, type PageBody } from '../protocol.js';
 import { formatRunReport } from '../skills/format.js';
 import { CheckSchema, RunSkillInputSchema, SaveSkillInputSchema } from '../skills/schema.js';
 
@@ -38,7 +40,7 @@ export async function startMcpServer(): Promise<void> {
     async ({ url }) => {
       try {
         const page = await navigate(url);
-        return ok(withStep(pageText(page.snapshot), page.step));
+        return ok(withStep(pageText(page), page.step));
       } catch (err) {
         return toolError(err);
       }
@@ -57,7 +59,7 @@ export async function startMcpServer(): Promise<void> {
     async ({ mode, max_rows }) => {
       try {
         const page = await getSnapshot({ mode: mode ?? 'full', maxRows: max_rows });
-        return ok(pageText(page.snapshot));
+        return ok(pageText(page));
       } catch (err) {
         return toolError(err);
       }
@@ -67,7 +69,7 @@ export async function startMcpServer(): Promise<void> {
   server.registerTool(
     'browser_act',
     {
-      description: `Run click, type, select, press, or scroll. ref is optional only for press and scroll. Returns a diff snapshot. ${UNTRUSTED}`,
+      description: `Run click, type, select, press, or scroll. ref is optional only for press and scroll. Returns a diff snapshot. A click that starts a download reports the path, size, and sha256; file contents are not returned. ${UNTRUSTED}`,
       inputSchema: {
         action: z.enum(['click', 'type', 'select', 'press', 'scroll']),
         ref: z.string().optional().describe('Ref from the latest snapshot. Optional only for press and scroll.'),
@@ -80,7 +82,51 @@ export async function startMcpServer(): Promise<void> {
       if (!parsed.success) return toolError(new Error(issuesText(parsed.error)));
       try {
         const page = await act(parsed.data);
-        return ok(withStep(pageText(page.snapshot), page.step));
+        return ok(withStep(pageText(page), page.step));
+      } catch (err) {
+        return toolError(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'browser_download',
+    {
+      description: `Click a ref and save the download it starts. File contents are not returned, only the path, size, and sha256. If nothing starts downloading, the click may have opened a dialog that needs another click. ${UNTRUSTED}`,
+      inputSchema: {
+        ref: z.string().describe('Ref from the latest snapshot.'),
+        save_as: z.string().optional().describe('File name to save as. A name with a directory or .. is rejected.'),
+        timeout_ms: z.number().int().min(1).max(120_000).optional().describe('How long to wait for a download to begin. Default 30000.'),
+      },
+    },
+    async (args) => {
+      const parsed = DownloadSchema.safeParse(args);
+      if (!parsed.success) return toolError(new Error(issuesText(parsed.error)));
+      try {
+        const page = await download(parsed.data);
+        return ok(withStep(pageText(page), page.step));
+      } catch (err) {
+        return toolError(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'browser_pdf',
+    {
+      description: 'Print the current page to a PDF. File contents are not returned, only the path, size, and sha256.',
+      inputSchema: {
+        save_as: z.string().optional().describe('File name to save as. Defaults to the page title plus .pdf.'),
+        landscape: z.boolean().optional().describe('Print landscape. Default portrait.'),
+      },
+    },
+    async (args) => {
+      const parsed = PdfSchema.safeParse(args);
+      if (!parsed.success) return toolError(new Error(issuesText(parsed.error)));
+      try {
+        const result = await printPdf(parsed.data);
+        const file = `file: ${result.file.name}  ${result.file.bytes}  ${result.file.sha256}  ${result.file.path}`;
+        return ok(withStep(`${pageText(result.header)}\n${file}`, result.step));
       } catch (err) {
         return toolError(err);
       }
@@ -108,7 +154,7 @@ export async function startMcpServer(): Promise<void> {
       if (!parsed.success) return toolError(new Error(issuesText(parsed.error)));
       try {
         const result = await waitFor(parsed.data);
-        const body = `matched: ${result.matched}\n${pageText(result.snapshot)}`;
+        const body = `matched: ${result.matched}\n${pageText(result)}`;
         return ok(result.matched ? withStep(body, result.step) : body);
       } catch (err) {
         return toolError(err);
@@ -187,6 +233,7 @@ export async function startMcpServer(): Promise<void> {
         params: z.record(z.string(), z.string()).optional().describe('Fixed parameter values.'),
         matrix: z.record(z.string(), z.array(z.string())).optional().describe('Parameter axes. Each combination is replayed from the start URL.'),
         start_url: z.string().optional().describe('Open this URL instead of the skill start_url.'),
+        out_dir: z.string().optional().describe('Directory for download and PDF artifacts. Shared by every matrix combination.'),
       },
     },
     async (args) => {
@@ -194,6 +241,7 @@ export async function startMcpServer(): Promise<void> {
         params: args.params,
         matrix: args.matrix,
         startUrl: args.start_url,
+        out_dir: args.out_dir,
       });
       if (!parsed.success) return toolError(new Error(issuesText(parsed.error)));
       try {
@@ -220,7 +268,7 @@ export async function startMcpServer(): Promise<void> {
       if (!parsed.success) return toolError(new Error(issuesText(parsed.error)));
       try {
         const result = await browserTabs(parsed.data);
-        if ('snapshot' in result) return ok(pageText(result.snapshot));
+        if ('snapshot' in result) return ok(pageText(result));
         return ok(result.text);
       } catch (err) {
         return toolError(err);
@@ -236,8 +284,15 @@ function ok(text: string): { content: [{ type: 'text'; text: string }] } {
   return { content: [{ type: 'text', text: toolText(text) }] };
 }
 
-function pageText(snapshot: string): string {
-  return `<page_content>\n${snapshot}\n</page_content>`;
+function pageText(page: PageBody | string): string {
+  const snapshot = typeof page === 'string' ? page : page.snapshot;
+  const files = typeof page === 'string' ? '' : fileLines(page);
+  const body = `<page_content>\n${snapshot}\n</page_content>`;
+  return files ? `${body}\n${files}` : body;
+}
+
+function fileLines(page: PageBody): string {
+  return (page.downloads ?? []).map((file) => `file: ${file.name}  ${file.bytes}  ${file.sha256}  ${file.path}`).join('\n');
 }
 
 function withStep(text: string, step?: number): string {

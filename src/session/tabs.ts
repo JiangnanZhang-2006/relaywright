@@ -38,6 +38,7 @@ export class TabSet {
   private stopping = false;
   private followGeneration = 0;
   private followInFlight: Promise<void> = Promise.resolve();
+  private fallbackTask: Promise<void> | null = null;
   /** Pages we opened ourselves must not be treated as a popup from the active tab. */
   private suppressPopup = 0;
   private readonly following = new WeakSet<Page>();
@@ -237,7 +238,15 @@ export class TabSet {
     await slot.page.bringToFront().catch(() => undefined);
   }
 
-  private async fallback(): Promise<void> {
+  private fallback(): Promise<void> {
+    if (this.fallbackTask) return this.fallbackTask;
+    this.fallbackTask = this.fallbackInner().finally(() => {
+      this.fallbackTask = null;
+    });
+    return this.fallbackTask;
+  }
+
+  private async fallbackInner(): Promise<void> {
     if (this.stopping) return;
     await this.reconcile();
     if (this.active && !this.active.page.isClosed() && this.slots.includes(this.active)) return;
@@ -273,7 +282,11 @@ export class TabSet {
   private untrack(target: Target): void {
     const slot = this.slots.find((item) => item.target === target);
     if (!slot) return;
+    const wasActive = this.active === slot;
     this.drop(slot);
+    if (wasActive && !this.stopping) {
+      void this.fallback().catch((err) => logDaemon(`tab fallback failed: ${errorText(err)}`));
+    }
   }
 
   private notePopup(opener: Page, popup: Page): void {
@@ -336,6 +349,10 @@ export class TabSet {
     if (!slot.attaching) {
       slot.attaching = PageController.attach(slot.page)
         .then((controller) => {
+          if (!this.slots.includes(slot) || slot.page.isClosed()) {
+            void controller.dispose().catch(() => undefined);
+            throw new Error('Tab closed during attach');
+          }
           slot.controller = controller;
           return controller;
         })

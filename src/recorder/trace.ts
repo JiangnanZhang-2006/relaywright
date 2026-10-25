@@ -33,6 +33,8 @@ export interface TraceAppend {
   url?: string;
   tabUrl?: string;
   timeout_ms?: number;
+  suggested?: string;
+  landscape?: boolean;
   observed: string[];
 }
 
@@ -70,6 +72,8 @@ export class TraceLog {
     if (input.url !== undefined) step.url = input.url;
     if (input.tabUrl !== undefined) step.tabUrl = input.tabUrl;
     if (input.timeout_ms !== undefined) step.timeout_ms = input.timeout_ms;
+    if (input.suggested !== undefined) step.suggested = input.suggested;
+    if (input.landscape !== undefined) step.landscape = input.landscape;
     this.steps.push(step);
     mkdirSync(this.dir, { recursive: true });
     appendFileSync(join(this.dir, `${this.id}.jsonl`), `${JSON.stringify(step)}\n`, 'utf8');

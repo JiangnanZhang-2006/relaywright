@@ -3,11 +3,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { ModelItem } from '../src/perception/snapshot.js';
+import type { ReplayDownload, ReplayPage } from '../src/session/page.js';
 import { valueForTrace } from '../src/recorder/redact.js';
 import { observedLines, TraceLog } from '../src/recorder/trace.js';
 import type { TargetDescriptor, TraceStep } from '../src/recorder/types.js';
 import { chooseLocator } from '../src/skills/locate.js';
-import { expandMatrix, summaryExitCode, bindSkill } from '../src/skills/run.js';
+import { expandMatrix, summaryExitCode, bindSkill, runSkill } from '../src/skills/run.js';
 import { buildSkill, makeStepId, slugTarget } from '../src/skills/save.js';
 import { parseSkill, stringifySkill, type Skill } from '../src/skills/schema.js';
 import { listSkills, readSkill, rollbackSkill, skillHistory, writeSkill } from '../src/skills/store.js';
@@ -319,3 +320,161 @@ describe('skill store', () => {
     expect(() => writeSkill({ ...skill, name: 'Bad' }, false, root)).toThrow(expect.objectContaining({ code: 'bad_params' }));
   });
 });
+
+describe('download and pdf skills', () => {
+  const confirm = target({ role: 'button', name: '确定', tag: 'button', id: 'pdf-ok', css: '#pdf-ok', cssUnique: true, text: '确定' });
+
+  function exportTrace(fileName: string): TraceStep[] {
+    return [
+      traceStep({ n: 1, action: 'goto', value: PAGE, urlBefore: 'about:blank', urlAfter: PAGE }),
+      traceStep({ n: 2, action: 'download', value: fileName, suggested: 'kb.pdf', target: confirm, timeout_ms: 1500 }),
+      traceStep({ n: 3, action: 'pdf', value: 'page.pdf', landscape: true }),
+    ];
+  }
+
+  it('rewrites an untemplated save_as and round-trips download and pdf steps', () => {
+    const built = buildSkill(exportTrace('kb.pdf'), {
+      name: 'zf-export',
+      description: '导出课表 PDF',
+      params: { year: '2025-2026', term: '2' },
+    });
+    expect(built.skill.steps.map((step) => step.id)).toEqual(['s1-download-确定', 's2-pdf']);
+    expect(built.skill.steps[0]?.download).toEqual({
+      click: { target: { role: 'button', name: '确定', css: '#pdf-ok', text: '确定' } },
+      save_as: '{{year}}-{{term}}.pdf',
+      timeout_ms: 1500,
+    });
+    expect(built.skill.steps[1]?.pdf).toEqual({ save_as: '{{year}}-{{term}}.pdf', landscape: true });
+    expect(built.warnings).toEqual([
+      's1-download-确定 save_as had no parameters; rewrote it to {{year}}-{{term}}.pdf so matrix runs do not collide',
+      's2-pdf save_as had no parameters; rewrote it to {{year}}-{{term}}.pdf so matrix runs do not collide',
+    ]);
+    expect(parseSkill(stringifySkill(built.skill))).toEqual(built.skill);
+  });
+
+  it('templatizes a file name that already contains the examples', () => {
+    const built = buildSkill(
+      [
+        traceStep({ n: 1, action: 'goto', value: PAGE, urlBefore: 'about:blank', urlAfter: PAGE }),
+        traceStep({ n: 2, action: 'download', value: '2025-2026-2.pdf', suggested: 'kb.pdf', target: confirm }),
+      ],
+      {
+        name: 'zf-export',
+        description: '导出课表 PDF',
+        params: { year: '2025-2026', term: '2' },
+      },
+    );
+    expect(built.skill.steps[0]?.download?.save_as).toBe('{{year}}-{{term}}.pdf');
+    expect(built.warnings.filter((warning) => warning.includes('rewrote'))).toEqual([]);
+  });
+
+  it('runs a download step, breaks on no_download, and skips it after an empty outcome', async () => {
+    const skill: Skill = {
+      name: 'zf-export',
+      description: '导出课表 PDF',
+      version: 1,
+      start_url: PAGE,
+      params: {
+        year: { type: 'string', example: '2025-2026' },
+        term: { type: 'string', example: '2' },
+      },
+      steps: [
+        {
+          id: 's1-expect',
+          expect: {
+            any: [
+              { outcome: 'empty', when: { text_present: '尚无您的课表' }, message: '{{year}} 第{{term}}学期尚未排课' },
+              { outcome: 'ok', when: { table_rows_min: 1 } },
+            ],
+          },
+        },
+        {
+          id: 's2-download',
+          download: {
+            click: { target: { role: 'button', name: '确定' } },
+            save_as: '{{year}}-{{term}}.pdf',
+          },
+        },
+      ],
+    };
+    expect(parseSkill(stringifySkill(skill))).toEqual(skill);
+    const out = mkdtempSync(join(tmpdir(), 'relaywright-skill-out-'));
+    const params = { year: '2025-2026', term: '2' };
+
+    const ok = fakeReplay({ text: '高等数学', begin: { id: 'g1', suggestedFilename: 'kb.pdf', url: PAGE } });
+    const saved = await runSkill(ok.page, skill, params, { outDir: out });
+    expect(saved.outcome).toBe('ok');
+    expect(saved.artifacts).toEqual([
+      { step_id: 's2-download', path: join(out, '2025-2026-2.pdf'), bytes: 12, sha256: 'abc' },
+    ]);
+    expect(ok.calls).toContain('click');
+    expect(ok.calls).toContain('save:2025-2026-2.pdf');
+
+    const missed = fakeReplay({ text: '高等数学', begin: null });
+    const broken = await runSkill(missed.page, skill, params, { outDir: out });
+    expect(broken.outcome).toBe('broken');
+    expect(broken.broken?.reason).toBe('no_download');
+    expect(broken.artifacts).toBeUndefined();
+    expect(missed.calls).not.toContain('save:2025-2026-2.pdf');
+
+    const empty = fakeReplay({ text: '该学年学期尚无您的课表', begin: { id: 'g2', suggestedFilename: 'kb.pdf', url: PAGE } });
+    const skipped = await runSkill(empty.page, skill, params, { outDir: out });
+    expect(skipped.outcome).toBe('empty');
+    expect(skipped.message).toBe('2025-2026 第2学期尚未排课');
+    expect(skipped.artifacts).toBeUndefined();
+    expect(skipped.steps.find((step) => step.id === 's2-download')?.status).toBe('skipped');
+    expect(empty.calls).not.toContain('click');
+  });
+});
+
+function fakeReplay(options: { text: string; begin: ReplayDownload | null }): { page: ReplayPage; calls: string[] } {
+  const calls: string[] = [];
+  const page: ReplayPage = {
+    navigate: async () => {
+      calls.push('navigate');
+      return { url: PAGE, title: 't', snapshot: '' };
+    },
+    capture: async () => ({
+      items: [item({ backend: 4, role: 'button', name: '确定', text: '确定' })],
+      tables: [{ name: '个人课表', rows: options.text.includes('尚无') ? 0 : 2 }],
+      url: PAGE,
+    }),
+    currentUrl: () => PAGE,
+    pageText: async () => options.text,
+    queryCss: async () => [],
+    performBackend: async () => {
+      calls.push('click');
+    },
+    performInput: async () => {
+      calls.push('input');
+    },
+    waitFor: async () => ({ matched: true, url: PAGE, title: 't', snapshot: '' }),
+    excerpt: async () => 'excerpt',
+    markDownloads: () => {
+      calls.push('mark');
+      return 1;
+    },
+    releaseDownloads: () => {
+      calls.push('release');
+    },
+    waitForDownloadBegin: async () => {
+      calls.push('begin');
+      return options.begin;
+    },
+    waitForDownloadComplete: async () => {
+      calls.push('complete');
+      return 'completed';
+    },
+    saveDownload: async (_download, dir, fileName) => {
+      calls.push(`save:${fileName}`);
+      return {
+        deduped: false,
+        file: { path: join(dir, fileName), name: fileName, bytes: 12, sha256: 'abc', url: PAGE },
+      };
+    },
+    printPdf: async () => {
+      throw new Error('pdf was not expected');
+    },
+  };
+  return { page, calls };
+}

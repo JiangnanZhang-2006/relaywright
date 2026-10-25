@@ -1,6 +1,7 @@
 import { RelayError } from '../errors.js';
 import { issuesText } from '../protocol.js';
 import type { TargetDescriptor, TraceStep } from '../recorder/types.js';
+import { fileExtension } from '../session/downloads.js';
 import { SkillSchema, type CheckInput, type Skill, type SkillStep, type SkillTarget } from './schema.js';
 import { templatize, type ExampleParam } from './template.js';
 
@@ -63,7 +64,7 @@ export function buildSkill(steps: readonly TraceStep[], input: {
   }
   let drifted = false;
   for (const step of body) {
-    drafts.push(actionDraft(step, apply, drifted));
+    drafts.push(actionDraft(step, apply, drifted, examples, used));
     if (step.action === 'goto' || step.urlAfter !== step.urlBefore) drifted = true;
     for (const check of (input.checks ?? []).filter((check) => check.after_step === step.n)) {
       drafts.push(expectDraft(check));
@@ -84,6 +85,9 @@ export function buildSkill(steps: readonly TraceStep[], input: {
     }
     if (draft.drifted) warnings.push(`${id} runs after a navigation away from the start URL`);
     if (draft.tabUrl) warnings.push(`${id} runs in tab ${draft.tabUrl}`);
+    if (draft.rewritten) {
+      warnings.push(`${id} save_as had no parameters; rewrote it to ${draft.rewritten} so matrix runs do not collide`);
+    }
     if (JSON.stringify(draft.step).includes('{{secret}}')) {
       warnings.push(`${id} types a secret; replay is refused until the vault exists (drop it with --from/--to)`);
     }
@@ -110,6 +114,7 @@ interface Draft {
   css?: { value: string; unique: boolean };
   drifted?: boolean;
   tabUrl?: string;
+  rewritten?: string;
 }
 
 function exampleParams(params: Record<string, string>): ExampleParam[] {
@@ -152,7 +157,13 @@ function expectDraft(check: CheckInput): Draft {
   };
 }
 
-function actionDraft(step: TraceStep, apply: (value: string) => string, drifted: boolean): Draft {
+function actionDraft(
+  step: TraceStep,
+  apply: (value: string) => string,
+  drifted: boolean,
+  examples: readonly ExampleParam[],
+  used: Set<string>,
+): Draft {
   const target = step.target ? toSkillTarget(step.target) : undefined;
   const css = step.target ? { value: step.target.css, unique: step.target.cssUnique } : undefined;
   const base = { targetName: target?.name, css, drifted, tabUrl: step.tabUrl };
@@ -197,6 +208,35 @@ function actionDraft(step: TraceStep, apply: (value: string) => string, drifted:
           },
         },
       };
+    case 'download': {
+      const saved = saveAsForTrace(step.value || step.suggested || 'download.pdf', apply, examples, used);
+      return {
+        action: 'download',
+        ...base,
+        rewritten: saved.rewritten,
+        step: {
+          download: {
+            click: { target: requiredTarget(step, target) },
+            save_as: saved.saveAs,
+            ...(step.timeout_ms ? { timeout_ms: step.timeout_ms } : {}),
+          },
+        },
+      };
+    }
+    case 'pdf': {
+      const saved = saveAsForTrace(step.value || 'page.pdf', apply, examples, used);
+      return {
+        action: 'pdf',
+        ...base,
+        rewritten: saved.rewritten,
+        step: {
+          pdf: {
+            save_as: saved.saveAs,
+            ...(step.landscape ? { landscape: true } : {}),
+          },
+        },
+      };
+    }
     case 'wait': {
       const text = step.value ? apply(step.value) : undefined;
       const url = step.url ? apply(step.url) : undefined;
@@ -216,6 +256,20 @@ function actionDraft(step: TraceStep, apply: (value: string) => string, drifted:
     default:
       throw new RelayError('bad_params', `Trace step ${step.n} cannot be saved`);
   }
+}
+
+function saveAsForTrace(
+  raw: string,
+  apply: (value: string) => string,
+  examples: readonly ExampleParam[],
+  used: Set<string>,
+): { saveAs: string; rewritten?: string } {
+  const templated = apply(raw);
+  if (examples.length === 0 || templated.includes('{{')) return { saveAs: templated };
+  const ext = fileExtension(raw) || '.pdf';
+  const rewritten = `${examples.map((param) => `{{${param.name}}}`).join('-')}${ext}`;
+  for (const param of examples) used.add(param.name);
+  return { saveAs: rewritten, rewritten };
 }
 
 function requiredTarget(step: TraceStep, target: SkillTarget | undefined): SkillTarget {

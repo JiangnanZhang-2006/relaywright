@@ -21,7 +21,7 @@ export const TargetDescriptorSchema = z.object({
 
 export type TargetDescriptor = z.infer<typeof TargetDescriptorSchema>;
 
-export const TraceActionSchema = z.enum(['goto', 'click', 'type', 'select', 'press', 'scroll', 'wait']);
+export const TraceActionSchema = z.enum(['goto', 'click', 'type', 'select', 'press', 'scroll', 'wait', 'download', 'pdf']);
 
 export type TraceAction = z.infer<typeof TraceActionSchema>;
 
@@ -39,6 +39,9 @@ export const TraceStepSchema = z.object({
   /** Set when this step ran in a different tab than the previous step. */
   tabUrl: z.string().optional(),
   timeout_ms: z.number().int().positive().optional(),
+  /** Browser-suggested download name, before save_as and dedupe. */
+  suggested: z.string().optional(),
+  landscape: z.boolean().optional(),
   observed: z.array(z.string()),
 });
 

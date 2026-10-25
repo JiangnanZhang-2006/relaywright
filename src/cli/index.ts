@@ -3,7 +3,7 @@ import { Command } from 'commander';
 import { installChromeForTesting, whichBrowser } from '../browser/resolve.js';
 import { errorText, packageVersion, readTextFile } from '../config/paths.js';
 import { normalizeActArgs } from './act-args.js';
-import { issuesText } from '../protocol.js';
+import { issuesText, type PageBody } from '../protocol.js';
 import { formatRunReport, formatSkillList, formatTrace } from '../skills/format.js';
 import { CheckSchema, type CheckInput } from '../skills/schema.js';
 import { z } from 'zod';
@@ -12,6 +12,7 @@ import {
   browserTabs,
   clearTrace,
   daemonMismatchLine,
+  download,
   type DaemonStatus,
   ensureDaemon,
   findHealthyDaemon,
@@ -20,6 +21,7 @@ import {
   listSkills,
   navigate,
   parseHttpUrl,
+  printPdf,
   readStatus,
   restartDaemon,
   rollbackSkill,
@@ -31,6 +33,7 @@ import {
   waitFor,
   waitForBrowserReady,
 } from '../daemon/client.js';
+import { humanSize } from '../session/downloads.js';
 
 function wantsJson(command: Command): boolean {
   for (let current: Command | null = command; current; current = current.parent) {
@@ -50,6 +53,11 @@ function emit(command: Command, text: string, json: unknown): void {
 function withStep(text: string, step?: number): string {
   if (!step) return text;
   return `${text}\n(step ${step})`;
+}
+
+function formatPage(page: PageBody): string {
+  const files = (page.downloads ?? []).map((file) => `file: ${file.name}  ${file.bytes}  ${file.sha256}  ${file.path}`).join('\n');
+  return files ? `${page.snapshot}\n${files}` : page.snapshot;
 }
 
 // Exit by exitCode, never process.exit(): on Windows, exiting while fetch sockets close trips a libuv assertion.
@@ -334,7 +342,7 @@ Examples:
   const command = this;
   return guard(command, async () => {
     const page = await navigate(url);
-    emit(command, withStep(page.snapshot, page.step), page);
+    emit(command, withStep(formatPage(page), page.step), page);
   });
 });
 
@@ -362,7 +370,7 @@ Examples:
       throw new Error('--max-rows must be an integer from 1 to 50');
     }
     const page = await getSnapshot({ mode: diff ? 'diff' : 'full', maxRows });
-    emit(command, page.snapshot, page);
+    emit(command, formatPage(page), page);
   });
 });
 
@@ -391,7 +399,65 @@ Examples:
     const key = command.getOptionValue('key') as string | undefined;
     const input = normalizeActArgs(action, ref, value, key);
     const page = await act(input);
-    emit(command, withStep(page.snapshot, page.step), page);
+    emit(command, withStep(formatPage(page), page.step), page);
+  });
+});
+
+addJson(
+  program
+    .command('download')
+    .description('Click a ref and save the file it downloads. File contents are not printed.')
+    .argument('<ref>', 'element ref such as e4')
+    .option('--save-as <name>', 'file name to save as')
+    .option('--timeout <ms>', 'milliseconds to wait for a download to begin (default 30000, max 120000)', (value) => Number(value))
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright download e4
+  relaywright download e4 --save-as 2025-2026-2.pdf
+  relaywright download e4 --timeout 1500 --json
+`,
+    ),
+).action(function (this: Command, ref: string) {
+  const command = this;
+  return guard(command, async () => {
+    const saveAs = command.getOptionValue('saveAs') as string | undefined;
+    const timeoutMs = command.getOptionValue('timeout') as number | undefined;
+    if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000)) {
+      throw new Error('--timeout must be an integer from 1 to 120000');
+    }
+    const page = await download({ ref, ...(saveAs ? { save_as: saveAs } : {}), ...(timeoutMs !== undefined ? { timeout_ms: timeoutMs } : {}) });
+    emit(command, withStep(formatPage(page), page.step), page);
+  });
+});
+
+addJson(
+  program
+    .command('pdf')
+    .description('Print the current page to a PDF. File contents are not printed.')
+    .option('--save-as <name>', 'file name to save as')
+    .option('--landscape', 'print landscape instead of portrait')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright pdf
+  relaywright pdf --save-as timetable.pdf --landscape
+  relaywright pdf --json
+`,
+    ),
+).action(function (this: Command) {
+  const command = this;
+  return guard(command, async () => {
+    const saveAs = command.getOptionValue('saveAs') as string | undefined;
+    const landscape = command.getOptionValue('landscape') === true;
+    const result = await printPdf({
+      ...(saveAs ? { save_as: saveAs } : {}),
+      ...(landscape ? { landscape: true } : {}),
+    });
+    const text = `${result.header}\n(pdf: ${result.file.name} ${humanSize(result.file.bytes)} -> ${result.file.path})\nfile: ${result.file.name}  ${result.file.bytes}  ${result.file.sha256}  ${result.file.path}`;
+    emit(command, withStep(text, result.step), result);
   });
 });
 
@@ -423,7 +489,7 @@ Examples:
       throw new Error('--timeout must be an integer from 1 to 60000');
     }
     const result = await waitFor({ text, ref, url, timeoutMs });
-    emit(command, withStep(`matched: ${result.matched}\n${result.snapshot}`, result.step), result);
+    emit(command, withStep(`matched: ${result.matched}\n${formatPage(result)}`, result.step), result);
   });
 });
 
@@ -468,7 +534,7 @@ Examples:
   return guard(command, async () => {
     const page = await browserTabs({ action: 'select', index });
     if (!('snapshot' in page)) throw new Error('Expected a page snapshot');
-    emit(command, page.snapshot, page);
+    emit(command, formatPage(page), page);
   });
 });
 
@@ -512,7 +578,7 @@ Examples:
   return guard(command, async () => {
     const page = await browserTabs({ action: 'new', ...(url ? { url: parseHttpUrl(url) } : {}) });
     if (!('snapshot' in page)) throw new Error('Expected a page snapshot');
-    emit(command, page.snapshot, page);
+    emit(command, formatPage(page), page);
   });
 });
 
@@ -655,6 +721,7 @@ addJson(
     .option('--param <pair>', 'fixed parameter key=value (repeatable)', collect, [])
     .option('--matrix <pair>', 'parameter axis key=v1,v2 (repeatable)', collect, [])
     .option('--start-url <url>', 'open this URL instead of the skill start_url')
+    .option('--out <dir>', 'directory for download and PDF artifacts')
     .addHelpText(
       'after',
       `
@@ -662,6 +729,7 @@ Examples:
   relaywright skill run zf-timetable --param year=2025-2026 --param term=2
   relaywright skill run zf-timetable --matrix year=2025-2026,2026-2027 --matrix term=1,2
   relaywright skill run zf-timetable --start-url http://127.0.0.1:8765/zf-mock/v2/ --param year=2025-2026 --param term=2
+  relaywright skill run zf-timetable --matrix year=2025-2026 --matrix term=1,2 --out ./out
 `,
     ),
 ).action(function (this: Command, name: string) {
@@ -670,10 +738,12 @@ Examples:
     const params = pairs(command.getOptionValue('param') as string[], '--param year=2025-2026');
     const matrix = matrixPairs(command.getOptionValue('matrix') as string[]);
     const startUrl = command.getOptionValue('startUrl') as string | undefined;
+    const outDir = command.getOptionValue('out') as string | undefined;
     const report = await runSkill(name, {
       ...(Object.keys(params).length > 0 ? { params } : {}),
       ...(Object.keys(matrix).length > 0 ? { matrix } : {}),
       ...(startUrl ? { startUrl } : {}),
+      ...(outDir ? { out_dir: outDir } : {}),
     });
     emit(command, formatRunReport(report.results), report);
     if (report.exit_code !== 0) process.exitCode = report.exit_code;

@@ -1,10 +1,11 @@
+import { unlink } from 'node:fs/promises';
 import type { Page } from 'puppeteer-core';
 import puppeteer, { type Browser } from 'puppeteer-core';
 import { resolveBrowserForLaunch, type ResolvedBrowser } from '../browser/resolve.js';
-import { defaultProfileDir, ensureHomeLayout, errorText, logDaemon } from '../config/paths.js';
+import { defaultProfileDir, downloadsDir, ensureHomeLayout, errorText, logDaemon } from '../config/paths.js';
 import { browserDownloadingMessage, RelayError, staleTabRefMessage } from '../errors.js';
-import { ensureTabHeader, switchBanner } from '../perception/snapshot.js';
-import type { ActInput, DaemonStatus, PageBody, TabsCommand, TabsList, WaitInput } from '../protocol.js';
+import { ensureTabHeader, pageHeader, switchBanner } from '../perception/snapshot.js';
+import type { ActInput, DaemonStatus, DownloadInfo, DownloadInput, PageBody, PdfInput, PdfResult, TabsCommand, TabsList, WaitInput } from '../protocol.js';
 import { observedLines, TraceLog } from '../recorder/trace.js';
 import { valueForTrace } from '../recorder/redact.js';
 import type { DescribedTarget, TraceView } from '../recorder/types.js';
@@ -18,6 +19,18 @@ import {
   skillHistory as storedSkillHistory,
   writeSkill as writeStoredSkill,
 } from '../skills/store.js';
+import {
+  assertSaveAs,
+  canceledLine,
+  sanitizeFilename,
+  downloadLine,
+  DownloadManager,
+  preferExternalPdf,
+  PRINT_REQUESTED_LINE,
+  publishDownload,
+  stageBytes,
+  stripDownloadUrl,
+} from './downloads.js';
 import { PageController, type ReplayPage } from './page.js';
 import { formatTabList, POPUP_GRACE_MS, TabSet } from './tabs.js';
 import { bounded } from './timeout.js';
@@ -44,6 +57,8 @@ export interface BrowserControl {
   navigate(url: string): Promise<PageBody>;
   snapshot(options?: { mode?: 'full' | 'diff'; maxRows?: number }): Promise<PageBody>;
   act(input: ActInput): Promise<PageBody>;
+  download(input: DownloadInput): Promise<PageBody>;
+  pdf(input: PdfInput): Promise<PdfResult>;
   waitFor(input: WaitInput): Promise<PageBody & { matched: boolean }>;
   tabs(input: TabsCommand): Promise<TabsList | PageBody>;
   trace(): TraceView;
@@ -70,6 +85,7 @@ export class BrowserSession implements BrowserControl {
   private phase: BrowserPhase = { state: 'idle' };
   private attempt: Promise<void> | null = null;
   private browser: Browser | null = null;
+  private downloads: DownloadManager | null = null;
   private tabSet: TabSet | null = null;
   private executablePath = '';
   private browserVersion = '';
@@ -123,7 +139,7 @@ export class BrowserSession implements BrowserControl {
     const urlBefore = controller.currentUrl();
     const actionPage = controller.pageHandle();
     const page = await controller.navigate(url, this.tabset().tabHint());
-    const shown = this.present(page);
+    const shown = this.finishPage(page);
     return this.record(shown, {
       action: 'goto',
       urlBefore,
@@ -139,7 +155,7 @@ export class BrowserSession implements BrowserControl {
     const kind = this.tabset().peekSwitch();
     const mode = options?.mode ?? 'full';
     const body = await controller.snapshot(kind ? 'full' : mode, options?.maxRows, this.tabset().tabHint());
-    return this.present(body);
+    return this.finishPage(body);
   }
 
   async act(input: ActInput): Promise<PageBody> {
@@ -148,22 +164,128 @@ export class BrowserSession implements BrowserControl {
     const actionPage = controller.pageHandle();
     const described = input.ref ? await this.describe(controller, input.ref) : undefined;
     const since = this.tabset().generation();
-    await controller.performInput(input);
-    const switched = await this.tabset().waitForPopup(since, actionPage, input.action === 'click' ? POPUP_GRACE_MS : 0);
-    const current = switched ? await this.tabset().current() : controller;
-    const kind = this.tabset().peekSwitch();
-    const body = await current.snapshot(kind || switched ? 'full' : 'diff', undefined, this.tabset().tabHint());
-    const shown = this.present(body);
-    return this.record(shown, {
-      action: input.action,
-      urlBefore,
-      urlAfter: shown.url,
-      target: described?.target,
-      value: valueForTrace(input.action, input.value, described ? { ...described.target, sensitive: described.sensitive } : undefined),
-      key: input.key,
-      observed: observedLines(shown.snapshot),
-      tabUrl: this.noteTab(actionPage, urlBefore),
-    });
+    const mark = this.downloader().mark();
+    const printBefore = await controller.printCount();
+    try {
+      await controller.performInput(input);
+      const switched = await this.tabset().waitForPopup(since, actionPage, input.action === 'click' ? POPUP_GRACE_MS : 0);
+      // target=_blank (a PDF form, for example) can emit the download after the click returns.
+      if (input.action === 'click' && this.tabset().generation() !== since) {
+        await this.downloader().waitForAnyBegin(mark, 2_000);
+      }
+      const caught = await this.finishDownloads(mark);
+      const lines = [...caught.lines];
+      if (await this.printIncreased(controller, printBefore)) lines.push(PRINT_REQUESTED_LINE);
+      const kind = this.tabset().peekSwitch();
+      const body = await this.readSnapshot(kind || switched ? 'full' : 'diff');
+      const shown = this.finishPage(body, { downloads: caught.files, lines });
+      const produced = input.action === 'click' && caught.files.length > 0;
+      const file = caught.files[0];
+      return this.record(shown, {
+        action: produced ? 'download' : input.action,
+        urlBefore,
+        urlAfter: shown.url,
+        target: described?.target,
+        value: produced && file ? file.name : valueForTrace(input.action, input.value, described ? { ...described.target, sensitive: described.sensitive } : undefined),
+        suggested: produced ? caught.suggested : undefined,
+        key: input.key,
+        observed: observedLines(shown.snapshot),
+        tabUrl: this.noteTab(actionPage, urlBefore),
+      });
+    } finally {
+      this.downloads?.release(mark);
+    }
+  }
+
+  async download(input: DownloadInput): Promise<PageBody> {
+    if (input.save_as) assertSaveAs(input.save_as);
+    const controller = await this.prepareController();
+    const urlBefore = controller.currentUrl();
+    const actionPage = controller.pageHandle();
+    const described = await this.describe(controller, input.ref);
+    const since = this.tabset().generation();
+    const mark = this.downloader().mark();
+    const printBefore = await controller.printCount();
+    const timeout = input.timeout_ms ?? 30_000;
+    try {
+      await controller.performInput({ action: 'click', ref: input.ref });
+      await this.tabset().waitForPopup(since, actionPage, POPUP_GRACE_MS);
+      const started = await this.downloader().waitForBegin(mark, timeout);
+      if (!started) {
+        throw new RelayError(
+          'no_download',
+          'No download began after the click. The click may have opened a dialog that needs another click.',
+        );
+      }
+      const done = await this.downloader().waitForComplete(started);
+      const lines: string[] = [];
+      const files: DownloadInfo[] = [];
+      if (done.state === 'canceled') {
+        lines.push(canceledLine(done.suggestedFilename));
+      } else {
+        const published = await this.downloader().finalize(done, {
+          dir: downloadsDir(),
+          fileName: input.save_as ?? done.suggestedFilename,
+          dedupe: true,
+        });
+        files.push(published.info);
+        lines.push(downloadLine(published.info));
+      }
+      if (await this.printIncreased(controller, printBefore)) lines.push(PRINT_REQUESTED_LINE);
+      const kind = this.tabset().peekSwitch();
+      const body = await this.readSnapshot(kind ? 'full' : 'diff');
+      const shown = this.finishPage(body, { downloads: files, lines });
+      const file = files[0];
+      if (!file) return shown;
+      return this.record(shown, {
+        action: 'download',
+        urlBefore,
+        urlAfter: shown.url,
+        target: described.target,
+        value: input.save_as ?? file.name,
+        suggested: done.suggestedFilename,
+        timeout_ms: timeout,
+        observed: observedLines(shown.snapshot),
+        tabUrl: this.noteTab(actionPage, urlBefore),
+      });
+    } finally {
+      this.downloads?.release(mark);
+    }
+  }
+
+  async pdf(input: PdfInput): Promise<PdfResult> {
+    if (input.save_as) assertSaveAs(input.save_as);
+    const controller = await this.prepareController();
+    const url = controller.currentUrl();
+    const title = await bounded(controller.pageHandle().title(), TITLE_TIMEOUT_MS, 'title').catch(() => '');
+    const bytes = await controller.printToPdf({ landscape: input.landscape });
+    const fileName = input.save_as ?? `${sanitizeTitle(title)}.pdf`;
+    const sourcePath = await stageBytes(bytes);
+    try {
+      const published = await publishDownload({
+        sourcePath,
+        dir: downloadsDir(),
+        fileName,
+        url: stripDownloadUrl(url),
+        mime: 'application/pdf',
+        dedupe: true,
+      });
+      const header = pageHeader(title, url, this.tabset().tabHint());
+      return this.record(
+        { url, title, header, file: published.info },
+        {
+          action: 'pdf',
+          urlBefore: url,
+          urlAfter: url,
+          value: input.save_as ?? published.info.name,
+          ...(input.landscape !== undefined ? { landscape: input.landscape } : {}),
+          observed: [],
+        },
+      );
+    } catch (err) {
+      await unlink(sourcePath).catch(() => undefined);
+      throw err;
+    }
   }
 
   async waitFor(input: WaitInput): Promise<PageBody & { matched: boolean }> {
@@ -179,7 +301,7 @@ export class BrowserSession implements BrowserControl {
       const body = await current.snapshot('full', undefined, this.tabset().tabHint());
       result = { matched: result.matched, url: body.url, title: body.title, snapshot: body.snapshot };
     }
-    const shown = this.present(result);
+    const shown = this.finishPage(result);
     const withMatch = { ...shown, matched: result.matched };
     if (!result.matched) return withMatch;
     return this.record(withMatch, {
@@ -207,15 +329,15 @@ export class BrowserSession implements BrowserControl {
     if (input.action === 'select') {
       if (input.index === undefined) throw new RelayError('bad_request', 'index is required for select');
       const controller = await tabs.select(input.index);
-      return this.present(await controller.snapshot('full', undefined, tabs.tabHint()));
+      return this.finishPage(await controller.snapshot('full', undefined, tabs.tabHint()));
     }
     if (input.action === 'new') {
       const controller = await tabs.openBlank();
       if (input.url) {
         const body = await controller.navigate(parseHttpUrl(input.url), tabs.tabHint());
-        return this.present(body);
+        return this.finishPage(body);
       }
-      return this.present(await controller.snapshot('full', undefined, tabs.tabHint()));
+      return this.finishPage(await controller.snapshot('full', undefined, tabs.tabHint()));
     }
     await tabs.closeIndex(input.index);
     const described = await tabs.describe();
@@ -279,6 +401,9 @@ export class BrowserSession implements BrowserControl {
 
   async close(): Promise<void> {
     this.closed = true;
+    const downloads = this.downloads;
+    this.downloads = null;
+    if (downloads) await downloads.dispose().catch(() => undefined);
     const tabs = this.tabSet;
     this.tabSet = null;
     if (tabs) await tabs.dispose().catch(() => undefined);
@@ -321,6 +446,42 @@ export class BrowserSession implements BrowserControl {
       },
       waitFor: async (input) => (await use()).waitFor(input),
       excerpt: async () => (await use()).excerpt(),
+      markDownloads: () => session.downloader().mark(),
+      releaseDownloads: (mark) => session.downloader().release(mark),
+      waitForDownloadBegin: async (mark, timeoutMs) => {
+        const pending = await session.downloader().waitForBegin(mark, timeoutMs);
+        if (!pending) return null;
+        return { id: pending.id, suggestedFilename: pending.suggestedFilename, url: pending.url };
+      },
+      waitForDownloadComplete: async (download) => {
+        const done = await session.downloader().waitForComplete(download);
+        return done.state === 'canceled' ? 'canceled' : 'completed';
+      },
+      saveDownload: async (download, dir, fileName) => {
+        assertSaveAs(fileName);
+        const published = await session.downloader().finalize(download, { dir, fileName, dedupe: true });
+        return { file: published.info, deduped: published.deduped };
+      },
+      printPdf: async ({ dir, fileName, landscape }) => {
+        assertSaveAs(fileName);
+        const controller = await use();
+        const bytes = await controller.printToPdf({ landscape });
+        const sourcePath = await stageBytes(bytes);
+        try {
+          const published = await publishDownload({
+            sourcePath,
+            dir,
+            fileName,
+            url: stripDownloadUrl(controller.currentUrl()),
+            mime: 'application/pdf',
+            dedupe: true,
+          });
+          return { file: published.info, deduped: published.deduped };
+        } catch (err) {
+          await unlink(sourcePath).catch(() => undefined);
+          throw err;
+        }
+      },
     };
   }
 
@@ -346,7 +507,67 @@ export class BrowserSession implements BrowserControl {
     return controller.describeRef(ref);
   }
 
-  private record<T extends PageBody>(page: T, input: Parameters<TraceLog['append']>[0]): T {
+  private finishPage<T extends PageBody>(body: T, extra?: { downloads?: DownloadInfo[]; lines?: string[] }): T {
+    const pending = this.downloads?.takeUnreported() ?? { files: [], lines: [] };
+    const downloads = [...(extra?.downloads ?? []), ...pending.files];
+    const lines = [...(extra?.lines ?? []), ...pending.lines];
+    let snapshot = body.snapshot;
+    if (lines.length > 0) snapshot = `${snapshot}\n${lines.join('\n')}`;
+    const presented = this.present({ ...body, snapshot });
+    if (downloads.length === 0) return presented;
+    return { ...presented, downloads };
+  }
+
+  private async finishDownloads(mark: number): Promise<{ files: DownloadInfo[]; lines: string[]; suggested?: string }> {
+    const pending = this.downloader().claimSince(mark);
+    const files: DownloadInfo[] = [];
+    const lines: string[] = [];
+    let suggested: string | undefined;
+    for (const item of pending) {
+      const done = await this.downloader().waitForComplete(item);
+      if (done.state === 'canceled') {
+        lines.push(canceledLine(done.suggestedFilename));
+        continue;
+      }
+      const published = await this.downloader().finalize(done, {
+        dir: downloadsDir(),
+        fileName: done.suggestedFilename,
+        dedupe: true,
+      });
+      files.push(published.info);
+      lines.push(downloadLine(published.info));
+      if (!suggested) suggested = done.suggestedFilename;
+    }
+    return { files, lines, suggested };
+  }
+
+  private async readSnapshot(mode: 'full' | 'diff'): Promise<PageBody> {
+    const once = async (): Promise<PageBody> => {
+      const current = await this.tabset().current();
+      if (current.pageHandle().isClosed()) throw new Error('Target closed');
+      return current.snapshot(mode, undefined, this.tabset().tabHint());
+    };
+    try {
+      return await once();
+    } catch (err) {
+      if (!isClosedTarget(err)) throw err;
+      logDaemon(`snapshot retried after tab close: ${errorText(err)}`);
+      return once();
+    }
+  }
+
+  private async printIncreased(controller: PageController, before: number): Promise<boolean> {
+    if (controller.pageHandle().isClosed()) return false;
+    return (await controller.printCount()) > before;
+  }
+
+  private downloader(): DownloadManager {
+    const downloads = this.downloads;
+    if (!downloads) throw new Error('Browser is not connected');
+    return downloads;
+  }
+
+  private record<T extends { url?: string; step?: number }>(page: T, input: Parameters<TraceLog['append']>[0]): T {
     if (this.replayDepth > 0) return page;
     const step = this.traceLog.append(input);
     return { ...page, step: step.n };
@@ -427,6 +648,7 @@ export class BrowserSession implements BrowserControl {
       if (this.closed) return;
       this.phase = { state: 'launching' };
       ensureHomeLayout();
+      preferExternalPdf(defaultProfileDir());
       const headless = process.env.RELAYWRIGHT_HEADLESS === '1';
       logDaemon(`launching browser headless=${headless ? '1' : '0'} source=${resolved.source} path=${resolved.path}`);
       const browser = await this.launchBrowser({
@@ -447,12 +669,23 @@ export class BrowserSession implements BrowserControl {
         return;
       }
       this.browser = browser;
+      const downloads = await DownloadManager.start(browser);
+      if (this.closed) {
+        await downloads.dispose().catch(() => undefined);
+        await browser.close().catch(() => undefined);
+        this.browser = null;
+        return;
+      }
+      this.downloads = downloads;
       browser.on('disconnected', () => {
         logDaemon('browser disconnected');
         if (this.browser === browser) {
           this.browser = null;
           const open = this.tabSet;
           this.tabSet = null;
+          const caught = this.downloads;
+          this.downloads = null;
+          void caught?.dispose().catch(() => undefined);
           void open?.dispose().catch(() => undefined);
           if (!this.closed && this.phase.state === 'ready') {
             this.phase = { state: 'error', message: 'Browser disconnected' };
@@ -464,6 +697,8 @@ export class BrowserSession implements BrowserControl {
       await tabs.start();
       if (this.closed) {
         await tabs.dispose().catch(() => undefined);
+        await downloads.dispose().catch(() => undefined);
+        this.downloads = null;
         await browser.close().catch(() => undefined);
         this.browser = null;
         return;
@@ -481,6 +716,9 @@ export class BrowserSession implements BrowserControl {
       const tabs = this.tabSet;
       this.tabSet = null;
       void tabs?.dispose().catch(() => undefined);
+      const downloads = this.downloads;
+      this.downloads = null;
+      void downloads?.dispose().catch(() => undefined);
       const browser = this.browser;
       this.browser = null;
       if (browser) await browser.close().catch(() => undefined);
@@ -499,6 +737,19 @@ function parseHttpUrl(value: string): string {
     throw new RelayError('bad_request', `Only http and https URLs are supported, got ${url.protocol}`);
   }
   return url.toString();
+}
+
+function sanitizeTitle(title: string): string {
+  const name = sanitizeFilename(title.trim() || 'page');
+  if (name.toLowerCase().endsWith('.pdf')) {
+    const stem = name.slice(0, -4).replace(/[. ]+$/g, '');
+    return stem || 'page';
+  }
+  return name;
+}
+
+function isClosedTarget(err: unknown): boolean {
+  return /Target closed|Session closed|Connection closed|TargetClose|detached|Tab closed|Tab is closed/i.test(errorText(err));
 }
 
 function delay(ms: number): Promise<void> {

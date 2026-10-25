@@ -1,12 +1,33 @@
-import { createServer, type Server } from 'node:http';
+import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { extname, resolve, sep } from 'node:path';
+import { extname, join, resolve, sep } from 'node:path';
 
 export async function startStatic(root: string): Promise<{ port: number; close: () => Promise<void> }> {
   const base = resolve(root);
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      if (req.method === 'POST' && url.pathname === '/zf-mock/export.pdf') {
+        await drain(req);
+        const pdf = await readFile(join(base, 'sample.pdf'));
+        res.writeHead(200, {
+          'content-type': 'application/pdf',
+          'content-disposition': 'inline; filename="kb.pdf"',
+          'cache-control': 'no-store',
+        });
+        res.end(pdf);
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/zf-mock/attachment.pdf') {
+        const pdf = await readFile(join(base, 'sample.pdf'));
+        res.writeHead(200, {
+          'content-type': 'application/pdf',
+          'content-disposition': 'attachment; filename="notes.pdf"',
+          'cache-control': 'no-store',
+        });
+        res.end(pdf);
+        return;
+      }
       let pathname = decodeURIComponent(url.pathname);
       if (pathname.endsWith('/')) pathname += 'index.html';
       const file = resolve(base, `.${pathname}`);
@@ -33,6 +54,13 @@ export async function startStatic(root: string): Promise<{ port: number; close: 
     port,
     close: () => closeServer(server),
   };
+}
+
+async function drain(req: IncomingMessage): Promise<void> {
+  if (req.readableEnded) return;
+  for await (const chunk of req) {
+    void chunk;
+  }
 }
 
 function mime(extension: string): string {

@@ -34,7 +34,6 @@ describe.skipIf(!resolved.path)('portal tabs', () => {
 
   beforeAll(async () => {
     process.env.RELAYWRIGHT_HOME = mkdtempSync(join(tmpdir(), 'relaywright-portal-e2e-'));
-    process.env.RELAYWRIGHT_HEADLESS = '1';
     server = await startStatic(join(repoRoot, 'fixtures'));
     portal = `http://127.0.0.1:${server.port}/zf-mock/v1/portal.html`;
     timetable = `http://127.0.0.1:${server.port}/zf-mock/v1/index.html`;

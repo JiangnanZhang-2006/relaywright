@@ -45,12 +45,21 @@ export function skillsDir(): string {
   return join(relaywrightHome(), 'skills');
 }
 
+export function downloadsDir(): string {
+  return join(relaywrightHome(), 'downloads');
+}
+
+export function downloadsStagingDir(): string {
+  return join(downloadsDir(), '.staging');
+}
+
 export function ensureHomeLayout(): void {
   mkdirSync(logsDir(), { recursive: true });
   mkdirSync(defaultProfileDir(), { recursive: true });
   mkdirSync(browsersDir(), { recursive: true });
   mkdirSync(tracesDir(), { recursive: true });
   mkdirSync(skillsDir(), { recursive: true });
+  mkdirSync(downloadsStagingDir(), { recursive: true });
 }
 
 let cachedVersion: string | undefined;

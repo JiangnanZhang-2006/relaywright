@@ -5,7 +5,7 @@ import type { Server } from 'node:http';
 import { z } from 'zod';
 import { errorText, logDaemon, packageVersion } from '../config/paths.js';
 import { RelayError, relayStatus, type RelayErrorCode } from '../errors.js';
-import { ActSchema, issuesText, SnapshotQuery, TabsCommandSchema, WaitSchema } from '../protocol.js';
+import { ActSchema, DownloadSchema, issuesText, PdfSchema, SnapshotQuery, TabsCommandSchema, WaitSchema } from '../protocol.js';
 import type { BrowserControl } from '../session/browser.js';
 import { RunSkillInputSchema, SaveSkillInputSchema } from '../skills/schema.js';
 
@@ -90,6 +90,26 @@ export function createApp(options: AppOptions): Hono {
       const body = ActSchema.safeParse(await readJson(c));
       if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
       return c.json(await options.session.act(body.data));
+    } catch (err) {
+      return browserError(c, err);
+    }
+  });
+
+  app.post('/download', async (c) => {
+    try {
+      const body = DownloadSchema.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return c.json(await options.session.download(body.data));
+    } catch (err) {
+      return browserError(c, err);
+    }
+  });
+
+  app.post('/pdf', async (c) => {
+    try {
+      const body = PdfSchema.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return c.json(await options.session.pdf(body.data));
     } catch (err) {
       return browserError(c, err);
     }

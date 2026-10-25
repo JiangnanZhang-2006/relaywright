@@ -30,7 +30,6 @@ describe.skipIf(!resolved.path)('skill replay on the timetable fixture', () => {
 
   beforeAll(async () => {
     process.env.RELAYWRIGHT_HOME = mkdtempSync(join(tmpdir(), 'relaywright-skill-e2e-'));
-    process.env.RELAYWRIGHT_HEADLESS = '1';
     server = await startStatic(join(repoRoot, 'fixtures'));
     v1 = `http://127.0.0.1:${server.port}/zf-mock/v1/`;
     v2 = `http://127.0.0.1:${server.port}/zf-mock/v2/`;

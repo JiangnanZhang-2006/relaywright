@@ -1,6 +1,11 @@
+import { existsSync, mkdirSync } from 'node:fs';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { ActInput } from '../actions/perform.js';
+import { downloadsDir } from '../config/paths.js';
 import { RelayError } from '../errors.js';
 import type { ModelItem } from '../perception/snapshot.js';
+import { assertSaveAs } from '../session/downloads.js';
 import type { ReplayPage } from '../session/page.js';
 import { chooseLocator, type LocatorKind } from './locate.js';
 import {
@@ -9,6 +14,7 @@ import {
   type MatrixResult,
   type RunSkillInput,
   type Skill,
+  type SkillArtifact,
   type SkillOutcome,
   type SkillRunResult,
   type SkillStep,
@@ -26,6 +32,8 @@ interface OneStep {
   outcome?: SkillOutcome;
   message?: string;
   broken?: BrokenReport;
+  artifact?: SkillArtifact;
+  warning?: string;
 }
 
 export function expandMatrix(matrix: Record<string, string[]> | undefined, fixed: Record<string, string> = {}): Record<string, string>[] {
@@ -49,26 +57,32 @@ export function summaryExitCode(results: readonly { outcome: string }[]): 0 | 30
 export async function runMatrix(page: ReplayPage, skill: Skill, input: RunSkillInput): Promise<MatrixResult> {
   const combos = expandMatrix(input.matrix, input.params ?? {});
   for (const params of combos) bindSkill(skill, params);
+  const outDir = input.out_dir ?? runOutputDir(skill.name);
+  await mkdir(outDir, { recursive: true });
   const results: SkillRunResult[] = [];
   for (const params of combos) {
-    results.push(await runSkill(page, skill, params, { startUrl: input.startUrl }));
+    results.push(await runSkill(page, skill, params, { startUrl: input.startUrl, outDir }));
   }
-  return { results, exit_code: summaryExitCode(results) };
+  return { results, exit_code: summaryExitCode(results), out_dir: outDir };
 }
 
 export async function runSkill(
   page: ReplayPage,
   skill: Skill,
   params: Record<string, string>,
-  options?: { startUrl?: string },
+  options?: { startUrl?: string; outDir?: string },
 ): Promise<SkillRunResult> {
   const bound = bindSkill(skill, params);
+  const outDir = options?.outDir ?? runOutputDir(skill.name);
+  await mkdir(outDir, { recursive: true });
   const started = Date.now();
   await page.navigate(options?.startUrl ?? bound.start_url);
   let outcome: Running = 'undecided';
   let message: string | undefined;
   let broken: BrokenReport | undefined;
   const steps: StepResult[] = [];
+  const artifacts: SkillArtifact[] = [];
+  const warnings: string[] = [];
   let stop = false;
   for (const step of bound.steps) {
     const stepStarted = Date.now();
@@ -76,13 +90,15 @@ export async function runSkill(
       steps.push({ id: step.id, status: 'skipped', ms: 0 });
       continue;
     }
-    const result = await runStep(page, step);
+    const result = await runStep(page, step, outDir);
     steps.push({
       id: step.id,
       status: result.status,
       ...(result.locator ? { locator: result.locator } : {}),
       ms: Date.now() - stepStarted,
     });
+    if (result.artifact) artifacts.push(result.artifact);
+    if (result.warning) warnings.push(result.warning);
     if (result.broken) {
       broken = result.broken;
       outcome = 'broken';
@@ -100,6 +116,8 @@ export async function runSkill(
     steps,
     duration_ms: Date.now() - started,
     ...(broken ? { broken } : {}),
+    ...(artifacts.length > 0 ? { artifacts } : {}),
+    ...(warnings.length > 0 ? { warnings } : {}),
   };
 }
 
@@ -119,7 +137,7 @@ function shouldRun(step: SkillStep, outcome: Running): boolean {
   return outcome === 'undecided' || outcome === 'ok';
 }
 
-async function runStep(page: ReplayPage, step: SkillStep): Promise<OneStep> {
+async function runStep(page: ReplayPage, step: SkillStep, outDir: string): Promise<OneStep> {
   try {
     if (step.goto) {
       await page.navigate(step.goto.url);
@@ -127,10 +145,52 @@ async function runStep(page: ReplayPage, step: SkillStep): Promise<OneStep> {
     }
     if (step.expect) return await runExpect(page, step);
     if (step.wait) return await runWait(page, step);
+    if (step.download) return await runDownload(page, step, outDir);
+    if (step.pdf) return await runPdf(page, step, outDir);
     return await runAct(page, step);
   } catch (err) {
     return { status: 'failed', broken: await report(page, step, reasonOf(err)) };
   }
+}
+
+async function runDownload(page: ReplayPage, step: SkillStep, outDir: string): Promise<OneStep> {
+  const download = step.download;
+  if (!download) return { status: 'done' };
+  assertSaveAs(download.save_as);
+  const target = download.click.target;
+  const model = await page.capture();
+  const hit = await locate(page, model.items, target);
+  if (!hit) return { status: 'failed', broken: await report(page, step, 'target_not_found') };
+  const mark = page.markDownloads();
+  try {
+    await page.performBackend(hit.backend, { action: 'click' });
+    const started = await page.waitForDownloadBegin(mark, download.timeout_ms ?? 30_000);
+    if (!started) return { status: 'failed', broken: await report(page, step, 'no_download'), locator: hit.locator };
+    const state = await page.waitForDownloadComplete(started);
+    if (state === 'canceled') return { status: 'failed', broken: await report(page, step, 'download_canceled'), locator: hit.locator };
+    const saved = await page.saveDownload(started, outDir, download.save_as);
+    return {
+      status: 'done',
+      locator: hit.locator,
+      artifact: artifactOf(step.id, saved.file),
+      ...(saved.deduped ? { warning: `${step.id} save_as ${download.save_as} already existed; saved as ${saved.file.name}` } : {}),
+    };
+  } catch (err) {
+    page.releaseDownloads(mark);
+    throw err;
+  }
+}
+
+async function runPdf(page: ReplayPage, step: SkillStep, outDir: string): Promise<OneStep> {
+  const pdf = step.pdf;
+  if (!pdf) return { status: 'done' };
+  assertSaveAs(pdf.save_as);
+  const saved = await page.printPdf({ dir: outDir, fileName: pdf.save_as, landscape: pdf.landscape });
+  return {
+    status: 'done',
+    artifact: artifactOf(step.id, saved.file),
+    ...(saved.deduped ? { warning: `${step.id} save_as ${pdf.save_as} already existed; saved as ${saved.file.name}` } : {}),
+  };
 }
 
 async function runAct(page: ReplayPage, step: SkillStep): Promise<OneStep> {
@@ -286,6 +346,19 @@ function bindStep(step: SkillStep, render: (value: string) => string): SkillStep
       })),
     };
   }
+  if (step.download) {
+    next.download = {
+      click: { target: bindTarget(step.download.click.target, render) },
+      save_as: render(step.download.save_as),
+      ...(step.download.timeout_ms !== undefined ? { timeout_ms: step.download.timeout_ms } : {}),
+    };
+  }
+  if (step.pdf) {
+    next.pdf = {
+      save_as: render(step.pdf.save_as),
+      ...(step.pdf.landscape !== undefined ? { landscape: step.pdf.landscape } : {}),
+    };
+  }
   return next;
 }
 
@@ -307,6 +380,29 @@ function bindWhen(when: When, render: (value: string) => string): When {
     ...(when.table_rows_min !== undefined ? { table_rows_min: when.table_rows_min } : {}),
     ...(when.url_contains !== undefined ? { url_contains: render(when.url_contains) } : {}),
   };
+}
+
+function artifactOf(stepId: string, file: { path: string; bytes: number; sha256: string }): SkillArtifact {
+  return { step_id: stepId, path: file.path, bytes: file.bytes, sha256: file.sha256 };
+}
+
+/** One directory for every combo in a matrix run, so rendered names stay comparable. */
+export function runOutputDir(skillName: string, at = new Date()): string {
+  const root = join(downloadsDir(), skillName);
+  const stamp = runStamp(at);
+  let dir = join(root, stamp);
+  let extra = 2;
+  while (existsSync(dir)) {
+    dir = join(root, `${stamp}-${extra}`);
+    extra += 1;
+  }
+  mkdirSync(root, { recursive: true });
+  return dir;
+}
+
+function runStamp(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
 }
 
 function delay(ms: number): Promise<void> {

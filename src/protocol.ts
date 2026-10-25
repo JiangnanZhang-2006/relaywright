@@ -28,11 +28,23 @@ export const StatusSchema = z.object({
 
 export type DaemonStatus = z.infer<typeof StatusSchema>;
 
+export const DownloadInfoSchema = z.object({
+  path: z.string(),
+  name: z.string(),
+  bytes: z.number().int().nonnegative(),
+  sha256: z.string(),
+  url: z.string(),
+  mime: z.string().optional(),
+});
+
+export type DownloadInfo = z.infer<typeof DownloadInfoSchema>;
+
 export const PageSchema = z.object({
   url: z.string(),
   title: z.string(),
   snapshot: z.string(),
   step: z.number().int().positive().optional(),
+  downloads: z.array(DownloadInfoSchema).optional(),
 });
 
 export type PageBody = z.infer<typeof PageSchema>;
@@ -119,6 +131,31 @@ export const TabsCommandSchema = z
   });
 
 export type TabsCommand = z.infer<typeof TabsCommandSchema>;
+
+export const DownloadSchema = z.object({
+  ref: z.string().min(1),
+  save_as: z.string().min(1).optional(),
+  timeout_ms: z.number().int().min(1).max(120_000).default(30_000),
+});
+
+export type DownloadInput = z.infer<typeof DownloadSchema>;
+
+export const PdfSchema = z.object({
+  save_as: z.string().min(1).optional(),
+  landscape: z.boolean().optional(),
+});
+
+export type PdfInput = z.infer<typeof PdfSchema>;
+
+export const PdfResultSchema = z.object({
+  url: z.string(),
+  title: z.string(),
+  header: z.string(),
+  file: DownloadInfoSchema,
+  step: z.number().int().positive().optional(),
+});
+
+export type PdfResult = z.infer<typeof PdfResultSchema>;
 
 export function issuesText(error: { issues: { message: string }[] }): string {
   return error.issues.map((issue) => issue.message).join('; ');

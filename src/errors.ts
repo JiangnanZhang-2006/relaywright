@@ -10,6 +10,8 @@ export const RELAY_ERROR_CODES = [
   'param_unused',
   'skill_exists',
   'skill_not_found',
+  'no_download',
+  'pdf_unsupported',
 ] as const;
 
 export type RelayErrorCode = (typeof RELAY_ERROR_CODES)[number];
@@ -30,6 +32,7 @@ export function relayStatus(code: RelayErrorCode): 400 | 404 | 409 | 500 | 503 |
     case 'stale_ref':
     case 'occluded':
     case 'skill_exists':
+    case 'no_download':
       return 409;
     case 'no_such_option':
     case 'bad_request':

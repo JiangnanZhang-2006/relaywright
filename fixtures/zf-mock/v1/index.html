@@ -18,6 +18,8 @@
     .chosen-results li { padding: 4px 8px; cursor: pointer; }
     #crumb { margin: 8px 0; }
     button { margin-right: 8px; }
+    #pdf-modal { margin-top: 8px; padding: 8px; border: 1px solid #ccc; }
+    #pdf-modal label { margin-right: 12px; }
     iframe { display: block; width: 480px; height: 140px; margin-top: 16px; border: 1px solid #ddd; }
     #login-box { margin-top: 24px; }
     table { border-collapse: collapse; margin-top: 12px; }
@@ -43,6 +45,17 @@
     </div>
     <button type="button" id="search_go" class="btn btn-primary">查询</button>
     <button type="button" id="shcPDF">输出PDF</button>
+  </form>
+  <div id="pdf-modal" hidden>
+    <p>选择版式</p>
+    <label><input type="radio" name="kb-layout" value="portrait" checked> 纵向</label>
+    <label><input type="radio" name="kb-layout" value="landscape"> 横向</label>
+    <button type="button" id="pdf-ok">确定</button>
+  </div>
+  <form id="pdf-export" method="post" action="/zf-mock/export.pdf" target="_blank">
+    <input type="hidden" name="year" id="pdf-year">
+    <input type="hidden" name="term" id="pdf-term">
+    <input type="hidden" name="layout" id="pdf-layout">
   </form>
   <div role="tablist">
     <button type="button" role="tab" aria-selected="true">表格</button>
@@ -155,6 +168,20 @@
           wrap.innerHTML = '';
           empty.hidden = false;
         });
+      });
+
+      document.getElementById('shcPDF').addEventListener('click', function () {
+        document.getElementById('pdf-modal').hidden = false;
+      });
+
+      document.getElementById('pdf-ok').addEventListener('click', function () {
+        var yearOption = xnm.options[xnm.selectedIndex];
+        var termOption = xqm.options[xqm.selectedIndex];
+        document.getElementById('pdf-year').value = yearOption ? yearOption.textContent.trim() : '';
+        document.getElementById('pdf-term').value = termOption ? termOption.textContent.trim() : '';
+        var layout = document.querySelector('input[name="kb-layout"]:checked');
+        document.getElementById('pdf-layout').value = layout ? layout.value : 'portrait';
+        document.getElementById('pdf-export').submit();
       });
 
       document.getElementById('delay-hint').addEventListener('click', function () {

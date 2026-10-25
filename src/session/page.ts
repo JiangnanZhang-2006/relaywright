@@ -6,7 +6,8 @@ import { BROWSER_HELPERS } from '../perception/inspect-script.js';
 import { diffLines } from '../perception/diff.js';
 import { RefRegistry } from '../perception/registry.js';
 import { formatLines, renderSnapshotParts, type ModelItem, type TabHint, type TableFact } from '../perception/snapshot.js';
-import type { PageBody, WaitInput } from '../protocol.js';
+import { errorText, logDaemon } from '../config/paths.js';
+import type { DownloadInfo, PageBody, WaitInput } from '../protocol.js';
 import { bounded, runPaint } from './timeout.js';
 import { describeBackend, findFrameId, queryCssBackends, type FrameNode } from '../recorder/dom.js';
 import { isSensitive } from '../recorder/redact.js';
@@ -22,11 +23,29 @@ const IDLE_CAP_MS = 5_000;
 const IDLE_QUIET_MS = 500;
 const CALL_TIMEOUT_MS = 8_000;
 const EVAL_TIMEOUT_MS = 3_000;
+const PDF_TIMEOUT_MS = 60_000;
+
+const PRINT_HOOK = `(() => {
+  const w = window;
+  if (typeof w.__rwPrintRequests !== 'number') w.__rwPrintRequests = 0;
+  w.print = function () { w.__rwPrintRequests += 1; };
+})();`;
 
 export interface PageModel {
   items: ModelItem[];
   tables: TableFact[];
   url: string;
+}
+
+export interface ReplayDownload {
+  id: string;
+  suggestedFilename: string;
+  url: string;
+}
+
+export interface SavedDownload {
+  file: DownloadInfo;
+  deduped: boolean;
 }
 
 export interface ReplayPage {
@@ -39,6 +58,12 @@ export interface ReplayPage {
   performInput(input: ActInput): Promise<void>;
   waitFor(input: WaitInput): Promise<WaitBody>;
   excerpt(): Promise<string>;
+  markDownloads(): number;
+  releaseDownloads(mark: number): void;
+  waitForDownloadBegin(mark: number, timeoutMs: number): Promise<ReplayDownload | null>;
+  waitForDownloadComplete(download: ReplayDownload): Promise<'completed' | 'canceled'>;
+  saveDownload(download: ReplayDownload, dir: string, fileName: string): Promise<SavedDownload>;
+  printPdf(input: { dir: string; fileName: string; landscape?: boolean }): Promise<SavedDownload>;
 }
 
 export class PageController {
@@ -60,6 +85,7 @@ export class PageController {
     const controller = new PageController(page, cdp);
     await bounded(cdp.send('Page.enable'), CALL_TIMEOUT_MS, 'Page.enable');
     await bounded(cdp.send('DOM.enable'), CALL_TIMEOUT_MS, 'DOM.enable').catch(() => undefined);
+    await installPrintHook(page, cdp);
     const { frameTree } = await bounded(cdp.send('Page.getFrameTree'), CALL_TIMEOUT_MS, 'frame tree');
     controller.loaderId = frameTree.frame.loaderId;
     cdp.on('Page.frameNavigated', (event) => {
@@ -193,6 +219,28 @@ export class PageController {
   async performBackend(backend: number, input: Omit<ActInput, 'ref'>): Promise<void> {
     const ref = this.registry.refFor(backend);
     await this.performInput({ ...input, ref });
+  }
+
+  async printCount(): Promise<number> {
+    if (this.disposed || this.page.isClosed()) return 0;
+    try {
+      const value = await bounded(
+        this.page.evaluate(() => {
+          const count = (globalThis as { __rwPrintRequests?: unknown }).__rwPrintRequests;
+          return typeof count === 'number' ? count : 0;
+        }),
+        EVAL_TIMEOUT_MS,
+        'print count',
+      );
+      return value;
+    } catch {
+      return 0;
+    }
+  }
+
+  async printToPdf(options: { landscape?: boolean }): Promise<Buffer> {
+    if (this.disposed || this.page.isClosed()) throw new Error('Tab is closed');
+    return bounded(this.readPdf(options.landscape === true), PDF_TIMEOUT_MS, 'printToPDF');
   }
 
   async excerpt(): Promise<string> {
@@ -336,6 +384,30 @@ export class PageController {
     });
   }
 
+  private async readPdf(landscape: boolean): Promise<Buffer> {
+    let stream: string | undefined;
+    try {
+      const result = await this.cdp.send('Page.printToPDF', {
+        printBackground: true,
+        landscape,
+        preferCSSPageSize: true,
+        transferMode: 'ReturnAsStream',
+      });
+      if (result.stream) {
+        stream = result.stream;
+        return await readIoStream(this.cdp, result.stream);
+      }
+      if (result.data) return Buffer.from(result.data, 'base64');
+      throw new RelayError('pdf_unsupported', 'Page.printToPDF returned no data');
+    } catch (err) {
+      if (err instanceof RelayError) throw err;
+      if (isPdfUnsupported(err)) throw new RelayError('pdf_unsupported', errorText(err));
+      throw err;
+    } finally {
+      if (stream) await this.cdp.send('IO.close', { handle: stream }).catch(() => undefined);
+    }
+  }
+
   private async paint(): Promise<void> {
     if (this.disposed) return;
     // requestAnimationFrame does not run in a hidden tab, so this must be raced.
@@ -368,6 +440,44 @@ async function readPageText(page: Page): Promise<string> {
     visit(globalThis as unknown as { document?: { body?: { innerText?: string }; querySelectorAll: (selector: string) => Iterable<{ contentWindow?: unknown }> } });
     return parts.join('\n');
   }), EVAL_TIMEOUT_MS, 'page text');
+}
+
+async function installPrintHook(page: Page, cdp: CDPSession): Promise<void> {
+  try {
+    await bounded(
+      cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: PRINT_HOOK, runImmediately: true }),
+      CALL_TIMEOUT_MS,
+      'print hook',
+    );
+  } catch (err) {
+    logDaemon(`print hook install failed: ${errorText(err)}`);
+  }
+  await bounded(
+    page.evaluate(() => {
+      const w = globalThis as unknown as { __rwPrintRequests?: number; print: () => void };
+      if (typeof w.__rwPrintRequests !== 'number') w.__rwPrintRequests = 0;
+      w.print = () => {
+        w.__rwPrintRequests = (w.__rwPrintRequests ?? 0) + 1;
+      };
+    }),
+    EVAL_TIMEOUT_MS,
+    'print hook',
+  ).catch(() => undefined);
+}
+
+async function readIoStream(cdp: CDPSession, handle: string): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for (;;) {
+    const chunk = await cdp.send('IO.read', { handle });
+    chunks.push(chunk.base64Encoded ? Buffer.from(chunk.data, 'base64') : Buffer.from(chunk.data, 'latin1'));
+    if (chunk.eof) break;
+  }
+  return Buffer.concat(chunks);
+}
+
+function isPdfUnsupported(err: unknown): boolean {
+  const text = errorText(err);
+  return /not implemented|not supported|unsupported|print preview is not available/i.test(text);
 }
 
 function delay(ms: number): Promise<void> {

@@ -18,6 +18,8 @@ function control(partial: Partial<BrowserControl> & Pick<BrowserControl, 'browse
     act: async () => {
       throw new RelayError('stale_ref', 'Unknown ref e9. Take a new snapshot.');
     },
+    download: fail,
+    pdf: fail,
     waitFor: fail,
     trace: () => ({ id: 'trace-test', path: 'trace-test.jsonl', steps: [] }),
     clearTrace: () => ({ id: 'trace-test', path: 'trace-test.jsonl', steps: [] }),

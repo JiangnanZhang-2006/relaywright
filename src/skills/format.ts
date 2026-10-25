@@ -18,7 +18,13 @@ export function formatRunReport(results: readonly SkillRunResult[]): string {
       const id = result.broken?.step_id ?? '';
       const reason = result.broken?.reason ?? result.outcome;
       lines.push(`${outcome}${params}  ${id} ${reason}`.trimEnd());
-      if (result.broken?.excerpt) lines.push(`<page_content>\n${result.broken.excerpt}\n</page_content>`);
+    }
+    for (const artifact of result.artifacts ?? []) {
+      lines.push(`  ${artifact.step_id}  ${artifact.path}  ${artifact.bytes}  ${artifact.sha256}`);
+    }
+    for (const warning of result.warnings ?? []) lines.push(`  warning: ${warning}`);
+    if (result.outcome !== 'ok' && result.outcome !== 'empty' && result.broken?.excerpt) {
+      lines.push(`<page_content>\n${result.broken.excerpt}\n</page_content>`);
     }
   }
   lines.push('llm_tokens: 0');
@@ -31,7 +37,9 @@ export function formatTrace(trace: TraceView): string {
     const target = step.target ? ` ${step.target.role} ${JSON.stringify(step.target.name)}` : '';
     const value = step.value !== undefined ? ` ${JSON.stringify(step.value)}` : '';
     const key = step.key ? ` key=${step.key}` : '';
-    lines.push(`${step.n} ${step.action}${target}${value}${key}`);
+    const suggested = step.suggested ? ` suggested=${JSON.stringify(step.suggested)}` : '';
+    const landscape = step.landscape ? ' landscape' : '';
+    lines.push(`${step.n} ${step.action}${target}${value}${key}${suggested}${landscape}`);
   }
   return lines.join('\n');
 }

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { daemonJsonPath, daemonLockPath, daemonLogPath, ensureHomeLayout, errorText, logDaemon, relaywrightHome } from '../config/paths.js';
 import { explainDaemonError, formatBuildMismatch, readBuildFingerprint } from './build.js';
-import { PageSchema, StatusSchema, TabsCommandSchema, TabsListSchema, WaitResultSchema, type DaemonStatus, type PageBody, type TabsCommand, type TabsList, type WaitBody } from '../protocol.js';
+import { PageSchema, PdfResultSchema, StatusSchema, TabsCommandSchema, TabsListSchema, WaitResultSchema, type DaemonStatus, type PageBody, type PdfInput, type PdfResult, type TabsCommand, type TabsList, type WaitBody } from '../protocol.js';
 import {
   MatrixResultSchema,
   SaveResultSchema,
@@ -250,7 +250,30 @@ export async function act(input: { action: string; ref?: string; value?: string;
     await authorized(info, '/act', {
       method: 'POST',
       body: input,
-      timeoutMs: 60_000,
+      timeoutMs: 180_000,
+    }),
+  );
+}
+
+export async function download(input: { ref: string; save_as?: string; timeout_ms?: number }): Promise<PageView> {
+  const info = await ensureDaemon();
+  const begin = input.timeout_ms ?? 30_000;
+  return PageSchema.parse(
+    await authorized(info, '/download', {
+      method: 'POST',
+      body: input,
+      timeoutMs: begin + 150_000,
+    }),
+  );
+}
+
+export async function printPdf(input: PdfInput): Promise<PdfResult> {
+  const info = await ensureDaemon();
+  return PdfResultSchema.parse(
+    await authorized(info, '/pdf', {
+      method: 'POST',
+      body: input,
+      timeoutMs: 90_000,
     }),
   );
 }

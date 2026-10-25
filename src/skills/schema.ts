@@ -57,7 +57,7 @@ const WaitActionSchema = z
     message: 'wait needs text, url, or target',
   });
 
-const STEP_KINDS = ['goto', 'click', 'type', 'select', 'press', 'scroll', 'wait', 'expect'] as const;
+const STEP_KINDS = ['goto', 'click', 'type', 'select', 'press', 'scroll', 'wait', 'expect', 'download', 'pdf'] as const;
 
 export const SkillStepSchema = z
   .object({
@@ -77,6 +77,19 @@ export const SkillStepSchema = z
       .optional(),
     wait: WaitActionSchema.optional(),
     expect: z.object({ any: z.array(ExpectBranchSchema).min(1) }).optional(),
+    download: z
+      .object({
+        click: z.object({ target: SkillTargetSchema }),
+        save_as: z.string().min(1),
+        timeout_ms: z.number().int().positive().optional(),
+      })
+      .optional(),
+    pdf: z
+      .object({
+        save_as: z.string().min(1),
+        landscape: z.boolean().optional(),
+      })
+      .optional(),
   })
   .superRefine((step, ctx) => {
     const kinds = STEP_KINDS.filter((kind) => step[kind] !== undefined);
@@ -106,6 +119,15 @@ export const SkillSchema = z.object({
 export type Skill = z.infer<typeof SkillSchema>;
 
 export const LocatorKindSchema = z.enum(['role_name', 'css', 'text', 'role_name_contains']);
+
+export const ArtifactSchema = z.object({
+  step_id: z.string(),
+  path: z.string(),
+  bytes: z.number().int().nonnegative(),
+  sha256: z.string(),
+});
+
+export type SkillArtifact = z.infer<typeof ArtifactSchema>;
 
 export const StepResultSchema = z.object({
   id: z.string(),
@@ -137,6 +159,8 @@ export const SkillRunResultSchema = z.object({
   steps: z.array(StepResultSchema),
   duration_ms: z.number(),
   broken: BrokenSchema.optional(),
+  artifacts: z.array(ArtifactSchema).optional(),
+  warnings: z.array(z.string()).optional(),
 });
 
 export type SkillRunResult = z.infer<typeof SkillRunResultSchema>;
@@ -144,6 +168,7 @@ export type SkillRunResult = z.infer<typeof SkillRunResultSchema>;
 export const MatrixResultSchema = z.object({
   results: z.array(SkillRunResultSchema),
   exit_code: z.union([z.literal(0), z.literal(30)]),
+  out_dir: z.string().min(1),
 });
 
 export type MatrixResult = z.infer<typeof MatrixResultSchema>;
@@ -205,6 +230,7 @@ export const RunSkillInputSchema = z.object({
   params: z.record(z.string(), z.string()).optional(),
   matrix: z.record(z.string(), z.array(z.string())).optional(),
   startUrl: z.string().min(1).optional(),
+  out_dir: z.string().min(1).optional(),
 });
 
 export type RunSkillInput = z.infer<typeof RunSkillInputSchema>;
@@ -233,7 +259,15 @@ export function stepKind(step: SkillStep): (typeof STEP_KINDS)[number] {
 }
 
 export function stepTarget(step: SkillStep): SkillTarget | undefined {
-  return step.click?.target ?? step.type?.target ?? step.select?.target ?? step.press?.target ?? step.scroll?.target ?? step.wait?.target;
+  return (
+    step.click?.target ??
+    step.type?.target ??
+    step.select?.target ??
+    step.press?.target ??
+    step.scroll?.target ??
+    step.wait?.target ??
+    step.download?.click.target
+  );
 }
 
 /** YAML's document model keeps key order; drop undefined so optional fields stay absent. */
