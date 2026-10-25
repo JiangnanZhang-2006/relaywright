@@ -37,6 +37,15 @@ function control(partial: Partial<BrowserControl> & Pick<BrowserControl, 'browse
       throw new RelayError('skill_not_found', 'not used');
     },
     runSkill: fail,
+    requestHandoff: fail,
+    waitHandoff: fail,
+    cancelHandoff: fail,
+    handoffPage: () => null,
+    handoffState: () => null,
+    handoffCancelToken: fail,
+    listIdentities: () => [],
+    saveIdentity: fail,
+    revokeIdentity: fail,
     tabs: async () => ({ tabs: [], text: '' }),
     ...partial,
   };
@@ -97,6 +106,19 @@ describe('browser readiness', () => {
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ matched: false, snapshot: '(no changes)' });
+  });
+
+  it('serves handoff token routes without a bearer token and keeps the start route private', async () => {
+    const session = control({ browserState: () => ({ state: 'ready' }) });
+    const app = createApp({ token: 'secret-token', session, onShutdown: () => undefined });
+    const page = await app.request('http://127.0.0.1/handoff/page/abc?t=nope');
+    expect(page.status).toBe(404);
+    const denied = await app.request('http://127.0.0.1/handoff', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reason: '登录' }),
+    });
+    expect(denied.status).toBe(401);
   });
 
   it('does not block status or snapshot on an in-progress browser launch', async () => {

@@ -8,15 +8,19 @@ import {
   daemonMismatchLine,
   download,
   getSnapshot,
+  listIdentities,
   listSkills,
   navigate,
   printPdf,
   runSkill,
   saveSkill,
   showSkill,
+  startHandoff,
   waitFor,
+  waitHandoff,
 } from '../daemon/client.js';
-import { ActSchema, DownloadSchema, issuesText, PdfSchema, TabsCommandSchema, WaitSchema, type PageBody } from '../protocol.js';
+import { ActSchema, DownloadSchema, issuesText, PdfSchema, TabsCommandSchema, WaitSchema, type HandoffView, type PageBody } from '../protocol.js';
+import { formatClock } from '../session/login.js';
 import { formatRunReport } from '../skills/format.js';
 import { CheckSchema, RunSkillInputSchema, SaveSkillInputSchema } from '../skills/schema.js';
 
@@ -234,6 +238,7 @@ export async function startMcpServer(): Promise<void> {
         matrix: z.record(z.string(), z.array(z.string())).optional().describe('Parameter axes. Each combination is replayed from the start URL.'),
         start_url: z.string().optional().describe('Open this URL instead of the skill start_url.'),
         out_dir: z.string().optional().describe('Directory for download and PDF artifacts. Shared by every matrix combination.'),
+        wait_human: z.boolean().optional().describe('Wait up to 10 minutes for a person to log in on this PC. Defaults to false.'),
       },
     },
     async (args) => {
@@ -242,11 +247,49 @@ export async function startMcpServer(): Promise<void> {
         matrix: args.matrix,
         startUrl: args.start_url,
         out_dir: args.out_dir,
+        wait_human: args.wait_human ?? false,
       });
       if (!parsed.success) return toolError(new Error(issuesText(parsed.error)));
       try {
         const report = await runSkill(args.name, parsed.data);
         return ok(formatRunReport(report.results));
+      } catch (err) {
+        return toolError(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'request_human',
+    {
+      description:
+        'Lock the browser while a person logs in on this PC. They use the Chrome window on the screen (a phone can scan a QR code from that screen). The model cannot navigate, snapshot, or act until the handoff finishes, and this tool returns no cookies, passwords, or other credentials. If it is still waiting, call request_human again.',
+      inputSchema: {
+        reason: z.string().min(1).describe('Why the person needs to log in.'),
+        timeout_s: z.number().int().min(1).max(90).optional().describe('How long to wait, in seconds. Default 90, maximum 90.'),
+      },
+    },
+    async ({ reason, timeout_s }) => {
+      try {
+        await startHandoff(reason);
+        const view = await waitHandoff((timeout_s ?? 90) * 1000);
+        return ok(handoffText(view));
+      } catch (err) {
+        return toolError(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'identity_list',
+    {
+      description: 'List saved login identities (name, domains, timestamps, cookie count). Does not return cookie names or values.',
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const identities = await listIdentities();
+        return ok(identities.length === 0 ? 'no identities' : JSON.stringify(identities, null, 2));
       } catch (err) {
         return toolError(err);
       }
@@ -278,6 +321,14 @@ export async function startMcpServer(): Promise<void> {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
+}
+
+function handoffText(view: HandoffView): string {
+  if (view.state === 'waiting') {
+    return `still waiting (${formatClock(view.remaining_ms ?? 0)} left); call request_human again to keep waiting`;
+  }
+  if (view.state === 'done') return view.identity ? `done ${view.identity.name}` : 'done';
+  return view.state;
 }
 
 function ok(text: string): { content: [{ type: 'text'; text: string }] } {

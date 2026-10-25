@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>统一身份认证</title>
+<style>
+  body { font-family: sans-serif; }
+  .moreloginbtnBox, .lowlmoreshowstyle { cursor: pointer; display: flex; gap: 8px; align-items: center; }
+  .moreloginbtnBox { gap: 24px; margin-top: 16px; }
+  .authIcon { width: 24px; height: 24px; }
+  #sms, #qr { display: none; margin-top: 12px; }
+</style>
+</head>
+<body>
+  <h1>统一身份认证</h1>
+  <form id="password-form">
+    <label>用户名 <input id="username" name="username" autocomplete="username"></label>
+    <label>密码 <input id="password" name="password" type="password" autocomplete="current-password"></label>
+    <a class="eyes-icon" role="link"><img class="icon-password-hide" src="/public/cas-login/assets/login/password-tran.png"></a>
+    <button type="button" id="login">登 录</button>
+  </form>
+  <div id="sms">
+    <label>手机号 <input id="phone" name="phone"></label>
+    <label>验证码 <input id="code" name="code"></label>
+  </div>
+  <img id="qr" alt="二维码" width="120" height="120" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+  <div class="moreloginbtnBox ant-row">
+    <div class="lowlmoreshowstyle" id="sms-login"><img class="authIcon" src="public/sso/smsLogin.png" alt=""><span class="name">短信验证码</span></div>
+    <div class="lowlmoreshowstyle" id="wechat-login"><img class="authIcon" src="public/sso/singleWechat.png" alt=""><span class="name">微信扫码</span></div>
+  </div>
+  <script>
+    document.getElementById('sms-login').addEventListener('click', function () {
+      document.getElementById('password-form').style.display = 'none';
+      document.getElementById('qr').style.display = 'none';
+      document.getElementById('sms').style.display = 'block';
+    });
+    document.getElementById('wechat-login').addEventListener('click', function () {
+      document.getElementById('password-form').style.display = 'none';
+      document.getElementById('sms').style.display = 'none';
+      document.getElementById('qr').style.display = 'block';
+    });
+    document.getElementById('login').addEventListener('click', function () {
+      var user = document.getElementById('username').value;
+      var pass = document.getElementById('password').value;
+      if (!user || !pass) return;
+      document.cookie = 'mocksession=1; path=/';
+      var service = new URLSearchParams(location.search).get('service');
+      if (service) location.href = service;
+    });
+  </script>
+</body>
+</html>

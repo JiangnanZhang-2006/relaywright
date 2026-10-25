@@ -6,6 +6,7 @@ import { downloadsDir } from '../config/paths.js';
 import { RelayError } from '../errors.js';
 import type { ModelItem } from '../perception/snapshot.js';
 import { assertSaveAs } from '../session/downloads.js';
+import { pageNeedsLogin } from '../session/login.js';
 import type { ReplayPage } from '../session/page.js';
 import { chooseLocator, type LocatorKind } from './locate.js';
 import {
@@ -50,18 +51,25 @@ export function expandMatrix(matrix: Record<string, string[]> | undefined, fixed
   return combos.map((combo) => ({ ...fixed, ...combo }));
 }
 
-export function summaryExitCode(results: readonly { outcome: string }[]): 0 | 30 {
-  return results.some((result) => result.outcome === 'broken') ? 30 : 0;
+export function summaryExitCode(results: readonly { outcome: string }[]): 0 | 20 | 30 {
+  if (results.some((result) => result.outcome === 'broken')) return 30;
+  if (results.some((result) => result.outcome === 'needs_human')) return 20;
+  return 0;
 }
 
-export async function runMatrix(page: ReplayPage, skill: Skill, input: RunSkillInput): Promise<MatrixResult> {
+export interface RunHooks {
+  waitForHuman?: (reason: string) => Promise<'done' | 'cancelled' | 'timeout'>;
+}
+
+export async function runMatrix(page: ReplayPage, skill: Skill, input: RunSkillInput, hooks?: RunHooks): Promise<MatrixResult> {
   const combos = expandMatrix(input.matrix, input.params ?? {});
   for (const params of combos) bindSkill(skill, params);
   const outDir = input.out_dir ?? runOutputDir(skill.name);
   await mkdir(outDir, { recursive: true });
   const results: SkillRunResult[] = [];
+  const waitForHuman = input.wait_human ? hooks?.waitForHuman : undefined;
   for (const params of combos) {
-    results.push(await runSkill(page, skill, params, { startUrl: input.startUrl, outDir }));
+    results.push(await runSkill(page, skill, params, { startUrl: input.startUrl, outDir, waitForHuman }));
   }
   return { results, exit_code: summaryExitCode(results), out_dir: outDir };
 }
@@ -70,13 +78,42 @@ export async function runSkill(
   page: ReplayPage,
   skill: Skill,
   params: Record<string, string>,
+  options?: { startUrl?: string; outDir?: string; waitForHuman?: RunHooks['waitForHuman'] },
+): Promise<SkillRunResult> {
+  const startUrl = options?.startUrl ?? skill.start_url;
+  let last = await runSkillOnce(page, skill, params, options);
+  if (!(await comboNeedsHuman(page, startUrl, last))) return last;
+  const message = last.message ?? 'Login required';
+  if (!options?.waitForHuman) return humanResult(last, message);
+  const host = hostOf(page.currentUrl());
+  const decision = await options.waitForHuman(`skill ${skill.name}: 登录 ${host}`);
+  if (decision !== 'done') return humanResult(last, message);
+  last = await runSkillOnce(page, skill, params, options);
+  if (await comboNeedsHuman(page, startUrl, last)) return humanResult(last, last.message ?? message);
+  return last;
+}
+
+async function runSkillOnce(
+  page: ReplayPage,
+  skill: Skill,
+  params: Record<string, string>,
   options?: { startUrl?: string; outDir?: string },
 ): Promise<SkillRunResult> {
   const bound = bindSkill(skill, params);
   const outDir = options?.outDir ?? runOutputDir(skill.name);
+  const startUrl = options?.startUrl ?? bound.start_url;
   await mkdir(outDir, { recursive: true });
   const started = Date.now();
-  await page.navigate(options?.startUrl ?? bound.start_url);
+  await page.navigate(startUrl);
+  if (await loginGate(page, startUrl)) {
+    return {
+      outcome: 'needs_human',
+      message: 'Login required',
+      params,
+      steps: bound.steps.map((step) => ({ id: step.id, status: 'skipped' as const, ms: 0 })),
+      duration_ms: Date.now() - started,
+    };
+  }
   let outcome: Running = 'undecided';
   let message: string | undefined;
   let broken: BrokenReport | undefined;
@@ -210,10 +247,12 @@ async function runAct(page: ReplayPage, step: SkillStep): Promise<OneStep> {
   if (step.click) {
     await page.performBackend(requiredBackend(backend), { action: 'click' });
   } else if (step.type) {
+    if (await targetsPassword(page, backend)) return passwordStep();
     await page.performBackend(requiredBackend(backend), { action: 'type', value: step.type.value, key: step.type.key });
   } else if (step.select) {
     await page.performBackend(requiredBackend(backend), { action: 'select', value: step.select.value });
   } else if (step.press) {
+    if (backend !== undefined && (await targetsPassword(page, backend))) return passwordStep();
     const input: ActInput = { action: 'press', key: step.press.key };
     if (backend === undefined) await page.performInput(input);
     else await page.performBackend(backend, input);
@@ -296,6 +335,48 @@ function maxTableRows(tables: readonly { rows: number }[]): number {
 function requiredBackend(backend: number | undefined): number {
   if (backend === undefined) throw new RelayError('bad_params', 'Resolved target is missing a backend node');
   return backend;
+}
+
+async function comboNeedsHuman(page: ReplayPage, startUrl: string, result: SkillRunResult): Promise<boolean> {
+  if (result.outcome === 'needs_human') return true;
+  if (result.outcome !== 'broken') return false;
+  return loginGate(page, startUrl);
+}
+
+async function loginGate(page: ReplayPage, startUrl: string): Promise<boolean> {
+  let visible = false;
+  try {
+    visible = await page.hasVisiblePassword();
+  } catch {
+    visible = false;
+  }
+  return pageNeedsLogin(page.currentUrl(), startUrl, visible);
+}
+
+async function targetsPassword(page: ReplayPage, backend: number | undefined): Promise<boolean> {
+  if (backend === undefined) return false;
+  try {
+    return await page.isPasswordBackend(backend);
+  } catch {
+    return false;
+  }
+}
+
+function passwordStep(): OneStep {
+  return { status: 'failed', outcome: 'needs_human', message: 'Passwords are typed by a human. Call request_human.' };
+}
+
+function humanResult(result: SkillRunResult, message: string): SkillRunResult {
+  const { broken: _broken, ...rest } = result;
+  return { ...rest, outcome: 'needs_human', message };
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
 }
 
 function reasonOf(err: unknown): string {

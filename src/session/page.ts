@@ -5,7 +5,7 @@ import { loadDocument } from '../perception/capture.js';
 import { BROWSER_HELPERS } from '../perception/inspect-script.js';
 import { diffLines } from '../perception/diff.js';
 import { RefRegistry } from '../perception/registry.js';
-import { formatLines, renderSnapshotParts, type ModelItem, type TabHint, type TableFact } from '../perception/snapshot.js';
+import { formatLines, loginHintLine, renderSnapshotParts, type ModelItem, type TabHint, type TableFact } from '../perception/snapshot.js';
 import { errorText, logDaemon } from '../config/paths.js';
 import type { DownloadInfo, PageBody, WaitInput } from '../protocol.js';
 import { bounded, runPaint } from './timeout.js';
@@ -54,6 +54,8 @@ export interface ReplayPage {
   currentUrl(): string;
   pageText(): Promise<string>;
   queryCss(css: string, frame?: FrameRef): Promise<number[]>;
+  hasVisiblePassword(): Promise<boolean>;
+  isPasswordBackend(backend: number): Promise<boolean>;
   performBackend(backend: number, input: Omit<ActInput, 'ref'>): Promise<void>;
   performInput(input: ActInput): Promise<void>;
   waitFor(input: WaitInput): Promise<WaitBody>;
@@ -142,11 +144,11 @@ export class PageController {
     this.navigatedSinceBaseline = false;
     if (mode === 'full' || previous === null || navigated) {
       const text = mode === 'diff' && navigated ? `(navigated: full snapshot)\n${rendered.text}` : rendered.text;
-      return { url, title, snapshot: text };
+      return { url, title, snapshot: this.withLoginHint(text, title, rendered.visiblePassword) };
     }
     const changes = diffLines(previous, rendered.lines);
     const body = changes.length === 0 ? ['(no changes)'] : changes;
-    return { url, title, snapshot: formatLines(rendered.header, body) };
+    return { url, title, snapshot: this.withLoginHint(formatLines(rendered.header, body), title, rendered.visiblePassword) };
   }
 
   async act(input: ActInput): Promise<PageBody> {
@@ -197,6 +199,23 @@ export class PageController {
 
   async queryCss(css: string, frame?: FrameRef): Promise<number[]> {
     return bounded(this.queryCssInner(css, frame), CALL_TIMEOUT_MS, 'query css');
+  }
+
+  async hasVisiblePassword(): Promise<boolean> {
+    const loaded = await bounded(loadDocument(this.cdp), CALL_TIMEOUT_MS, 'password');
+    if (loaded.main.visiblePassword) return true;
+    return loaded.frames.some((frame) => frame.visiblePassword === true);
+  }
+
+  async isPasswordBackend(backend: number): Promise<boolean> {
+    const dom = await bounded(describeBackend(this.cdp, backend), CALL_TIMEOUT_MS, 'describe element').catch(() => null);
+    return dom?.password === true;
+  }
+
+  async isPasswordRef(ref: string): Promise<boolean> {
+    const backend = this.registry.resolve(ref);
+    if (backend === undefined) return false;
+    return this.isPasswordBackend(backend);
   }
 
   async performInput(input: ActInput): Promise<void> {
@@ -277,6 +296,7 @@ export class PageController {
       passwordBackendNodeIds: loaded.main.passwordBackendNodeIds,
       clickableBackendNodeIds: loaded.main.clickableBackendNodeIds,
       clickableLabels: loaded.main.clickableLabels,
+      controlNames: loaded.main.controlNames,
       adaptedSelects: loaded.main.adaptedSelects,
       frames: loaded.frames,
       maxRows,
@@ -284,7 +304,15 @@ export class PageController {
       registry: this.registry,
     });
     this.model = { items: rendered.items, tables: rendered.tables };
-    return rendered;
+    const visiblePassword = loaded.main.visiblePassword || loaded.frames.some((frame) => frame.visiblePassword === true);
+    return { ...rendered, visiblePassword };
+  }
+
+  private withLoginHint(text: string, title: string, visiblePassword: boolean): string {
+    if (!visiblePassword) return text;
+    const line = loginHintLine(title);
+    if (text.includes(line)) return text;
+    return `${text}\n${line}`;
   }
 
   private resolveRef(ref: string): number {

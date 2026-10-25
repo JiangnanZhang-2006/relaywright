@@ -12,8 +12,8 @@ export function formatRunReport(results: readonly SkillRunResult[]): string {
       const done = result.steps.filter((step) => step.status === 'done').length;
       const seconds = (result.duration_ms / 1000).toFixed(1);
       lines.push(`${outcome}${params}  ${done}/${result.steps.length} steps ${seconds}s`);
-    } else if (result.outcome === 'empty') {
-      lines.push(`${outcome}${params}  ${result.message ?? ''}`.trimEnd());
+    } else if (result.outcome === 'empty' || result.outcome === 'needs_human') {
+      lines.push(`${outcome}${params}  ${result.message ?? result.outcome}`.trimEnd());
     } else {
       const id = result.broken?.step_id ?? '';
       const reason = result.broken?.reason ?? result.outcome;

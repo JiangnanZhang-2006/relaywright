@@ -7,6 +7,51 @@ export const BuildFingerprintSchema = z.object({
   builtAt: z.string().min(1),
 });
 
+export const LoginCheckSchema = z.object({
+  url_contains: z.string().min(1).optional(),
+  text_absent: z.string().min(1).optional(),
+});
+
+export type LoginCheck = z.infer<typeof LoginCheckSchema>;
+
+export const IdentitySchema = z.object({
+  name: z.string().min(1),
+  domains: z.array(z.string().min(1)),
+  login_hosts: z.array(z.string().min(1)),
+  created_at: z.string().min(1),
+  saved_at: z.string().min(1),
+  last_used_at: z.string().min(1),
+  persist_days: z.number().int().positive(),
+  cookie_count: z.number().int().nonnegative(),
+  login_check: LoginCheckSchema.optional(),
+});
+
+export type IdentityMeta = z.infer<typeof IdentitySchema>;
+
+export const HandoffViewSchema = z.object({
+  state: z.enum(['idle', 'waiting', 'done', 'cancelled', 'timeout']),
+  id: z.string().optional(),
+  reason: z.string().optional(),
+  identity: IdentitySchema.optional(),
+  elapsed_ms: z.number().int().nonnegative().optional(),
+  remaining_ms: z.number().int().nonnegative().optional(),
+});
+
+export type HandoffView = z.infer<typeof HandoffViewSchema>;
+
+export const HandoffStartSchema = z.object({
+  reason: z.string().min(1),
+});
+
+export const HandoffWaitSchema = z.object({
+  timeout_ms: z.number().int().min(1).max(90_000),
+});
+
+export const IdentitySaveSchema = z.object({
+  name: z.string().min(1).optional(),
+  domains: z.array(z.string().min(1)).optional(),
+});
+
 export const StatusSchema = z.object({
   pid: z.number(),
   uptime: z.number(),
@@ -24,6 +69,7 @@ export const StatusSchema = z.object({
     })
     .optional(),
   build: BuildFingerprintSchema.optional(),
+  handoff: HandoffViewSchema.optional(),
 });
 
 export type DaemonStatus = z.infer<typeof StatusSchema>;

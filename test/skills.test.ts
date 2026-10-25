@@ -269,8 +269,9 @@ describe('matrix and outcomes', () => {
     ]);
     expect(expandMatrix(undefined, { year: '2025-2026' })).toEqual([{ year: '2025-2026' }]);
     expect(expandMatrix({ year: ['b'] }, { year: 'a' })).toEqual([{ year: 'b' }]);
-    expect(summaryExitCode([{ outcome: 'ok' }, { outcome: 'empty' }, { outcome: 'needs_human' }])).toBe(0);
+    expect(summaryExitCode([{ outcome: 'ok' }, { outcome: 'empty' }, { outcome: 'needs_human' }])).toBe(20);
     expect(summaryExitCode([{ outcome: 'ok' }, { outcome: 'broken' }])).toBe(30);
+    expect(summaryExitCode([{ outcome: 'needs_human' }, { outcome: 'broken' }])).toBe(30);
     expect(() => expandMatrix({ term: [] })).toThrow(expect.objectContaining({ code: 'bad_params' }));
   });
 
@@ -442,6 +443,8 @@ function fakeReplay(options: { text: string; begin: ReplayDownload | null }): { 
     currentUrl: () => PAGE,
     pageText: async () => options.text,
     queryCss: async () => [],
+    hasVisiblePassword: async () => false,
+    isPasswordBackend: async () => false,
     performBackend: async () => {
       calls.push('click');
     },

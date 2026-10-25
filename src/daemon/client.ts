@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { daemonJsonPath, daemonLockPath, daemonLogPath, ensureHomeLayout, errorText, logDaemon, relaywrightHome } from '../config/paths.js';
 import { explainDaemonError, formatBuildMismatch, readBuildFingerprint } from './build.js';
-import { PageSchema, PdfResultSchema, StatusSchema, TabsCommandSchema, TabsListSchema, WaitResultSchema, type DaemonStatus, type PageBody, type PdfInput, type PdfResult, type TabsCommand, type TabsList, type WaitBody } from '../protocol.js';
+import { HandoffViewSchema, IdentitySchema, PageSchema, PdfResultSchema, StatusSchema, TabsCommandSchema, TabsListSchema, WaitResultSchema, type DaemonStatus, type HandoffView, type IdentityMeta, type PageBody, type PdfInput, type PdfResult, type TabsCommand, type TabsList, type WaitBody } from '../protocol.js';
 import {
   MatrixResultSchema,
   SaveResultSchema,
@@ -300,6 +300,7 @@ export async function browserTabs(input: TabsCommand): Promise<TabsList | PageBo
 }
 
 const SKILL_RUN_TIMEOUT_MS = 10 * 60_000;
+const SKILL_RUN_WAIT_TIMEOUT_MS = 14 * 60_000;
 
 export async function getTrace(): Promise<TraceView> {
   const info = await ensureDaemon();
@@ -345,8 +346,43 @@ export async function runSkill(name: string, input: RunSkillInput): Promise<Matr
     await authorized(info, `/skills/${encodeURIComponent(name)}/run`, {
       method: 'POST',
       body: input,
-      timeoutMs: SKILL_RUN_TIMEOUT_MS,
+      timeoutMs: input.wait_human ? SKILL_RUN_WAIT_TIMEOUT_MS : SKILL_RUN_TIMEOUT_MS,
     }),
+  );
+}
+
+export async function startHandoff(reason: string): Promise<HandoffView> {
+  const info = await ensureDaemon();
+  return HandoffViewSchema.parse(await authorized(info, '/handoff', { method: 'POST', body: { reason }, timeoutMs: 30_000 }));
+}
+
+export async function waitHandoff(timeoutMs: number): Promise<HandoffView> {
+  const info = await ensureDaemon();
+  return HandoffViewSchema.parse(
+    await authorized(info, '/handoff/wait', { method: 'POST', body: { timeout_ms: timeoutMs }, timeoutMs: timeoutMs + 10_000 }),
+  );
+}
+
+export async function cancelHandoff(): Promise<HandoffView> {
+  const info = await ensureDaemon();
+  return HandoffViewSchema.parse(await authorized(info, '/handoff/cancel', { method: 'POST', body: {}, timeoutMs: 30_000 }));
+}
+
+export async function listIdentities(): Promise<IdentityMeta[]> {
+  const info = await ensureDaemon();
+  const body = z.object({ identities: z.array(IdentitySchema) }).parse(await authorized(info, '/identities'));
+  return body.identities;
+}
+
+export async function saveIdentity(input: { name?: string; domains?: string[] } = {}): Promise<IdentityMeta> {
+  const info = await ensureDaemon();
+  return IdentitySchema.parse(await authorized(info, '/identities/save', { method: 'POST', body: input, timeoutMs: 30_000 }));
+}
+
+export async function revokeIdentity(name: string): Promise<{ name: string }> {
+  const info = await ensureDaemon();
+  return z.object({ name: z.string() }).parse(
+    await authorized(info, `/identities/${encodeURIComponent(name)}/revoke`, { method: 'POST', body: {}, timeoutMs: 30_000 }),
   );
 }
 
@@ -375,7 +411,7 @@ export async function waitForBrowserReady(info: DaemonInfo): Promise<void> {
   }
 }
 
-export async function stopDaemon(): Promise<'stopped' | 'not_running'> {
+export async function stopDaemon(options?: { closeBrowser?: boolean }): Promise<'stopped' | 'not_running'> {
   cached = null;
   const info = readDaemonInfo();
   if (!info || !isPidAlive(info.pid)) {
@@ -385,8 +421,9 @@ export async function stopDaemon(): Promise<'stopped' | 'not_running'> {
 
   const response = await fetch(`http://127.0.0.1:${info.port}/shutdown`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${info.token}` },
-    signal: AbortSignal.timeout(5_000),
+    headers: { Authorization: `Bearer ${info.token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ close_browser: options?.closeBrowser === true }),
+    signal: AbortSignal.timeout(15_000),
   });
   if (!response.ok) {
     const body = await response.text();

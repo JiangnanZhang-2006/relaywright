@@ -110,9 +110,10 @@ describe.skipIf(!resolved.path)('skill replay on the timetable fixture', () => {
     browser.clearTrace();
     const opened = await browser.navigate(v1);
     const password = refFor(opened.snapshot, /\[(e\d+)\] [^\n]*密码/);
-    await browser.act({ action: 'type', ref: password, value: 'secret-fixture' });
-    const typed = browser.trace().steps.find((step) => step.action === 'type');
-    expect(typed?.value).toBe('{{secret}}');
+    await expect(browser.act({ action: 'type', ref: password, value: 'secret-fixture' })).rejects.toMatchObject({
+      code: 'human_required',
+    });
+    expect(browser.trace().steps.some((step) => step.action === 'type')).toBe(false);
     const files = readdirSync(tracesDir()).filter((name) => name.endsWith('.jsonl'));
     expect(files.length).toBeGreaterThan(0);
     for (const name of files) {

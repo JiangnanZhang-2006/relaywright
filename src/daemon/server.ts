@@ -5,7 +5,7 @@ import type { Server } from 'node:http';
 import { z } from 'zod';
 import { errorText, logDaemon, packageVersion } from '../config/paths.js';
 import { RelayError, relayStatus, type RelayErrorCode } from '../errors.js';
-import { ActSchema, DownloadSchema, issuesText, PdfSchema, SnapshotQuery, TabsCommandSchema, WaitSchema } from '../protocol.js';
+import { ActSchema, DownloadSchema, HandoffStartSchema, HandoffWaitSchema, IdentitySaveSchema, issuesText, PdfSchema, SnapshotQuery, TabsCommandSchema, WaitSchema } from '../protocol.js';
 import type { BrowserControl } from '../session/browser.js';
 import { RunSkillInputSchema, SaveSkillInputSchema } from '../skills/schema.js';
 
@@ -17,10 +17,12 @@ const RollbackBody = z.object({
   to: z.number().int().positive(),
 });
 
+const HANDOFF_PUBLIC = /^\/handoff\/(?:page|state|cancel)\/[^/]+$/;
+
 export interface AppOptions {
   token: string;
   session: BrowserControl;
-  onShutdown: () => void;
+  onShutdown: (closeBrowser?: boolean) => void;
   build?: { entry: string; builtAt: string };
 }
 
@@ -34,8 +36,27 @@ export function createApp(options: AppOptions): Hono {
 
   app.notFound((c) => jsonError(c, 404, 'not_found', `No route for ${c.req.method} ${c.req.path}`));
 
+  app.get('/handoff/page/:id', (c) => {
+    const html = options.session.handoffPage(c.req.param('id'), c.req.query('t') ?? '');
+    if (!html) return jsonError(c, 404, 'not_found', 'Handoff page is not available');
+    return c.html(html);
+  });
+
+  app.get('/handoff/state/:id', (c) => {
+    const view = options.session.handoffState(c.req.param('id'), c.req.query('t') ?? '');
+    if (!view) return jsonError(c, 404, 'not_found', 'Handoff is not available');
+    return c.json(view);
+  });
+
+  app.post('/handoff/cancel/:id', async (c) => {
+    const view = await options.session.handoffCancelToken(c.req.param('id'), c.req.query('t') ?? '');
+    if (!view) return jsonError(c, 404, 'not_found', 'Handoff is not available');
+    return c.json(view);
+  });
+
   app.use('*', async (c, next) => {
     if (c.req.method === 'GET' && c.req.path === '/health') return next();
+    if (HANDOFF_PUBLIC.test(c.req.path)) return next();
     if (!bearerOk(c.req.header('authorization'), options.token)) {
       return jsonError(c, 401, 'unauthorized', 'Missing or invalid bearer token');
     }
@@ -201,9 +222,76 @@ export function createApp(options: AppOptions): Hono {
     }
   });
 
-  app.post('/shutdown', (c) => {
+  app.post('/handoff', async (c) => {
+    try {
+      const body = HandoffStartSchema.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return c.json(await options.session.requestHandoff(body.data.reason));
+    } catch (err) {
+      return browserError(c, err);
+    }
+  });
+
+  app.post('/handoff/wait', async (c) => {
+    try {
+      const body = HandoffWaitSchema.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return c.json(await options.session.waitHandoff(body.data.timeout_ms));
+    } catch (err) {
+      return browserError(c, err);
+    }
+  });
+
+  app.post('/handoff/cancel', async (c) => {
+    try {
+      return c.json(await options.session.cancelHandoff());
+    } catch (err) {
+      return browserError(c, err);
+    }
+  });
+
+  app.get('/identities', (c) => {
+    try {
+      return c.json({ identities: options.session.listIdentities() });
+    } catch (err) {
+      return browserError(c, err);
+    }
+  });
+
+  app.post('/identities/save', async (c) => {
+    try {
+      const body = IdentitySaveSchema.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return c.json(await options.session.saveIdentity(body.data));
+    } catch (err) {
+      return browserError(c, err);
+    }
+  });
+
+  app.post('/identities/:name/revoke', async (c) => {
+    try {
+      return c.json(await options.session.revokeIdentity(c.req.param('name')));
+    } catch (err) {
+      return browserError(c, err);
+    }
+  });
+
+  app.post('/shutdown', async (c) => {
+    let closeBrowser = false;
+    const text = await c.req.text();
+    if (text.trim()) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        return jsonError(c, 400, 'bad_request', 'Request body must be JSON');
+      }
+      const body = z.object({ close_browser: z.boolean().optional() }).safeParse(parsed);
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      closeBrowser = body.data.close_browser === true;
+    }
     // Let the response flush before the process closes the listening socket.
-    setTimeout(() => options.onShutdown(), 100);
+    setTimeout(() => options.onShutdown(closeBrowser), 100);
     return c.json({ ok: true });
   });
 
@@ -224,6 +312,9 @@ export function listen(app: Hono): Promise<ListeningServer> {
         port: 0,
       },
       (info) => {
+        const nodeServer = server as Server;
+        nodeServer.requestTimeout = 16 * 60_000;
+        nodeServer.headersTimeout = 16 * 60_000 + 60_000;
         resolve({
           port: info.port,
           close: () => closeServer(server),
@@ -242,7 +333,7 @@ function closeServer(server: ServerType): Promise<void> {
 
 class HttpError extends Error {
   constructor(
-    readonly status: 400 | 401 | 404 | 409 | 500 | 503 | 504,
+    readonly status: 400 | 401 | 404 | 409 | 423 | 500 | 503 | 504,
     readonly code: string,
     message: string,
   ) {
@@ -287,7 +378,7 @@ function browserError(c: Context, err: unknown): Response {
 
 function jsonError(
   c: Context,
-  status: 400 | 401 | 404 | 409 | 500 | 503 | 504,
+  status: 400 | 401 | 404 | 409 | 423 | 500 | 503 | 504,
   code: string,
   message: string,
 ): Response {

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import { installChromeForTesting, whichBrowser } from '../browser/resolve.js';
+import { tailAudit, verifyAudit } from '../audit/log.js';
 import { errorText, packageVersion, readTextFile } from '../config/paths.js';
 import { normalizeActArgs } from './act-args.js';
 import { issuesText, type PageBody } from '../protocol.js';
@@ -18,22 +19,28 @@ import {
   findHealthyDaemon,
   getSnapshot,
   getTrace,
+  listIdentities,
   listSkills,
   navigate,
   parseHttpUrl,
   printPdf,
   readStatus,
   restartDaemon,
+  revokeIdentity,
   rollbackSkill,
   runSkill,
+  saveIdentity,
   saveSkill,
   showSkill,
   skillHistory,
+  startHandoff,
   stopDaemon,
   waitFor,
   waitForBrowserReady,
+  waitHandoff,
 } from '../daemon/client.js';
 import { humanSize } from '../session/downloads.js';
+import { formatClock } from '../session/login.js';
 
 function wantsJson(command: Command): boolean {
   for (let current: Command | null = command; current; current = current.parent) {
@@ -181,19 +188,22 @@ Examples:
 addJson(
   daemon
     .command('stop')
-    .description('Stop the daemon if it is running')
+    .description('Stop the daemon if it is running. A visible Chrome window stays open unless --close-browser is set.')
+    .option('--close-browser', 'close Chrome even when it is showing a window')
     .addHelpText(
       'after',
       `
+Headless Chrome is always closed. A headed window stays open so the next start can adopt it.
 Examples:
   relaywright daemon stop
+  relaywright daemon stop --close-browser
   relaywright daemon stop --json
 `,
     ),
 ).action(function (this: Command) {
   const command = this;
   return guard(command, async () => {
-    const result = await stopDaemon();
+    const result = await stopDaemon({ closeBrowser: command.getOptionValue('closeBrowser') === true });
     if (result === 'not_running') {
       emit(command, 'daemon: not running', { running: false, stopped: false });
       return;
@@ -205,11 +215,11 @@ Examples:
 addJson(
   daemon
     .command('restart')
-    .description('Stop the daemon and start it again. This closes the browser and its logins.')
+    .description('Stop the daemon and start it again. Headless Chrome is closed; a visible window is adopted again.')
     .addHelpText(
       'after',
       `
-Closes the browser and drops its logins.
+Headless Chrome is closed. A headed window stays open and the new daemon connects to it.
 Examples:
   relaywright daemon restart
   relaywright daemon restart --json
@@ -716,12 +726,13 @@ Examples:
 addJson(
   skill
     .command('run')
-    .description('Replay a skill. Exit 30 when any parameter combination is broken.')
+    .description('Replay a skill. Exit 30 when any combination is broken, 20 when one needs a human.')
     .argument('<name>', 'skill name')
     .option('--param <pair>', 'fixed parameter key=value (repeatable)', collect, [])
     .option('--matrix <pair>', 'parameter axis key=v1,v2 (repeatable)', collect, [])
     .option('--start-url <url>', 'open this URL instead of the skill start_url')
     .option('--out <dir>', 'directory for download and PDF artifacts')
+    .option('--no-wait', 'do not wait for a person to log in')
     .addHelpText(
       'after',
       `
@@ -739,14 +750,41 @@ Examples:
     const matrix = matrixPairs(command.getOptionValue('matrix') as string[]);
     const startUrl = command.getOptionValue('startUrl') as string | undefined;
     const outDir = command.getOptionValue('out') as string | undefined;
-    const report = await runSkill(name, {
-      ...(Object.keys(params).length > 0 ? { params } : {}),
-      ...(Object.keys(matrix).length > 0 ? { matrix } : {}),
-      ...(startUrl ? { startUrl } : {}),
-      ...(outDir ? { out_dir: outDir } : {}),
-    });
-    emit(command, formatRunReport(report.results), report);
-    if (report.exit_code !== 0) process.exitCode = report.exit_code;
+    const wait = command.getOptionValue('wait') !== false;
+    const info = await ensureDaemon();
+    let stopPoll = false;
+    let pollTimer: ReturnType<typeof setTimeout> | undefined;
+    const poll = (async () => {
+      while (!stopPoll) {
+        await new Promise<void>((resolve) => {
+          pollTimer = setTimeout(resolve, 2_000);
+        });
+        if (stopPoll) return;
+        try {
+          const status = await readStatus(info);
+          if (status.handoff?.state === 'waiting') {
+            process.stderr.write(`[等待登录] ${status.handoff.reason ?? ''} 剩余 ${formatClock(status.handoff.remaining_ms ?? 0)}\n`);
+          }
+        } catch {
+          // The run result is what decides success. Status can blip while Chrome is busy.
+        }
+      }
+    })();
+    void poll;
+    try {
+      const report = await runSkill(name, {
+        ...(Object.keys(params).length > 0 ? { params } : {}),
+        ...(Object.keys(matrix).length > 0 ? { matrix } : {}),
+        ...(startUrl ? { startUrl } : {}),
+        ...(outDir ? { out_dir: outDir } : {}),
+        wait_human: wait,
+      });
+      emit(command, formatRunReport(report.results), report);
+      if (report.exit_code !== 0) process.exitCode = report.exit_code;
+    } finally {
+      stopPoll = true;
+      if (pollTimer) clearTimeout(pollTimer);
+    }
   });
 });
 
@@ -790,6 +828,171 @@ Examples:
     });
     const warningText = saved.warnings.length === 0 ? 'warnings: 0' : `warnings:\n${saved.warnings.map((warning) => `- ${warning}`).join('\n')}`;
     emit(command, `saved: ${saved.name} v${saved.version}\npath: ${saved.path}\n${warningText}\n\n${saved.yaml}`, saved);
+  });
+});
+
+addJson(
+  program
+    .command('handoff')
+    .description('Ask the person at this PC to log in. Exit 20 on timeout or cancel.')
+    .argument('<reason>', 'why a person needs to take over')
+    .option('--no-wait', 'start the handoff and return without waiting')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright handoff "请扫码登录教务系统"
+  relaywright handoff "请扫码登录" --no-wait
+`,
+    ),
+).action(function (this: Command, reason: string) {
+  const command = this;
+  return guard(command, async () => {
+    const view = await startHandoff(reason);
+    if (command.getOptionValue('wait') === false) {
+      process.stderr.write(`等待登录… 剩余 ${formatClock(view.remaining_ms ?? 0)}\n`);
+      emit(command, view.state, view);
+      return;
+    }
+    let current = view;
+    while (current.state === 'waiting') {
+      process.stderr.write(`等待登录… 剩余 ${formatClock(current.remaining_ms ?? 0)}\n`);
+      current = await waitHandoff(5_000);
+    }
+    emit(command, current.state, current);
+    if (current.state !== 'done') process.exitCode = 20;
+  });
+});
+
+const identity = program.command('identity').description('Login identities stored by Chrome');
+addJson(identity);
+
+addJson(
+  identity
+    .command('list')
+    .description('List identity metadata. Cookies stay in Chrome.')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright identity list
+  relaywright identity list --json
+`,
+    ),
+).action(function (this: Command) {
+  const command = this;
+  return guard(command, async () => {
+    const identities = await listIdentities();
+    const text = identities.length === 0 ? 'no identities' : identities.map((item) => `${item.name}  ${item.domains.join(',')}  cookies ${item.cookie_count}`).join('\n');
+    emit(command, text, { identities });
+  });
+});
+
+addJson(
+  identity
+    .command('save')
+    .description('Persist the active tab session after you logged in yourself')
+    .argument('[name]', 'identity name; defaults to the registrable domain')
+    .option('--domain <domain>', 'registrable domain to keep (repeatable)', collect, [])
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright identity save
+  relaywright identity save school.edu.cn --domain school.edu.cn
+`,
+    ),
+).action(function (this: Command, name?: string) {
+  const command = this;
+  return guard(command, async () => {
+    const domains = command.getOptionValue('domain') as string[];
+    const saved = await saveIdentity({
+      ...(name ? { name } : {}),
+      ...(domains.length > 0 ? { domains } : {}),
+    });
+    emit(command, `saved ${saved.name}`, saved);
+  });
+});
+
+addJson(
+  identity
+    .command('revoke')
+    .description('Delete an identity and its matching cookies')
+    .argument('<name>', 'identity name')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright identity revoke school.edu.cn
+`,
+    ),
+).action(function (this: Command, name: string) {
+  const command = this;
+  return guard(command, async () => {
+    const removed = await revokeIdentity(name);
+    emit(command, `revoked ${removed.name}`, removed);
+  });
+});
+
+const audit = program.command('audit').description('Append-only audit log');
+addJson(audit);
+
+addJson(
+  audit
+    .command('tail')
+    .description('Show the latest audit records')
+    .option('-n, --lines <count>', 'number of records', '20')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright audit tail
+  relaywright audit tail -n 20 --json
+`,
+    ),
+).action(function (this: Command) {
+  const command = this;
+  return guard(command, async () => {
+    const limit = parseStepFlag('-n', String(command.getOptionValue('lines') ?? '20'));
+    const records = tailAudit(limit);
+    const text =
+      records.length === 0
+        ? '(empty)'
+        : records
+            .map((record) => {
+              const extra = Object.entries(record)
+                .filter(([key]) => key !== 'ts' && key !== 'event' && key !== 'prev' && key !== 'hash')
+                .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
+                .join(' ');
+              return `${record.ts}  ${record.event}${extra ? `  ${extra}` : ''}`;
+            })
+            .join('\n');
+    emit(command, text, records);
+  });
+});
+
+addJson(
+  audit
+    .command('verify')
+    .description('Check the hash chain. Exit 1 at the first broken line.')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright audit verify
+`,
+    ),
+).action(function (this: Command) {
+  const command = this;
+  return guard(command, async () => {
+    const result = verifyAudit();
+    if (result.ok) {
+      emit(command, 'audit: ok', { ok: true });
+      return;
+    }
+    process.stderr.write(`${result.where}\n`);
+    if (wantsJson(command)) process.stdout.write(`${JSON.stringify({ ok: false, where: result.where }, null, 2)}\n`);
+    process.exitCode = 1;
   });
 });
 

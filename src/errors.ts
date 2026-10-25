@@ -12,6 +12,8 @@ export const RELAY_ERROR_CODES = [
   'skill_not_found',
   'no_download',
   'pdf_unsupported',
+  'human_required',
+  'human_in_control',
 ] as const;
 
 export type RelayErrorCode = (typeof RELAY_ERROR_CODES)[number];
@@ -27,7 +29,7 @@ export class RelayError extends Error {
   }
 }
 
-export function relayStatus(code: RelayErrorCode): 400 | 404 | 409 | 500 | 503 | 504 {
+export function relayStatus(code: RelayErrorCode): 400 | 404 | 409 | 423 | 500 | 503 | 504 {
   switch (code) {
     case 'stale_ref':
     case 'occluded':
@@ -45,6 +47,9 @@ export function relayStatus(code: RelayErrorCode): 400 | 404 | 409 | 500 | 503 |
       return 504;
     case 'browser_not_ready':
       return 503;
+    case 'human_required':
+    case 'human_in_control':
+      return 423;
     default:
       return 500;
   }

@@ -18,6 +18,35 @@ export async function startStatic(root: string): Promise<{ port: number; close: 
         res.end(pdf);
         return;
       }
+      if (req.method === 'GET' && (url.pathname === '/protected/zf' || url.pathname.startsWith('/protected/zf/'))) {
+        const allowed = (req.headers.cookie ?? '').split(';').some((part) => part.trim() === 'mocksession=1');
+        if (!allowed) {
+          const service = `http://${req.headers.host ?? '127.0.0.1'}${url.pathname}`;
+          res.writeHead(302, {
+            location: `/cas-mock/?service=${encodeURIComponent(service)}`,
+            'cache-control': 'no-store',
+          });
+          res.end();
+          return;
+        }
+        const root = resolve(base, 'zf-mock', 'v1');
+        let rel = url.pathname.slice('/protected/zf'.length);
+        if (rel === '' || rel.endsWith('/')) rel = `${rel}index.html`;
+        const file = resolve(root, `.${rel.startsWith('/') ? rel : `/${rel}`}`);
+        if (file !== root && !file.startsWith(`${root}${sep}`)) {
+          res.writeHead(403);
+          res.end();
+          return;
+        }
+        let data = await readFile(file);
+        if (extname(file) === '.html') {
+          const html = data.toString('utf8').replace(/<form id="login-box">[\s\S]*?<\/form>/, '');
+          data = Buffer.from(html, 'utf8');
+        }
+        res.writeHead(200, { 'content-type': mime(extname(file)), 'cache-control': 'no-store' });
+        res.end(data);
+        return;
+      }
       if (req.method === 'GET' && url.pathname === '/zf-mock/attachment.pdf') {
         const pdf = await readFile(join(base, 'sample.pdf'));
         res.writeHead(200, {

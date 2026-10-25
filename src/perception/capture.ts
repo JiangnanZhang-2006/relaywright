@@ -35,6 +35,8 @@ export interface CapturedTree {
   passwordBackendNodeIds: Set<number>;
   clickableBackendNodeIds: Set<number>;
   clickableLabels: Map<number, string>;
+  controlNames: Map<number, string>;
+  visiblePassword: boolean;
   adaptedSelects: AdaptedSelect[];
 }
 
@@ -65,6 +67,8 @@ function toFrameInput(tree: CapturedTree): FrameInput {
     passwordBackendNodeIds: tree.passwordBackendNodeIds,
     clickableBackendNodeIds: tree.clickableBackendNodeIds,
     clickableLabels: tree.clickableLabels,
+    controlNames: tree.controlNames,
+    visiblePassword: tree.visiblePassword,
     adaptedSelects: tree.adaptedSelects,
   };
 }
@@ -110,6 +114,8 @@ function emptyTree(label: string, outOfProcess: boolean, name = '', url = ''): C
     passwordBackendNodeIds: new Set(),
     clickableBackendNodeIds: new Set(),
     clickableLabels: new Map(),
+    controlNames: new Map(),
+    visiblePassword: false,
     adaptedSelects: [],
   };
 }
@@ -138,8 +144,10 @@ async function inspectFrame(cdp: CDPSession, frameId: string): Promise<Omit<Capt
   try {
     const rootProps = await properties(cdp, rootId);
     const texts = parseStrings(stringProp(rootProps, 'clickableTextJson'));
+    const namedTexts = parseStrings(stringProp(rootProps, 'namedTextJson'));
     const clickableObjects = await indexedObjects(cdp, objectProp(rootProps, 'clickables'), release);
     const passwordObjects = await indexedObjects(cdp, objectProp(rootProps, 'passwords'), release);
+    const namedObjects = await indexedObjects(cdp, objectProp(rootProps, 'named'), release);
     const selectObjects = await indexedObjects(cdp, objectProp(rootProps, 'selects'), release);
 
     const clickableBackendNodeIds = new Set<number>();
@@ -160,6 +168,15 @@ async function inspectFrame(cdp: CDPSession, frameId: string): Promise<Omit<Capt
       if (backend !== null) passwordBackendNodeIds.add(backend);
     }
 
+    const controlNames = new Map<number, string>();
+    for (let index = 0; index < namedObjects.length; index += 1) {
+      const objectId = namedObjects[index];
+      if (!objectId) continue;
+      const backend = await backendOf(cdp, objectId);
+      const label = namedTexts[index] ?? '';
+      if (backend !== null && label) controlNames.set(backend, label);
+    }
+
     const adaptedSelects: AdaptedSelect[] = [];
     for (const objectId of selectObjects) {
       if (!objectId) continue;
@@ -167,7 +184,14 @@ async function inspectFrame(cdp: CDPSession, frameId: string): Promise<Omit<Capt
       if (adapted) adaptedSelects.push(adapted);
     }
 
-    return { passwordBackendNodeIds, clickableBackendNodeIds, clickableLabels, adaptedSelects };
+    return {
+      passwordBackendNodeIds,
+      clickableBackendNodeIds,
+      clickableLabels,
+      controlNames,
+      visiblePassword: boolProp(rootProps, 'visiblePassword'),
+      adaptedSelects,
+    };
   } finally {
     await Promise.all(release.map((objectId) => cdp.send('Runtime.releaseObject', { objectId }).catch(() => undefined)));
   }
@@ -216,6 +240,10 @@ function objectProp(props: Property[], name: string): string | null {
 function stringProp(props: Property[], name: string): string {
   const value = props.find((property) => property.name === name)?.value?.value;
   return typeof value === 'string' ? value : '';
+}
+
+function boolProp(props: Property[], name: string): boolean {
+  return props.find((property) => property.name === name)?.value?.value === true;
 }
 
 async function backendOf(cdp: CDPSession, objectId: string): Promise<number | null> {

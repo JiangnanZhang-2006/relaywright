@@ -31,6 +31,7 @@ export function buildSkill(steps: readonly TraceStep[], input: {
   from_step?: number;
   to_step?: number;
   checks?: CheckInput[];
+  identity?: string;
 }): BuiltSkill {
   if (steps.length === 0) throw new RelayError('bad_params', 'The trace is empty');
   const examples = exampleParams(input.params ?? {});
@@ -97,6 +98,7 @@ export function buildSkill(steps: readonly TraceStep[], input: {
   const skill = {
     name: input.name,
     description: input.description,
+    ...(input.identity ? { identity: input.identity } : {}),
     version: 1,
     start_url: startUrl,
     params: Object.fromEntries(examples.map((param) => [param.name, { type: 'string' as const, example: param.example }])),

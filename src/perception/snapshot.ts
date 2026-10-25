@@ -95,6 +95,8 @@ export interface FrameInput {
   clickableBackendNodeIds?: ReadonlySet<number>;
   /** DOM text used only when the clickable element has no AX node. */
   clickableLabels?: ReadonlyMap<number, string>;
+  controlNames?: ReadonlyMap<number, string>;
+  visiblePassword?: boolean;
   adaptedSelects?: readonly AdaptedSelect[];
 }
 
@@ -113,6 +115,7 @@ export interface SnapshotInput {
   maxRows?: number;
   clickableBackendNodeIds?: ReadonlySet<number>;
   clickableLabels?: ReadonlyMap<number, string>;
+  controlNames?: ReadonlyMap<number, string>;
   adaptedSelects?: readonly AdaptedSelect[];
   frames?: readonly FrameInput[];
   registry?: RefRegistry;
@@ -164,6 +167,10 @@ export function switchBanner(kind: 'new' | 'user', title: string): string {
   return `(${label}: ${title})`;
 }
 
+export function loginHintLine(title: string): string {
+  return `(login required: ${compact(title)} — ask the user with request_human; typing passwords is blocked)`;
+}
+
 function tabSuffix(tabs: TabHint | undefined): string {
   if (!tabs || tabs.count < 2) return '';
   return `  tabs: ${tabs.count} (active ${tabs.active})`;
@@ -190,6 +197,7 @@ function renderBody(input: SnapshotInput): { lines: string[]; items: ModelItem[]
       passwordBackendNodeIds: input.passwordBackendNodeIds ?? new Set<number>(),
       clickableBackendNodeIds: input.clickableBackendNodeIds ?? new Set<number>(),
       clickableLabels: input.clickableLabels ?? new Map<number, string>(),
+      controlNames: input.controlNames ?? new Map<number, string>(),
       adaptedSelects: input.adaptedSelects ?? [],
       maxRows: input.maxRows ?? DEFAULT_MAX_TABLE_ROWS,
     },
@@ -210,6 +218,7 @@ function renderBody(input: SnapshotInput): { lines: string[]; items: ModelItem[]
         passwordBackendNodeIds: frame.passwordBackendNodeIds ?? new Set<number>(),
         clickableBackendNodeIds: frame.clickableBackendNodeIds ?? new Set<number>(),
         clickableLabels: frame.clickableLabels ?? new Map<number, string>(),
+        controlNames: frame.controlNames ?? new Map<number, string>(),
         adaptedSelects: frame.adaptedSelects ?? [],
         maxRows: input.maxRows ?? DEFAULT_MAX_TABLE_ROWS,
       },
@@ -224,6 +233,7 @@ interface TreeOptions {
   passwordBackendNodeIds: ReadonlySet<number>;
   clickableBackendNodeIds: ReadonlySet<number>;
   clickableLabels: ReadonlyMap<number, string>;
+  controlNames: ReadonlyMap<number, string>;
   adaptedSelects: readonly AdaptedSelect[];
   maxRows: number;
 }
@@ -309,7 +319,7 @@ function renderTree(
     }
 
     if (!node.ignored && interactive) {
-      const rendered = describeInteractive(node, options.passwordBackendNodeIds);
+      const rendered = describeInteractive(node, options.passwordBackendNodeIds, options.controlNames);
       if (rendered) {
         const ref = assign(backend);
         lines.push(formatInteractive(rendered, ref));
@@ -423,10 +433,12 @@ function formatInteractive(rendered: InteractiveLine, ref: string): string {
   return `[${ref}] ${rendered.role}${name}${value}`;
 }
 
-function describeInteractive(node: AxNode, passwordIds: ReadonlySet<number>): InteractiveLine | null {
+function describeInteractive(node: AxNode, passwordIds: ReadonlySet<number>, controlNames: ReadonlyMap<number, string>): InteractiveLine | null {
   const role = roleOf(node);
   if (!INTERACTIVE_ROLES.has(role)) return null;
-  const name = compact(axText(node.name));
+  const accessible = compact(axText(node.name));
+  const fallback = node.backendDOMNodeId === undefined ? '' : controlNames.get(node.backendDOMNodeId) ?? '';
+  const name = accessible || fallback;
   const rawValue = compact(axText(node.value));
   if (isPassword(node, role, passwordIds)) {
     return rawValue ? { role, name, value: '[redacted]' } : { role, name };

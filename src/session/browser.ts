@@ -1,9 +1,11 @@
 import { unlink } from 'node:fs/promises';
 import type { Page } from 'puppeteer-core';
-import puppeteer, { type Browser } from 'puppeteer-core';
+import type { Browser } from 'puppeteer-core';
+import { recordAudit } from '../audit/log.js';
 import { resolveBrowserForLaunch, type ResolvedBrowser } from '../browser/resolve.js';
 import { defaultProfileDir, downloadsDir, ensureHomeLayout, errorText, logDaemon } from '../config/paths.js';
 import { browserDownloadingMessage, RelayError, staleTabRefMessage } from '../errors.js';
+import type { HandoffView, IdentityMeta } from '../protocol.js';
 import { ensureTabHeader, pageHeader, switchBanner } from '../perception/snapshot.js';
 import type { ActInput, DaemonStatus, DownloadInfo, DownloadInput, PageBody, PdfInput, PdfResult, TabsCommand, TabsList, WaitInput } from '../protocol.js';
 import { observedLines, TraceLog } from '../recorder/trace.js';
@@ -31,6 +33,10 @@ import {
   stageBytes,
   stripDownloadUrl,
 } from './downloads.js';
+import { HandoffManager } from './handoff.js';
+import { IdentityStore } from './identity.js';
+import { adoptChrome, HEADLESS_VIEWPORT, launchChrome, type LaunchBrowserRequest } from './launch.js';
+import { HANDOFF_TIMEOUT_MS } from './login.js';
 import { PageController, type ReplayPage } from './page.js';
 import { formatTabList, POPUP_GRACE_MS, TabSet } from './tabs.js';
 import { bounded } from './timeout.js';
@@ -69,13 +75,22 @@ export interface BrowserControl {
   skillHistory(name: string): SkillHistory;
   rollbackSkill(name: string, to: number): SkillDocument;
   runSkill(name: string, input: RunSkillInput): Promise<MatrixResult>;
+  requestHandoff(reason: string): Promise<HandoffView>;
+  waitHandoff(timeoutMs: number): Promise<HandoffView>;
+  cancelHandoff(): Promise<HandoffView>;
+  handoffPage(id: string, token: string): string | null;
+  handoffState(id: string, token: string): HandoffView | null;
+  handoffCancelToken(id: string, token: string): Promise<HandoffView | null>;
+  listIdentities(): IdentityMeta[];
+  saveIdentity(input: { name?: string; domains?: string[] }): Promise<IdentityMeta>;
+  revokeIdentity(name: string): Promise<{ name: string }>;
 }
 
-type LaunchFn = typeof puppeteer.launch;
+export type LaunchBrowser = (request: LaunchBrowserRequest) => Promise<Browser>;
 
 export interface BrowserSessionOptions {
   resolveExecutable?: (onProgress?: (percent: number) => void) => Promise<ResolvedBrowser & { path: string }>;
-  launchBrowser?: LaunchFn;
+  launchBrowser?: LaunchBrowser;
 }
 
 const READY_WAIT_MS = 30_000;
@@ -92,13 +107,31 @@ export class BrowserSession implements BrowserControl {
   private closed = false;
   private replayDepth = 0;
   private lastActionPage: Page | null = null;
+  private daemonOrigin: string | null = null;
+  private keepBrowser = false;
+  private releasing = false;
+  private persistTimer: ReturnType<typeof setInterval> | null = null;
   private readonly traceLog = new TraceLog();
+  private readonly identities: IdentityStore;
+  private readonly handoff: HandoffManager;
   private readonly resolveExecutable: NonNullable<BrowserSessionOptions['resolveExecutable']>;
-  private readonly launchBrowser: LaunchFn;
+  private readonly launchBrowser: LaunchBrowser;
 
   constructor(options: BrowserSessionOptions = {}) {
     this.resolveExecutable = options.resolveExecutable ?? resolveBrowserForLaunch;
-    this.launchBrowser = options.launchBrowser ?? ((launchOptions) => puppeteer.launch(launchOptions));
+    this.launchBrowser = options.launchBrowser ?? ((request) => launchChrome(request));
+    this.identities = new IdentityStore(() => this.browser);
+    this.handoff = new HandoffManager({
+      getBrowser: () => this.browser,
+      getTabs: () => this.tabSet,
+      getOrigin: () => this.daemonOrigin,
+      identities: this.identities,
+    });
+  }
+
+  setDaemonOrigin(origin: string): void {
+    this.daemonOrigin = origin.replace(/\/$/, '');
+    this.tabSet?.setIgnorePrefix(this.daemonOrigin);
   }
 
   browserState(): BrowserStateView {
@@ -121,7 +154,7 @@ export class BrowserSession implements BrowserControl {
       uptime: Math.round(process.uptime() * 10) / 10,
       browser,
     };
-    if (!this.isReady() || !this.tabSet) return body;
+    if (!this.isReady() || !this.tabSet) return this.withHandoff(body);
     browser.executablePath = this.executablePath;
     browser.version = this.browserVersion;
     try {
@@ -131,15 +164,17 @@ export class BrowserSession implements BrowserControl {
     } catch (err) {
       logDaemon(`status page read failed: ${errorText(err)}`);
     }
-    return body;
+    return this.withHandoff(body);
   }
 
   async navigate(url: string): Promise<PageBody> {
+    this.assertModel();
     const controller = await this.prepareController();
     const urlBefore = controller.currentUrl();
     const actionPage = controller.pageHandle();
     const page = await controller.navigate(url, this.tabset().tabHint());
     const shown = this.finishPage(page);
+    this.identities.touch(shown.url);
     return this.record(shown, {
       action: 'goto',
       urlBefore,
@@ -151,6 +186,7 @@ export class BrowserSession implements BrowserControl {
   }
 
   async snapshot(options?: { mode?: 'full' | 'diff'; maxRows?: number }): Promise<PageBody> {
+    this.assertModel();
     const controller = await this.prepareController();
     const kind = this.tabset().peekSwitch();
     const mode = options?.mode ?? 'full';
@@ -159,10 +195,15 @@ export class BrowserSession implements BrowserControl {
   }
 
   async act(input: ActInput): Promise<PageBody> {
+    this.assertModel();
     const controller = await this.prepareController();
     const urlBefore = controller.currentUrl();
     const actionPage = controller.pageHandle();
     const described = input.ref ? await this.describe(controller, input.ref) : undefined;
+    if (input.ref && (input.action === 'type' || input.action === 'press') && (await controller.isPasswordRef(input.ref))) {
+      recordAudit('password_blocked', { action: input.action });
+      throw new RelayError('human_required', 'Passwords are typed by a human. Call request_human.');
+    }
     const since = this.tabset().generation();
     const mark = this.downloader().mark();
     const printBefore = await controller.printCount();
@@ -197,6 +238,7 @@ export class BrowserSession implements BrowserControl {
   }
 
   async download(input: DownloadInput): Promise<PageBody> {
+    this.assertModel();
     if (input.save_as) assertSaveAs(input.save_as);
     const controller = await this.prepareController();
     const urlBefore = controller.currentUrl();
@@ -255,6 +297,7 @@ export class BrowserSession implements BrowserControl {
   }
 
   async pdf(input: PdfInput): Promise<PdfResult> {
+    this.assertModel();
     if (input.save_as) assertSaveAs(input.save_as);
     const controller = await this.prepareController();
     const url = controller.currentUrl();
@@ -290,6 +333,7 @@ export class BrowserSession implements BrowserControl {
   }
 
   async waitFor(input: WaitInput): Promise<PageBody & { matched: boolean }> {
+    this.assertModel();
     const controller = await this.prepareController();
     const urlBefore = controller.currentUrl();
     const actionPage = controller.pageHandle();
@@ -319,6 +363,7 @@ export class BrowserSession implements BrowserControl {
   }
 
   async tabs(input: TabsCommand): Promise<TabsList | PageBody> {
+    if (input.action !== 'list') this.assertModel();
     await this.ensureReady();
     const tabs = this.tabset();
     if (input.action === 'list') {
@@ -356,12 +401,16 @@ export class BrowserSession implements BrowserControl {
   }
 
   clearTrace(): TraceView {
+    this.assertModel();
     this.lastActionPage = null;
     return this.traceLog.clear();
   }
 
   saveSkill(input: SaveSkillInput): SaveSkillResult {
-    const built = buildSkill(this.traceLog.view().steps, input);
+    this.assertModel();
+    const steps = this.traceLog.view().steps;
+    const identity = this.identities.matchUrls(steps.flatMap((step) => [step.urlBefore, step.urlAfter]));
+    const built = buildSkill(steps, identity ? { ...input, identity } : input);
     const stored = writeStoredSkill(built.skill, input.overwrite === true);
     return {
       name: built.skill.name,
@@ -389,19 +438,73 @@ export class BrowserSession implements BrowserControl {
   }
 
   async runSkill(name: string, input: RunSkillInput): Promise<MatrixResult> {
+    this.assertModel();
     await this.ensureReady();
     const skill = readStoredSkill(name).skill;
     this.replayDepth += 1;
     try {
-      return await runMatrix(this.replayPage(), skill, input);
+      return await runMatrix(this.replayPage(), skill, input, {
+        waitForHuman: input.wait_human ? (reason) => this.waitOutHandoff(reason) : undefined,
+      });
     } finally {
       this.replayDepth -= 1;
       this.tabSet?.consumeSwitch();
     }
   }
 
-  async close(): Promise<void> {
+  async requestHandoff(reason: string): Promise<HandoffView> {
+    await this.ensureReady();
+    return this.handoff.start(reason);
+  }
+
+  waitHandoff(timeoutMs: number): Promise<HandoffView> {
+    return this.handoff.wait(timeoutMs);
+  }
+
+  cancelHandoff(): Promise<HandoffView> {
+    return this.handoff.cancel();
+  }
+
+  handoffPage(id: string, token: string): string | null {
+    return this.handoff.pageHtml(id, token);
+  }
+
+  handoffState(id: string, token: string): HandoffView | null {
+    return this.handoff.stateForToken(id, token);
+  }
+
+  handoffCancelToken(id: string, token: string): Promise<HandoffView | null> {
+    return this.handoff.cancelForToken(id, token);
+  }
+
+  listIdentities(): IdentityMeta[] {
+    return this.identities.list();
+  }
+
+  async saveIdentity(input: { name?: string; domains?: string[] }): Promise<IdentityMeta> {
+    this.assertModel();
+    await this.ensureReady();
+    const controller = await this.prepareController();
+    return this.identities.saveManual({ ...input, pageUrl: controller.currentUrl() });
+  }
+
+  async revokeIdentity(name: string): Promise<{ name: string }> {
+    this.assertModel();
+    await this.ensureReady();
+    await this.identities.revoke(name);
+    return { name };
+  }
+
+  async close(options?: { keepBrowser?: boolean }): Promise<void> {
+    this.keepBrowser = options?.keepBrowser === true;
     this.closed = true;
+    // Resolving or downloading has no Chrome yet. Waiting here would deadlock a caller
+    // that releases the resolver only after close returns.
+    const launchInFlight = this.browser !== null || this.phase.state === 'launching' || this.phase.state === 'ready';
+    if (launchInFlight && this.attempt) await this.attempt.catch(() => undefined);
+    this.stopPersistTimer();
+    await this.identities.persistAll().catch((err: unknown) => logDaemon(`cookie persist failed: ${errorText(err)}`));
+    await this.handoff.shutdown().catch((err: unknown) => logDaemon(`handoff shutdown: ${errorText(err)}`));
     const downloads = this.downloads;
     this.downloads = null;
     if (downloads) await downloads.dispose().catch(() => undefined);
@@ -410,7 +513,7 @@ export class BrowserSession implements BrowserControl {
     if (tabs) await tabs.dispose().catch(() => undefined);
     const browser = this.browser;
     this.browser = null;
-    if (browser) await browser.close().catch(() => undefined);
+    if (browser) await this.releaseBrowser(browser);
   }
 
   private replayPage(): ReplayPage {
@@ -421,8 +524,14 @@ export class BrowserSession implements BrowserControl {
       return current;
     };
     return {
-      navigate: async (url) => (await use()).navigate(url),
+      navigate: async (url) => {
+        const body = await (await use()).navigate(url);
+        session.identities.touch(body.url);
+        return body;
+      },
       capture: async () => (await use()).capture(),
+      hasVisiblePassword: async () => (await use()).hasVisiblePassword(),
+      isPasswordBackend: async (backend) => (await use()).isPasswordBackend(backend),
       currentUrl: () => {
         if (!current) throw new Error('Replay has not opened a page');
         return current.currentUrl();
@@ -655,30 +764,31 @@ export class BrowserSession implements BrowserControl {
       ensureHomeLayout();
       preferExternalPdf(defaultProfileDir());
       const headless = process.env.RELAYWRIGHT_HEADLESS === '1';
-      logDaemon(`launching browser headless=${headless ? '1' : '0'} source=${resolved.source} path=${resolved.path}`);
-      const browser = await this.launchBrowser({
-        executablePath: resolved.path,
-        headless,
-        userDataDir: defaultProfileDir(),
-        // Headless has no window size of its own; a fixed viewport keeps hit-testing laid out.
-        defaultViewport: headless ? { width: 1280, height: 800 } : null,
-        // Puppeteer's own signal handlers call process.exit and skip daemon cleanup.
-        handleSIGINT: false,
-        handleSIGTERM: false,
-        handleSIGHUP: false,
-        timeout: 45_000,
-        args: ['--no-first-run', '--no-default-browser-check', '--disable-sync', '--disable-popup-blocking'],
-      });
+      const profile = defaultProfileDir();
+      const viewport = headless ? { width: HEADLESS_VIEWPORT.width, height: HEADLESS_VIEWPORT.height } : null;
+      let browser = await adoptChrome(profile, viewport);
+      if (browser) {
+        logDaemon('adopted browser');
+      } else {
+        logDaemon(`launching browser headless=${headless ? '1' : '0'} source=${resolved.source} path=${resolved.path}`);
+        browser = await this.launchBrowser({
+          executablePath: resolved.path,
+          userDataDir: profile,
+          headless,
+          defaultViewport: viewport,
+          timeoutMs: 45_000,
+        });
+      }
       if (this.closed) {
-        await browser.close().catch(() => undefined);
+        await this.releaseBrowser(browser);
         return;
       }
       this.browser = browser;
       const downloads = await DownloadManager.start(browser);
       if (this.closed) {
         await downloads.dispose().catch(() => undefined);
-        await browser.close().catch(() => undefined);
         this.browser = null;
+        await this.releaseBrowser(browser);
         return;
       }
       this.downloads = downloads;
@@ -690,28 +800,32 @@ export class BrowserSession implements BrowserControl {
           this.tabSet = null;
           const caught = this.downloads;
           this.downloads = null;
+          this.stopPersistTimer();
           void caught?.dispose().catch(() => undefined);
           void open?.dispose().catch(() => undefined);
-          if (!this.closed && this.phase.state === 'ready') {
+          if (!this.closed && !this.releasing && this.phase.state === 'ready') {
             this.phase = { state: 'error', message: 'Browser disconnected' };
           }
         }
       });
-      const tabs = new TabSet(browser);
+      const tabs = new TabSet(browser, { ignoreUrlPrefix: this.daemonOrigin ?? '' });
       this.tabSet = tabs;
       await tabs.start();
+      await tabs.attachAll();
       if (this.closed) {
         await tabs.dispose().catch(() => undefined);
         await downloads.dispose().catch(() => undefined);
         this.downloads = null;
-        await browser.close().catch(() => undefined);
+        this.tabSet = null;
         this.browser = null;
+        await this.releaseBrowser(browser);
         return;
       }
       this.tabSet = tabs;
       this.executablePath = resolved.path;
       this.browserVersion = await browser.version();
       this.phase = { state: 'ready' };
+      this.startPersistTimer();
       logDaemon(`browser ready ${this.browserVersion}`);
     } catch (err) {
       if (this.closed) return;
@@ -726,7 +840,51 @@ export class BrowserSession implements BrowserControl {
       void downloads?.dispose().catch(() => undefined);
       const browser = this.browser;
       this.browser = null;
-      if (browser) await browser.close().catch(() => undefined);
+      if (browser) await this.releaseBrowser(browser);
+    }
+  }
+
+  private withHandoff(body: DaemonStatus): DaemonStatus {
+    const handoff = this.handoff.view();
+    if (handoff.state === 'idle') return body;
+    return { ...body, handoff };
+  }
+
+  private assertModel(): void {
+    const reason = this.handoff.lockReason();
+    if (!reason) return;
+    throw new RelayError('human_in_control', `A human is completing login: ${reason}. Call request_human to keep waiting.`);
+  }
+
+  private async waitOutHandoff(reason: string): Promise<'done' | 'cancelled' | 'timeout'> {
+    await this.handoff.start(reason);
+    const view = await this.handoff.wait(HANDOFF_TIMEOUT_MS);
+    if (view.state === 'done' || view.state === 'cancelled' || view.state === 'timeout') return view.state;
+    return 'timeout';
+  }
+
+  private startPersistTimer(): void {
+    this.stopPersistTimer();
+    const timer = setInterval(() => {
+      void this.identities.persistAll().catch((err: unknown) => logDaemon(`cookie persist failed: ${errorText(err)}`));
+    }, 5 * 60_000);
+    timer.unref?.();
+    this.persistTimer = timer;
+  }
+
+  private stopPersistTimer(): void {
+    if (!this.persistTimer) return;
+    clearInterval(this.persistTimer);
+    this.persistTimer = null;
+  }
+
+  private async releaseBrowser(browser: Browser): Promise<void> {
+    this.releasing = true;
+    try {
+      if (this.keepBrowser) await browser.disconnect().catch(() => undefined);
+      else await browser.close().catch(() => undefined);
+    } finally {
+      this.releasing = false;
     }
   }
 }

@@ -34,6 +34,7 @@ export function formatTabList(tabs: readonly TabInfo[]): string {
 export class TabSet {
   private slots: Slot[] = [];
   private active: Slot | null = null;
+  private ignorePrefix = '';
   private pendingSwitch: SwitchKind | null = null;
   private stopping = false;
   private followGeneration = 0;
@@ -49,7 +50,27 @@ export class TabSet {
     this.untrack(target);
   };
 
-  constructor(private readonly browser: Browser) {}
+  constructor(
+    private readonly browser: Browser,
+    options?: { ignoreUrlPrefix?: string },
+  ) {
+    this.ignorePrefix = options?.ignoreUrlPrefix ?? '';
+  }
+
+  setIgnorePrefix(prefix: string): void {
+    this.ignorePrefix = prefix;
+  }
+
+  activePage(): Page | null {
+    const page = this.active?.page;
+    if (!page || page.isClosed()) return null;
+    return page;
+  }
+
+  async attachAll(): Promise<void> {
+    await this.reconcile();
+    await Promise.all(this.slots.map((slot) => this.controllerFor(slot).catch(() => undefined)));
+  }
 
   async start(): Promise<void> {
     this.browser.on('targetcreated', this.onCreated);
@@ -198,7 +219,7 @@ export class TabSet {
   }
 
   async reconcile(): Promise<void> {
-    const open = (await this.browser.pages()).filter((page) => !page.isClosed());
+    const open = (await this.browser.pages()).filter((page) => !page.isClosed() && !this.ignored(page));
     const seen = new Set<Page>();
     for (const page of open) {
       seen.add(page);
@@ -269,8 +290,9 @@ export class TabSet {
 
   private async trackCreated(target: Target): Promise<void> {
     if (target.type() !== 'page' && target.type() !== 'webview') return;
+    if (this.ignoredUrl(target.url())) return;
     const page = await target.page().catch(() => null);
-    if (!page) return;
+    if (!page || this.ignored(page)) return;
     this.addPage(page);
     await this.reorder();
     const opener = target.opener();
@@ -313,7 +335,7 @@ export class TabSet {
   }
 
   private addPage(page: Page): Slot | null {
-    if (page.isClosed()) return null;
+    if (page.isClosed() || this.ignored(page)) return null;
     const existing = this.slots.find((slot) => slot.page === page);
     if (existing) return existing;
     let target: Target;
@@ -324,10 +346,30 @@ export class TabSet {
     }
     const slot: Slot = { page, target, controller: null, attaching: null, lastActiveAt: 0 };
     page.on('popup', (popup) => {
-      if (popup) this.notePopup(page, popup);
+      if (popup && !this.ignored(popup)) this.notePopup(page, popup);
+    });
+    page.on('framenavigated', () => {
+      if (!this.ignored(page)) return;
+      const wasActive = this.active === slot;
+      this.drop(slot);
+      if (wasActive && !this.stopping) {
+        void this.fallback().catch((err) => logDaemon(`tab fallback failed: ${errorText(err)}`));
+      }
     });
     this.slots.push(slot);
     return slot;
+  }
+
+  private ignored(page: Page): boolean {
+    try {
+      return this.ignoredUrl(page.url());
+    } catch {
+      return false;
+    }
+  }
+
+  private ignoredUrl(url: string): boolean {
+    return this.ignorePrefix.length > 0 && url.startsWith(this.ignorePrefix);
   }
 
   private drop(slot: Slot): void {

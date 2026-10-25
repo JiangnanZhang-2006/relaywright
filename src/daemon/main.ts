@@ -28,13 +28,18 @@ function cleanupFiles(): void {
   releaseDaemonLock();
 }
 
-async function shutdown(reason: string, code = 0): Promise<void> {
+function keepBrowserOnExit(closeBrowser = false): boolean {
+  if (closeBrowser) return false;
+  return process.env.RELAYWRIGHT_HEADLESS !== '1';
+}
+
+async function shutdown(reason: string, code = 0, closeBrowser = false): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   logDaemon(`shutting down (${reason})`);
   await Promise.race([
-    session.close().catch((err: unknown) => logDaemon(`browser close: ${errorText(err)}`)),
-    new Promise((resolve) => setTimeout(resolve, 5_000)),
+    session.close({ keepBrowser: keepBrowserOnExit(closeBrowser) }).catch((err: unknown) => logDaemon(`browser close: ${errorText(err)}`)),
+    new Promise((resolve) => setTimeout(resolve, 15_000)),
   ]);
   if (http) {
     await http.close().catch((err: unknown) => logDaemon(`server close: ${errorText(err)}`));
@@ -87,11 +92,12 @@ async function main(): Promise<void> {
       token,
       session,
       build,
-      onShutdown: () => {
-        void shutdown('http');
+      onShutdown: (closeBrowser) => {
+        void shutdown('http', 0, closeBrowser === true);
       },
     }),
   );
+  session.setDaemonOrigin(`http://127.0.0.1:${http.port}`);
   await writeDaemonInfo({
     pid: process.pid,
     port: http.port,
@@ -115,7 +121,7 @@ process.on('uncaughtException', (err) => {
 
 main().catch((err: unknown) => {
   logDaemon(`fatal: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
-  void session.close().catch(() => undefined).finally(() => {
+  void session.close({ keepBrowser: keepBrowserOnExit(false) }).catch(() => undefined).finally(() => {
     cleanupFiles();
     ownsRuntime = false;
     process.exit(1);

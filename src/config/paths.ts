@@ -53,6 +53,18 @@ export function downloadsStagingDir(): string {
   return join(downloadsDir(), '.staging');
 }
 
+export function identitiesDir(): string {
+  return join(relaywrightHome(), 'identities');
+}
+
+export function identityPath(name: string): string {
+  return join(identitiesDir(), `${name}.json`);
+}
+
+export function auditDir(): string {
+  return join(relaywrightHome(), 'audit');
+}
+
 export function ensureHomeLayout(): void {
   mkdirSync(logsDir(), { recursive: true });
   mkdirSync(defaultProfileDir(), { recursive: true });
@@ -60,6 +72,8 @@ export function ensureHomeLayout(): void {
   mkdirSync(tracesDir(), { recursive: true });
   mkdirSync(skillsDir(), { recursive: true });
   mkdirSync(downloadsStagingDir(), { recursive: true });
+  mkdirSync(identitiesDir(), { recursive: true });
+  mkdirSync(auditDir(), { recursive: true });
 }
 
 let cachedVersion: string | undefined;

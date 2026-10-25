@@ -94,6 +94,90 @@ function rwFindWidget(select) {
 function rwElementText(el) {
   return rwCompact(el.innerText || el.textContent || '').slice(0, 80);
 }
+function rwDirectText(el) {
+  let text = '';
+  const nodes = el.childNodes || [];
+  for (const node of nodes) {
+    if (node.nodeType === 3) text += node.textContent || '';
+  }
+  return rwCompact(text);
+}
+function rwSkipToken(token) {
+  if (!token) return true;
+  const lower = String(token).toLowerCase();
+  if (lower === 'ng-star-inserted' || lower === 'icon' || lower === 'fa' || lower === 'fas' || lower === 'far' || lower === 'fab' || lower === 'material-icons' || lower === 'svg-icon') return true;
+  if (lower.indexOf('ant-') === 0) return true;
+  return false;
+}
+function rwClassToken(el) {
+  const raw = typeof el.className === 'string' ? el.className : '';
+  const parts = raw.split(/\\s+/);
+  for (const token of parts) {
+    if (rwSkipToken(token)) continue;
+    return token;
+  }
+  return '';
+}
+function rwFileStem(src) {
+  const clean = String(src || '').split('?')[0].split('#')[0];
+  const base = clean.split('/').pop() || '';
+  const dot = base.lastIndexOf('.');
+  if (dot <= 0) return base;
+  return base.slice(0, dot);
+}
+function rwFallbackName(el) {
+  const aria = rwCompact(el.getAttribute('aria-label') || '');
+  if (aria) return aria;
+  const title = rwCompact(el.getAttribute('title') || '');
+  if (title) return title;
+  const img = el.querySelector ? el.querySelector('img') : null;
+  if (img) {
+    const alt = rwCompact(img.getAttribute('alt') || '');
+    if (alt) return alt;
+    const imgTitle = rwCompact(img.getAttribute('title') || '');
+    if (imgTitle) return imgTitle;
+  }
+  const token = rwClassToken(el);
+  if (token) return 'icon: ' + token;
+  if (img) {
+    const stem = rwFileStem(img.getAttribute('src'));
+    if (stem && !rwSkipToken(stem)) return 'icon: ' + stem;
+  }
+  return '';
+}
+function rwSplitSiblings(outer) {
+  if (rwDirectText(outer)) return null;
+  const groups = new Map();
+  const nodes = outer.querySelectorAll('*');
+  for (const el of nodes) {
+    if (!rwVisible(el)) continue;
+    if (getComputedStyle(el).cursor !== 'pointer') continue;
+    const text = rwCompact(el.innerText || el.textContent || '');
+    if (!text) continue;
+    const parent = el.parentElement;
+    if (!parent) continue;
+    let list = groups.get(parent);
+    if (!list) {
+      list = [];
+      groups.set(parent, list);
+    }
+    list.push({ el: el, text: text });
+  }
+  for (const list of groups.values()) {
+    if (list.length < 2) continue;
+    const seen = new Set();
+    let distinct = true;
+    for (const item of list) {
+      if (seen.has(item.text)) distinct = false;
+      seen.add(item.text);
+    }
+    if (!distinct) continue;
+    const chosen = [];
+    for (const item of list) chosen.push(item.el);
+    return chosen;
+  }
+  return null;
+}
 `;
 
 export const INSPECT_EXPRESSION = `(() => {
@@ -111,8 +195,31 @@ ${BROWSER_HELPERS}
     // Only an explicit tabindex counts; many non-interactive elements are focusable by default.
     const tab = el.hasAttribute('tabindex') && el.tabIndex >= 0 && !rwSemanticInteractive(el);
     if (!onclick && !pointer && !tab) continue;
+    if (pointer) {
+      const split = rwSplitSiblings(el);
+      if (split && split.length >= 2) {
+        for (const child of split) {
+          if (clickables.length >= 300) break;
+          clickables.push(child);
+          clickableTexts.push(rwElementText(child));
+        }
+        continue;
+      }
+    }
     clickables.push(el);
     clickableTexts.push(rwElementText(el));
+  }
+  const named = [];
+  const namedTexts = [];
+  const candidates = document.body ? document.body.querySelectorAll('a, button, input, textarea, select, summary, [role]') : [];
+  for (const el of candidates) {
+    if (named.length >= 300) break;
+    if (!rwVisible(el) || !rwSemanticInteractive(el)) continue;
+    if (rwElementText(el)) continue;
+    const fallback = rwFallbackName(el);
+    if (!fallback) continue;
+    named.push(el);
+    namedTexts.push(fallback);
   }
   const selects = [];
   for (const select of document.querySelectorAll('select')) {
@@ -131,6 +238,18 @@ ${BROWSER_HELPERS}
     });
   }
   const passwords = [];
-  for (const input of document.querySelectorAll('input[type="password"]')) passwords.push(input);
-  return { clickables: clickables, clickableTextJson: JSON.stringify(clickableTexts), selects: selects, passwords: passwords };
+  let visiblePassword = false;
+  for (const input of document.querySelectorAll('input[type="password"]')) {
+    passwords.push(input);
+    if (rwVisible(input)) visiblePassword = true;
+  }
+  return {
+    clickables: clickables,
+    clickableTextJson: JSON.stringify(clickableTexts),
+    selects: selects,
+    passwords: passwords,
+    visiblePassword: visiblePassword,
+    named: named,
+    namedTextJson: JSON.stringify(namedTexts),
+  };
 })()`;

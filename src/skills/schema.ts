@@ -110,6 +110,7 @@ export type SkillParam = z.infer<typeof ParamSchema>;
 export const SkillSchema = z.object({
   name: SkillNameSchema,
   description: z.string().min(1),
+  identity: z.string().min(1).optional(),
   version: z.number().int().positive(),
   start_url: z.string().min(1),
   params: z.record(z.string(), ParamSchema),
@@ -167,7 +168,7 @@ export type SkillRunResult = z.infer<typeof SkillRunResultSchema>;
 
 export const MatrixResultSchema = z.object({
   results: z.array(SkillRunResultSchema),
-  exit_code: z.union([z.literal(0), z.literal(30)]),
+  exit_code: z.union([z.literal(0), z.literal(20), z.literal(30)]),
   out_dir: z.string().min(1),
 });
 
@@ -231,6 +232,7 @@ export const RunSkillInputSchema = z.object({
   matrix: z.record(z.string(), z.array(z.string())).optional(),
   startUrl: z.string().min(1).optional(),
   out_dir: z.string().min(1).optional(),
+  wait_human: z.boolean().optional(),
 });
 
 export type RunSkillInput = z.infer<typeof RunSkillInputSchema>;
