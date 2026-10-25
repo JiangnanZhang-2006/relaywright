@@ -1,19 +1,19 @@
 # relaywright 架构设计
 
-> 状态：草案 v0.1（2026-10-22）
+> 状态：草案 v0.2（2026-10-25，转交真人改为本机完成，凭据改由浏览器自身加密保存）
 > 面向：第四届开放原子大赛 · 2026 开源行业解决方案创新赛 · 赛道一「开源基础软件与解决方案」
 
 ## 1. 定位
 
-**一句话**：AI 学一次浏览器任务，之后自己重复做；遇到登录和验证码，扫码交给真人；凭据全程不进模型，每一步都可审计。
+**一句话**：AI 学一次浏览器任务，之后自己重复做；遇到登录和验证码，把浏览器交给坐在电脑前的人；凭据全程不进模型，每一步都可审计。
 
 relaywright 是一个基于 Chromium（CDP）的浏览器操控工具，同时提供 MCP 服务和 CLI。它解决现有浏览器 MCP（Playwright MCP、Chrome DevTools MCP、browser-use 等）在**重复性任务**上的三个问题：
 
 | 问题 | 现有方案 | relaywright |
 |---|---|---|
 | 每次执行都要大模型从头看页面、做决策，token 消耗大、结果不稳定 | 每次都走 LLM | 第一次探索后固化为**技能**，之后确定性回放，只有出错的那一步才调用 LLM 修复 |
-| 登录、验证码卡住 agent | 失败退出，或依赖打码平台等灰色手段 | **转交真人**：手机扫码远程接管，完成后 agent 继续 |
-| 凭据和会话安全无法交代 | 密码、cookie 可能进入模型上下文；无审计 | 凭据**零暴露给模型**，会话加密保存，操作记录哈希链防篡改 |
+| 登录、验证码卡住 agent | 失败退出，或依赖打码平台等灰色手段 | **转交真人**：锁住模型、把浏览器顶到前台并通知，人在电脑上扫码或输入密码，登录完成后自动继续 |
+| 凭据和会话安全无法交代 | 密码、cookie 可能进入模型上下文；无审计 | 模型**无法输入密码**、看不到 cookie；会话由浏览器借助系统级加密保存，按身份管理；接管和身份操作写入哈希链审计 |
 
 ### 设计原则
 
@@ -30,23 +30,23 @@ flowchart TB
   subgraph Clients[调用方]
     MC[MCP 客户端<br/>Cursor / Claude Desktop / Cherry Studio]
     CLI[relaywright CLI<br/>定时任务 / 脚本 / agent 通过 shell 调用]
-    Phone[手机 / 电脑浏览器<br/>Web 控制台 + 扫码接管]
+    Human[坐在电脑前的人<br/>系统通知 + 状态小窗口]
   end
 
   MC -- stdio --> MCP[MCP 前端<br/>relaywright mcp]
-  MCP -- 本地 HTTP + WS --> D
-  CLI -- 本地 HTTP + WS --> D
-  Phone -- 局域网 HTTPS/WS<br/>一次性令牌 --> D
+  MCP -- 本地 HTTP --> D
+  CLI -- 本地 HTTP --> D
+  Human -- 直接操作浏览器窗口 --> CH
 
   subgraph D[后台进程 relaywright daemon]
     API[API 网关<br/>鉴权 / 策略检查]
-    SM[会话管理<br/>BrowserContext 池]
+    SM[会话管理<br/>Chrome 进程 / 标签页 / 下载]
     PER[感知层<br/>精简快照 / 增量 diff / 脱敏]
     ACT[执行层<br/>定位器解析 / 控件适配器]
     REC[录制器<br/>动作 + 多重定位器 + 网络请求]
     SK[技能引擎<br/>回放 / 结果判定 / 自愈]
-    HO[接管服务<br/>Screencast 推流 / 输入转发]
-    V[凭据库<br/>AES-256-GCM + 系统密钥环]
+    HO[转交服务<br/>控制权锁 / 置顶通知 / 完成检测]
+    V[身份管理<br/>会话持久化 + 元数据]
     AU[审计日志<br/>JSONL 哈希链]
     HEAL[修复器<br/>OpenAI 兼容接口]
   end
@@ -61,15 +61,15 @@ flowchart TB
 
 ### 2.1 为什么是「后台进程 + 薄前端」
 
-- 浏览器、登录状态、接管网页需要**常驻**，不能跟着某个 MCP 会话一起结束。
+- 浏览器和登录状态需要**常驻**，不能跟着某个 MCP 会话一起结束。后台进程重启时不关闭浏览器，新进程重新连上原来的 Chrome，登录状态不受影响。
 - MCP 和 CLI 共享同一个浏览器和会话：在 Cursor 里探索出的技能，可以立刻在终端用 CLI 回放。
 - CLI 或 MCP 启动时，如果后台进程没在运行，就自动拉起它。
-- 后台进程只监听 `127.0.0.1`，用随机令牌鉴权（保存在 `~/.relaywright/daemon.json`）。只有转交真人期间，才在局域网地址上开放接管页面，链接里带一次性令牌，10 分钟过期。
+- 后台进程只监听 `127.0.0.1`，用随机令牌鉴权（保存在 `~/.relaywright/daemon.json`），不对局域网开放任何端口。
 
 ### 2.2 为什么不用 Electron
 
 - Electron 自带的 Chromium 版本受 Electron 绑定，UA 带 Electron 标识，也不能复用用户的 Chrome。
-- 扫码接管本来就需要 Web 页面，复用为 Web 控制台即可覆盖所有界面需求。
+- 需要人参与时，人直接操作浏览器窗口；提示放在系统通知和后台进程提供的状态小窗口里，不需要桌面外壳。
 - 打包、签名、自动更新的成本对比赛评分没有帮助。桌面托盘（Tauri）放进路线图。
 
 ### 2.3 MCP 和 CLI 的分工
@@ -79,14 +79,14 @@ flowchart TB
 | 探索新任务 | 需要 | MCP（由 agent 驱动） |
 | 回放技能 | 不需要 | CLI / 定时任务；MCP 的 `skill_run` 也可以 |
 | 单步自愈 | 需要（少量） | 通过 MCP 调用时，把失败上下文交给调用方的模型；通过 CLI 调用时，使用后台配置的修复模型 |
-| 登录、验证码 | 需要人 | 扫码接管 |
+| 登录、验证码 | 需要人 | 转交真人（人在电脑上完成） |
 
 ## 3. 模块设计
 
 ### 3.1 会话管理
 
 - 通过 `@puppeteer/browsers` 下载 Chrome for Testing，或使用系统已安装的 Chrome / Edge。用 `puppeteer-core` 连接，需要时直接下发原始 CDP 命令。
-- **每个身份对应一个独立的 BrowserContext**。启动时从凭据库解密会话状态（cookie、localStorage）注入；结束或登录成功后再写回凭据库。凭据库是唯一可信来源，磁盘上不留明文 profile。
+- 后台进程自己启动 Chrome（独立进程、独立配置目录 `~/.relaywright/profiles/default`、开启调试端口），再用 `puppeteer-core` 连上去。启动时如果发现上次的 Chrome 还在运行，就直接接管它。有界面模式下，后台进程退出或重启都不关闭浏览器；`daemon stop --close-browser` 才关闭。
 - 同一时间只允许一个控制者：`agent` / `skill` / `human`。处于 `human` 状态时，所有给模型的工具都返回 `human_in_control`。
 
 ### 3.2 感知层：精简快照与增量 diff
@@ -222,11 +222,13 @@ flowchart LR
 
 ### 3.8 转交真人
 
+登录和验证码由坐在电脑前的人完成：扫码本来就是用手机摄像头扫电脑屏幕上的二维码，短信验证码、账号密码也都在电脑上输入，所以不需要把画面推到手机上。参考 ChatGPT agent：提示只放在自己的界面里（对话、终端、系统通知、状态小窗口），从不往网站页面里插入内容。
+
 **触发**：
 
-- 规则检测：页面出现密码框；出现常见验证码组件（滑块、点选、图形验证码）；跳转到 `login_check` 声明之外的登录地址。
-- agent 主动调用 `request_human`。
-- 技能回放时检测到会话失效。
+- 探索时：页面出现可见的密码框，快照末尾提示 `(login required: … — ask the user with request_human)`。只提示、不上锁，由模型决定是否调用 `request_human`（"修改密码"之类的页面也有密码框）。
+- 技能回放时：打开起始页后或某一步失败时，发现被跳到登录页，自动转交。
+- 模型试图向密码框输入时直接拒绝（`human_required`），提示调用 `request_human`。
 
 **流程**：
 
@@ -234,43 +236,45 @@ flowchart LR
 sequenceDiagram
   participant A as Agent / 技能
   participant D as 后台进程
-  participant B as Chromium
-  participant P as 手机
+  participant B as Chrome
+  participant H as 电脑前的人
 
   A->>D: request_human(reason)
-  D->>D: 控制者切换为 human，模型侧工具全部屏蔽
-  D->>D: 生成一次性令牌，开放局域网接管页
-  D-->>A: 返回链接 + 二维码（同时打印到终端 / 显示在控制台）
-  P->>D: 扫码打开接管页
-  D->>B: Page.startScreencast
-  B-->>P: 画面帧（WebSocket）
-  P->>D: 触摸 / 点击 / 键盘输入
-  D->>B: Input.dispatchMouseEvent / dispatchTouchEvent / insertText
-  D->>D: 轮询 login_check，或等待用户点「完成」
-  D->>D: 会话状态加密写入凭据库，记录审计
-  D-->>A: done（不含任何凭据内容）
-  A->>D: 继续执行
+  D->>D: 控制者切换为 human，模型侧工具全部返回 human_in_control
+  D->>B: 窗口最小化再还原，顶到前台
+  D->>B: 打开状态小窗口（原因、倒计时、放弃）
+  D->>H: 系统通知 + 提示音
+  H->>B: 扫码 / 短信验证码 / 账号密码
+  D->>D: 轮询：离开登录页且密码框消失，或满足 login_check
+  D->>B: 会话 cookie 转为持久 cookie（由 Chrome 加密存盘）
+  D->>D: 写入身份元数据和审计
+  D-->>A: done（不含任何凭据）
+  A->>D: 继续执行（技能从这组参数开头重跑）
 ```
 
-- 接管页适配手机：画面按比例缩放，触摸坐标换算回页面坐标；提供软键盘输入框和「完成」「放弃」按钮。
-- 默认要求手机和电脑在同一局域网。公网穿透（例如 cloudflared）放进路线图。
-- `request_human` 默认最多阻塞等待 10 分钟，超时返回 `needs_human`。
+- `request_human` 每次最多等待 90 秒，没等到就返回 `waiting`，模型再次调用即可接着等同一次转交；整次转交 10 分钟超时。
+- CLI 的 `skill run` 默认在终端等待并显示剩余时间，`--no-wait` 时直接返回 `needs_human`（退出码 20）；MCP 的 `skill_run` 默认不等待。
+- 放弃方式：状态小窗口里的「放弃」、关闭登录标签页、终端 Ctrl+C。
+- 远程接管（人不在电脑前，用手机看画面操作）放进路线图。
 
-### 3.9 凭据库（钥匙串）
+### 3.9 身份与会话持久化
 
-- **存储位置**：`~/.relaywright/vault/<identity>.enc`。
-- **加密**：每个身份使用 AES-256-GCM 加密。主密钥通过 `@napi-rs/keyring` 存放在系统密钥环中：Windows 凭据管理器、macOS Keychain、Linux Secret Service。主密钥不落盘。
-- **内容**：会话状态（cookie、localStorage）；可选保存账号密码，由后台直接用 `Input.insertText` 填写，不经过 MCP。
-- **元数据**（明文，可以给模型看）：身份名、适用站点、授权的技能列表、有效期、最后使用时间。
-- **最小权限**：技能只能使用 `identity` 字段声明且已授权的身份；未授权时请求真人确认。
-- **管理**：`identity list / login / revoke / grant`。吊销后立即删除密文并记录审计。
+Chrome 本身已经用系统能力加密 cookie（Windows DPAPI、macOS 钥匙串、Linux libsecret），relaywright 不再另做一套加密，而是让 Chrome 来保存：
+
+- **身份**：第一次转交完成时自动创建，名字取登录页的主域名（例如 `source.wzu.edu.cn` 对应 `wzu.edu.cn`），覆盖其下所有子域名。
+- **会话持久化**：会话 cookie 在浏览器关闭时会丢失。转交完成时、每 5 分钟、后台进程退出前，把身份域名下的会话 cookie 改写为带过期时间的持久 cookie（默认 7 天），由 Chrome 加密存盘、启动时自行读回。仅限 host 的 cookie 保持仅限 host。服务器端的会话过期规则不受影响，过期后走正常的转交流程。
+- **密码**：relaywright 不保存任何密码；需要时由 Chrome 自带的密码管理器自动填充，由人点击登录。
+- **启动参数**：不使用 `--password-store=basic`、`--use-mock-keychain` 这类会削弱 Chrome 加密的参数。
+- **元数据**（可以给模型看）：`~/.relaywright/identities/<name>.json`，记录身份名、域名、创建和保存时间、最后使用时间、cookie 数量，不含任何 cookie 名称和值。
+- **管理**：`identity list / save / revoke`。吊销时删除浏览器里对应的 cookie 和元数据，并写入审计。
+- **技能**：保存技能时，如果用到了已知身份的域名，自动写入 `identity` 字段。按技能授权使用身份放进路线图。
 
 ### 3.10 审计日志
 
 - 每月一个 JSONL 文件：`~/.relaywright/audit/2026-10.jsonl`，只追加。
 - 每条记录包含 `prev_hash` 和 `hash = sha256(prev_hash + 规范化 JSON)`，形成哈希链。
-- 事件类型：会话开始与结束、导航、动作（敏感值脱敏）、技能执行、自愈补丁、转交开始与结束、身份使用、身份授权与吊销。
-- `relaywright audit verify` 校验整条链；可选为每次转交保存录屏（只保存 screencast 帧，默认关闭）。
+- 事件类型：转交开始与结束、身份创建 / 保存 / 吊销、拦截模型输入密码；后续加入技能执行、自愈补丁。
+- `relaywright audit verify` 校验整条链，`relaywright audit tail` 查看最近记录。
 - 审计日志里**永远不写**密码、cookie 值、验证码内容。
 
 ### 3.11 安全策略
@@ -309,8 +313,8 @@ sequenceDiagram
 
 | 工具 | 参数 | 返回 |
 |---|---|---|
-| `request_human` | `reason`、`timeout_s?` | `done / timeout / cancelled`（不含任何凭据） |
-| `identity_list` | — | 身份元数据（不含密文） |
+| `request_human` | `reason`、`timeout_s?`（最多 90） | `done / waiting / timeout / cancelled`（不含任何凭据） |
+| `identity_list` | — | 身份元数据（不含 cookie） |
 
 ### 审计
 
@@ -323,22 +327,20 @@ sequenceDiagram
 ## 5. CLI
 
 ```text
-relaywright daemon start | stop | status
+relaywright daemon start | stop [--close-browser] | restart | status
 relaywright mcp                                   # stdio MCP 服务，写进 MCP 客户端配置
-relaywright console                               # 打开 Web 控制台
 
 relaywright skill list
 relaywright skill show <name> [--version n]
-relaywright skill run <name> --param k=v ... | --matrix k=v1,v2 ... [--json]
+relaywright skill run <name> --param k=v ... | --matrix k=v1,v2 ... [--out <dir>] [--no-wait] [--json]
 relaywright skill history <name>
 relaywright skill rollback <name> --to <version>
 
-relaywright identity list
-relaywright identity login <name> --url <url>     # 直接发起扫码接管
-relaywright identity grant <name> --skill <skill>
-relaywright identity revoke <name>
+relaywright download <ref> [--save-as <name>] | pdf [--save-as <name>]
+relaywright handoff <reason> [--no-wait]           # 转交给电脑前的人
+relaywright identity list | save [name] | revoke <name>
 
-relaywright audit tail | verify | query [--identity x] [--skill y]
+relaywright audit tail | verify
 ```
 
 所有命令都支持 `--json`，不需要交互输入，方便 agent 通过 shell 调用。
@@ -350,7 +352,8 @@ relaywright audit tail | verify | query [--identity x] [--skill y]
   daemon.json          # 端口、本地令牌
   config.yaml          # 浏览器路径、修复模型接口、白名单
   skills/<name>/       # skill.yaml、历史版本
-  vault/<identity>.enc
+  profiles/default/    # Chrome 配置目录（cookie 由 Chrome 加密保存）
+  identities/<name>.json  # 身份元数据，不含 cookie
   audit/YYYY-MM.jsonl
   traces/              # 探索阶段的 trace，默认保留 7 天
   downloads/
@@ -363,12 +366,10 @@ relaywright audit tail | verify | query [--identity x] [--skill y]
 | 语言 / 运行时 | TypeScript，Node.js 24 |
 | 浏览器 | `puppeteer-core` + 原始 CDP，`@puppeteer/browsers` |
 | MCP | `@modelcontextprotocol/sdk` |
-| 后台服务 | Hono + `ws` |
+| 后台服务 | Hono |
 | CLI | `commander` |
 | 参数校验 | `zod` |
-| 密钥环 | `@napi-rs/keyring` |
-| 二维码 | `qrcode`、`qrcode-terminal` |
-| Web 控制台 | Vite + Preact |
+| 会话加密 | 复用 Chrome 自身的系统级加密，不引入额外依赖 |
 | 修复模型 | `openai` SDK（OpenAI 兼容接口） |
 | 测试 | `vitest` |
 
@@ -378,9 +379,8 @@ relaywright audit tail | verify | query [--identity x] [--skill y]
 relaywright/
   src/
     daemon/   session/   perception/   actions/   recorder/
-    skills/   healer/    handoff/      vault/     audit/
+    skills/   healer/    audit/
     mcp/      cli/
-  console/              # Web 控制台 + 手机接管页
   fixtures/zf-mock/     # 仿正方课表页，v1 / v2 两个版本，用于自愈演示和测试
   bench/                # 对比测试框架
   docs/
@@ -403,7 +403,7 @@ relaywright/
 ## 9. 演示脚本（视频 3–5 分钟）
 
 1. 问题引入：每学期都要手动导出课表，而现有 AI 浏览器工具每次都要重新"看"一遍页面。
-2. 在 Cursor 中让 agent 导出课表；遇到统一身份认证时，终端弹出二维码，用手机扫码完成登录。画面上展示：接管期间模型侧收到的是 `human_in_control`。
+2. 在 Cursor 中让 agent 导出课表；遇到统一身份认证时，浏览器自动顶到前台并弹出通知，用手机微信扫屏幕上的二维码完成登录，agent 自动继续。画面上展示：转交期间模型侧收到的是 `human_in_control`，模型试图输入密码会被拒绝。
 3. agent 完成探索，调用 `skill_save` 生成技能。
 4. 终端执行 `relaywright skill run ... --matrix`：3 个 PDF 导出成功，大二下学期报告"尚未排课"。
 5. 切换到仿真页 v2，再次执行：展示单步自愈和版本差异。
@@ -420,14 +420,14 @@ relaywright/
 | 10/23 | 感知层、`browser_*` 工具、MCP 前端 | 在 Cursor 中能操作课表页 |
 | 10/24 | 控件适配器、录制器、`skill_save` | 生成课表技能 YAML |
 | 10/25 | 回放引擎、结果判定、批量执行、下载 | CLI 导出 4 个学期，空学期正确报告 |
-| 10/26 | 转交真人（本地窗口 + 手机扫码）、凭据库 | 扫码登录后会话加密保存 |
+| 10/26 | 转交真人（本机完成）、身份与会话持久化、后台重启不关浏览器 | 扫码登录后重启后台进程不掉登录 |
 | 10/27 | 自愈、仿正方页 v1 / v2、审计日志 | 改版后自愈成功；`audit verify` 通过 |
 | 10/28 | 对比测试框架和数据 | 对比图表 |
 | 10/29 | 开源治理材料、README、CI | 见第 11 节 |
 | 10/30 | 作品介绍 PDF、录制演示视频 | PDF + 视频 |
 | 10/31 | 缓冲、检查、打包提交 | 邮件发送至 bjoscc@oschina.cn |
 
-**砍功能的优先级**（时间不够时从上往下砍）：公网穿透 → 接管录屏 → 敏感动作确认 → Web 控制台的技能和审计页面（保留接管页） → `--toolset` 分组。
+**砍功能的优先级**（时间不够时从上往下砍）：敏感动作确认 → `--toolset` 分组 → 对比测试的第 3 项（改版自愈）。
 
 ## 11. 开源治理（占评分 20%）
 
@@ -441,6 +441,8 @@ relaywright/
 
 - 技能直接调用接口：根据探索阶段录到的网络请求，把界面操作编译成接口调用，回放速度提升一个数量级。
 - 技能市场：在团队内或社区中共享技能（不含凭据）。
-- 公网接管、多人审批、敏感动作确认。
+- 远程接管：人不在电脑前时，用手机查看画面并操作（局域网或公网穿透，端到端加密）。
+- 浏览器插件模式：像 ChatGPT 的 Chrome 插件那样直接操控用户日常使用的 Chrome，复用已有登录；状态显示在插件侧边栏。
+- 按技能授权使用身份、多人审批、敏感动作确认。
 - 信创适配：openKylin、deepin，以及基于 Chromium 的国产浏览器。
 - Tauri 桌面托盘应用。
