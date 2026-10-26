@@ -2,12 +2,17 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { flushAudit, hashRecord, readAuditRecords, recordAudit, verifyAudit } from '../src/audit/log.js';
-import { auditDir } from '../src/config/paths.js';
+import { auditDir, identitiesDir } from '../src/config/paths.js';
+import { WINDOWS_NOTIFY_SCRIPT, windowsToastXml } from '../src/notify.js';
 import { splitPointerSiblings, type PointerNode } from '../src/perception/clickable-split.js';
 import { fallbackControlName } from '../src/perception/names.js';
+import { looksLikePassword } from '../src/perception/password-like.js';
 import { cookieInDomains, deleteCookieParams, persistentCookieParams, type StoredCookie } from '../src/session/cookies.js';
 import { registrableDomain } from '../src/session/domain.js';
-import { pageNeedsLogin } from '../src/session/login.js';
+import { IdentityStore } from '../src/session/identity.js';
+import { chromeLaunchArgs } from '../src/session/launch.js';
+import { handoffStartUrl, pageNeedsLogin } from '../src/session/login.js';
+import { restoredWindowState } from '../src/session/window.js';
 
 const GENESIS = '0'.repeat(64);
 
@@ -135,6 +140,106 @@ describe('nameless controls and pointer siblings', () => {
         'box',
       ),
     ).toBeNull();
+  });
+});
+
+describe('password-like fields', () => {
+  it('matches password words and exact mm or pass on name and id', () => {
+    expect(looksLikePassword({ placeholder: '密码' })).toBe(true);
+    expect(looksLikePassword({ ariaLabel: '口令' })).toBe(true);
+    expect(looksLikePassword({ label: 'Password' })).toBe(true);
+    expect(looksLikePassword({ name: 'user_password' })).toBe(true);
+    expect(looksLikePassword({ id: 'passcode' })).toBe(true);
+    expect(looksLikePassword({ name: 'mm' })).toBe(true);
+    expect(looksLikePassword({ id: 'MM' })).toBe(true);
+    expect(looksLikePassword({ name: 'pass' })).toBe(true);
+    expect(looksLikePassword({ id: 'summary' })).toBe(false);
+    expect(looksLikePassword({ name: 'passenger' })).toBe(false);
+    expect(looksLikePassword({ id: 'compass' })).toBe(false);
+    expect(looksLikePassword({ placeholder: 'mm' })).toBe(false);
+    expect(looksLikePassword({ placeholder: '用户名', name: 'yhm', id: 'yhm' })).toBe(false);
+  });
+});
+
+describe('handoff start url', () => {
+  const local = 'http://jwxt.example.edu/xtgl/login_slogin.html';
+  const cas = 'https://source.example.edu/login?service=https%3A%2F%2Fjwxt.example.edu%2F';
+
+  it('opens a remembered login page only when the current page is a different login document', () => {
+    expect(handoffStartUrl({ currentUrl: local, loginPage: true, rememberedLoginUrl: cas })).toBe(cas);
+    expect(handoffStartUrl({ currentUrl: cas, loginPage: true, rememberedLoginUrl: cas })).toBe(null);
+    expect(
+      handoffStartUrl({
+        currentUrl: 'https://source.example.edu/login?service=other',
+        loginPage: true,
+        rememberedLoginUrl: cas,
+      }),
+    ).toBe(null);
+    expect(handoffStartUrl({ currentUrl: local, loginPage: false, rememberedLoginUrl: cas })).toBe(null);
+    expect(handoffStartUrl({ currentUrl: local, loginPage: true })).toBe(null);
+    expect(handoffStartUrl({ currentUrl: 'https://app.example.edu/home', explicitUrl: cas, loginPage: false })).toBe(cas);
+    expect(handoffStartUrl({ currentUrl: cas, explicitUrl: `${cas}#form`, loginPage: false })).toBe(null);
+  });
+});
+
+describe('saved identities', () => {
+  it('loads an identity file that has no login_url', () => {
+    const dir = identitiesDir();
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, 'legacy.example.json');
+    writeFileSync(
+      path,
+      `${JSON.stringify({
+        name: 'legacy.example',
+        domains: ['legacy.example'],
+        login_hosts: ['legacy.example'],
+        created_at: '2020-01-01T00:00:00.000Z',
+        saved_at: '2020-01-01T00:00:00.000Z',
+        last_used_at: '2020-01-01T00:00:00.000Z',
+        persist_days: 7,
+        cookie_count: 0,
+      })}\n`,
+    );
+    try {
+      const found = new IdentityStore(() => null).findByUrl('https://legacy.example/xtgl/login_slogin.html');
+      expect(found?.name).toBe('legacy.example');
+      expect(found?.login_url).toBeUndefined();
+    } finally {
+      rmSync(path, { force: true });
+    }
+  });
+});
+
+describe('headful window', () => {
+  it('starts a fresh headful Chrome maximized and restores a maximized window after raise', () => {
+    const headful = chromeLaunchArgs({ userDataDir: 'C:\\temp\\profile', headless: false });
+    expect(headful).toContain('--start-maximized');
+    expect(headful.some((arg) => arg.startsWith('--headless'))).toBe(false);
+    const headless = chromeLaunchArgs({ userDataDir: 'C:\\temp\\profile', headless: true });
+    expect(headless).not.toContain('--start-maximized');
+    expect(headless).toContain('--headless=new');
+    expect(restoredWindowState('maximized')).toBe('maximized');
+    expect(restoredWindowState('fullscreen')).toBe('fullscreen');
+    expect(restoredWindowState('minimized')).toBe('normal');
+    expect(restoredWindowState('normal')).toBe('normal');
+    expect(restoredWindowState(undefined)).toBe('normal');
+  });
+});
+
+describe('windows toast', () => {
+  it('builds a long toast from escaped text and keeps the script free of that text', () => {
+    const xml = windowsToastXml({ title: 'relaywright 需要你登录', body: '请登录 <教务>&', detail: 'jwxt.wzu.edu.cn' });
+    expect(xml.startsWith('<toast duration="long">')).toBe(true);
+    expect(xml).toContain('<text>relaywright 需要你登录</text>');
+    expect(xml).toContain('<text>请登录 &lt;教务&gt;&amp;</text>');
+    expect(xml).toContain('<text>jwxt.wzu.edu.cn</text>');
+    expect(windowsToastXml({ title: 't', body: '第一行\n第二行' })).toContain('<text>第一行&#10;第二行</text>');
+    const plain = windowsToastXml({ title: '已登录', body: 'wzu.edu.cn' });
+    expect(plain.match(/<text>/g)).toHaveLength(2);
+    expect(WINDOWS_NOTIFY_SCRIPT).toContain('RW_NOTIFY_XML');
+    expect(WINDOWS_NOTIFY_SCRIPT).toContain('SystemSounds');
+    expect(WINDOWS_NOTIFY_SCRIPT).not.toContain('relaywright');
+    expect(WINDOWS_NOTIFY_SCRIPT).not.toContain('${');
   });
 });
 

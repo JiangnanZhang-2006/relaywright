@@ -351,9 +351,15 @@ export async function runSkill(name: string, input: RunSkillInput): Promise<Matr
   );
 }
 
-export async function startHandoff(reason: string): Promise<HandoffView> {
+export async function startHandoff(reason: string, url?: string): Promise<HandoffView> {
   const info = await ensureDaemon();
-  return HandoffViewSchema.parse(await authorized(info, '/handoff', { method: 'POST', body: { reason }, timeoutMs: 30_000 }));
+  return HandoffViewSchema.parse(
+    await authorized(info, '/handoff', {
+      method: 'POST',
+      body: url ? { reason, url } : { reason },
+      timeoutMs: 60_000,
+    }),
+  );
 }
 
 export async function waitHandoff(timeoutMs: number): Promise<HandoffView> {

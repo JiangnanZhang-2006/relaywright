@@ -56,6 +56,49 @@ export function handoffDone(
   return true;
 }
 
+export function isLoginPath(url: string): boolean {
+  try {
+    return LOGIN_PATH.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
+}
+
+export function sameDocument(leftUrl: string, rightUrl: string): boolean {
+  try {
+    const left = new URL(leftUrl);
+    const right = new URL(rightUrl);
+    return left.origin === right.origin && left.pathname === right.pathname;
+  } catch {
+    return false;
+  }
+}
+
+export function sameLocation(leftUrl: string, rightUrl: string): boolean {
+  try {
+    const left = new URL(leftUrl);
+    const right = new URL(rightUrl);
+    left.hash = '';
+    right.hash = '';
+    return left.href === right.href;
+  } catch {
+    return leftUrl === rightUrl;
+  }
+}
+
+/** Where to send the tab when a handoff starts. Null means stay on the current page. */
+export function handoffStartUrl(input: {
+  currentUrl: string;
+  explicitUrl?: string;
+  loginPage: boolean;
+  rememberedLoginUrl?: string;
+}): string | null {
+  if (input.explicitUrl) return sameLocation(input.currentUrl, input.explicitUrl) ? null : input.explicitUrl;
+  if (!input.loginPage || !input.rememberedLoginUrl) return null;
+  if (sameDocument(input.rememberedLoginUrl, input.currentUrl)) return null;
+  return input.rememberedLoginUrl;
+}
+
 export function formatClock(ms: number): string {
   const total = Math.max(0, Math.ceil(ms / 1000));
   const minutes = Math.floor(total / 60);

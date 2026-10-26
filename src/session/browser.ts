@@ -75,12 +75,9 @@ export interface BrowserControl {
   skillHistory(name: string): SkillHistory;
   rollbackSkill(name: string, to: number): SkillDocument;
   runSkill(name: string, input: RunSkillInput): Promise<MatrixResult>;
-  requestHandoff(reason: string): Promise<HandoffView>;
+  requestHandoff(reason: string, url?: string): Promise<HandoffView>;
   waitHandoff(timeoutMs: number): Promise<HandoffView>;
   cancelHandoff(): Promise<HandoffView>;
-  handoffPage(id: string, token: string): string | null;
-  handoffState(id: string, token: string): HandoffView | null;
-  handoffCancelToken(id: string, token: string): Promise<HandoffView | null>;
   listIdentities(): IdentityMeta[];
   saveIdentity(input: { name?: string; domains?: string[] }): Promise<IdentityMeta>;
   revokeIdentity(name: string): Promise<{ name: string }>;
@@ -107,7 +104,6 @@ export class BrowserSession implements BrowserControl {
   private closed = false;
   private replayDepth = 0;
   private lastActionPage: Page | null = null;
-  private daemonOrigin: string | null = null;
   private keepBrowser = false;
   private releasing = false;
   private persistTimer: ReturnType<typeof setInterval> | null = null;
@@ -124,14 +120,8 @@ export class BrowserSession implements BrowserControl {
     this.handoff = new HandoffManager({
       getBrowser: () => this.browser,
       getTabs: () => this.tabSet,
-      getOrigin: () => this.daemonOrigin,
       identities: this.identities,
     });
-  }
-
-  setDaemonOrigin(origin: string): void {
-    this.daemonOrigin = origin.replace(/\/$/, '');
-    this.tabSet?.setIgnorePrefix(this.daemonOrigin);
   }
 
   browserState(): BrowserStateView {
@@ -452,9 +442,10 @@ export class BrowserSession implements BrowserControl {
     }
   }
 
-  async requestHandoff(reason: string): Promise<HandoffView> {
+  async requestHandoff(reason: string, url?: string): Promise<HandoffView> {
     await this.ensureReady();
-    return this.handoff.start(reason);
+    const target = url === undefined ? undefined : parseHttpUrl(url);
+    return this.handoff.start(reason, target);
   }
 
   waitHandoff(timeoutMs: number): Promise<HandoffView> {
@@ -463,18 +454,6 @@ export class BrowserSession implements BrowserControl {
 
   cancelHandoff(): Promise<HandoffView> {
     return this.handoff.cancel();
-  }
-
-  handoffPage(id: string, token: string): string | null {
-    return this.handoff.pageHtml(id, token);
-  }
-
-  handoffState(id: string, token: string): HandoffView | null {
-    return this.handoff.stateForToken(id, token);
-  }
-
-  handoffCancelToken(id: string, token: string): Promise<HandoffView | null> {
-    return this.handoff.cancelForToken(id, token);
   }
 
   listIdentities(): IdentityMeta[] {
@@ -808,7 +787,7 @@ export class BrowserSession implements BrowserControl {
           }
         }
       });
-      const tabs = new TabSet(browser, { ignoreUrlPrefix: this.daemonOrigin ?? '' });
+      const tabs = new TabSet(browser);
       this.tabSet = tabs;
       await tabs.start();
       await tabs.attachAll();

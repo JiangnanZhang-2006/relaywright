@@ -53,6 +53,7 @@ const STABILITY_ARGS = [
 export function chromeLaunchArgs(input: { userDataDir: string; headless: boolean }): string[] {
   const args = [...STABILITY_ARGS, `--user-data-dir=${input.userDataDir}`, '--remote-debugging-port=0'];
   if (input.headless) args.push('--headless=new', '--hide-scrollbars', '--mute-audio', `--window-size=${HEADLESS_VIEWPORT.width},${HEADLESS_VIEWPORT.height}`);
+  else args.push('--start-maximized');
   return args;
 }
 

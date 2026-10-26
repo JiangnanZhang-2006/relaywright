@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import type { Page } from 'puppeteer-core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { whichBrowser } from '../../src/browser/resolve.js';
+import { flushAudit, tailAudit } from '../../src/audit/log.js';
 import { identityPath, tracesDir } from '../../src/config/paths.js';
 import { BrowserSession } from '../../src/session/browser.js';
 import { startStatic } from './static-server.js';
@@ -25,6 +26,7 @@ describe.skipIf(!resolved.path)('login handoff on the cas fixture', () => {
   let server: { port: number; close: () => Promise<void> } | undefined;
   let session: BrowserSession | undefined;
   let cas = '';
+  let localLogin = '';
   let timetable = '';
   let protectedUrl = '';
 
@@ -34,6 +36,7 @@ describe.skipIf(!resolved.path)('login handoff on the cas fixture', () => {
     process.env.RELAYWRIGHT_NOTIFY = '0';
     server = await startStatic(join(repoRoot, 'fixtures'));
     cas = `http://127.0.0.1:${server.port}/cas-mock/`;
+    localLogin = `${cas}login_slogin.html`;
     timetable = `http://127.0.0.1:${server.port}/zf-mock/v1/`;
     protectedUrl = `http://127.0.0.1:${server.port}/protected/zf/`;
     session = new BrowserSession();
@@ -68,6 +71,20 @@ describe.skipIf(!resolved.path)('login handoff on the cas fixture', () => {
     }
   });
 
+  it('treats a visible text box labelled as a password as a password', async () => {
+    const browser = live();
+    const opened = await browser.navigate(localLogin);
+    expect(opened.snapshot).toContain('(login required: 正方登录 — ask the user with request_human; typing passwords is blocked)');
+    expect(opened.snapshot).toContain('[redacted]');
+    expect(opened.snapshot).not.toContain('secret-fixture');
+    expect(opened.snapshot).toContain('student');
+    const password = refFor(opened.snapshot, /\[(e\d+)\] [^\n]*密码/);
+    await expect(browser.act({ action: 'type', ref: password, value: 'secret-fixture' })).rejects.toMatchObject({
+      code: 'human_required',
+    });
+    expect(browser.trace().steps.some((step) => step.action === 'type')).toBe(false);
+  });
+
   it('reports needs_human without waiting when the protected page redirects to cas', async () => {
     const browser = live();
     browser.clearTrace();
@@ -100,6 +117,35 @@ describe.skipIf(!resolved.path)('login handoff on the cas fixture', () => {
     await browser.revokeIdentity('127.0.0.1');
     expect(existsSync(identityPath('127.0.0.1'))).toBe(false);
     expect((await storedCookies(browser)).some((item) => item.name === 'mocksession')).toBe(false);
+  });
+
+  it('opens the remembered login page on the next handoff', async () => {
+    const browser = live();
+    await browser.navigate(localLogin);
+    await browser.requestHandoff('请到统一认证登录');
+    const pending = browser.waitHandoff(40_000);
+    await playHumanFromLocal(browser, `${cas}?service=${encodeURIComponent(protectedUrl)}`);
+    const view = await pending;
+    expect(view.state).toBe('done');
+    const saved = JSON.parse(readFileSync(identityPath('127.0.0.1'), 'utf8')) as { login_url?: string };
+    expect(saved.login_url).toContain('/cas-mock/');
+    expect(saved.login_url).toContain('service=');
+    expect(saved.login_url).not.toContain('login_slogin');
+    await browser.navigate(localLogin);
+    await browser.requestHandoff('再次登录');
+    const urls = (await browser.openPages()).map((page) => page.url());
+    const current = urls.find((url) => url.includes('/cas-mock/') && !url.includes('login_slogin'));
+    expect(current).toBeTruthy();
+    const got = new URL(current ?? 'http://127.0.0.1/missing');
+    const want = new URL(saved.login_url ?? 'http://127.0.0.1/missing');
+    expect(`${got.origin}${got.pathname}`).toBe(`${want.origin}${want.pathname}`);
+    expect(got.searchParams.get('service')).toBe(want.searchParams.get('service'));
+    await flushAudit();
+    const start = [...tailAudit(80)].reverse().find((row) => row.event === 'handoff_start');
+    expect(String(start?.url)).toContain('/cas-mock/');
+    expect(String(start?.url)).not.toContain('login_slogin');
+    await browser.cancelHandoff();
+    await browser.revokeIdentity('127.0.0.1');
   });
 
   it('waits for the human during skill replay and reruns the combo', async () => {
@@ -151,15 +197,30 @@ async function saveTimetable(browser: BrowserSession, timetable: string): Promis
 }
 
 async function playHuman(browser: BrowserSession): Promise<void> {
+  const page = await findPage(browser, (url) => url.includes('/cas-mock/') && !url.includes('login_slogin'));
+  await submitCas(page);
+}
+
+async function playHumanFromLocal(browser: BrowserSession, casLogin: string): Promise<void> {
+  const page = await findPage(browser, (url) => url.includes('login_slogin'));
+  await page.goto(casLogin, { waitUntil: 'domcontentloaded', timeout: 15_000 });
+  // The completion poll records this page as login_url before the form is submitted.
+  await delay(3_500);
+  await submitCas(page);
+}
+
+async function findPage(browser: BrowserSession, match: (url: string) => boolean): Promise<Page> {
   const deadline = Date.now() + 15_000;
-  let page: Page | undefined;
   while (Date.now() < deadline) {
     const pages = await browser.openPages();
-    page = pages.find((item) => item.url().includes('/cas-mock/'));
-    if (page) break;
+    const page = pages.find((item) => match(item.url()));
+    if (page) return page;
     await delay(100);
   }
-  if (!page) throw new Error('login page did not open');
+  throw new Error('login page did not open');
+}
+
+async function submitCas(page: Page): Promise<void> {
   // One evaluate, so a concurrent handoff poll cannot drop the keystrokes.
   await page.evaluate(() => {
     const doc = (globalThis as {
@@ -173,10 +234,13 @@ async function playHuman(browser: BrowserSession): Promise<void> {
     pass.value = 'secret';
     button.click();
   });
-  await page.waitForFunction(() => {
-    const pathname = (globalThis as { location?: { pathname?: string } }).location?.pathname ?? '';
-    return !pathname.includes('/cas-mock/');
-  }, { timeout: 10_000 });
+  await page.waitForFunction(
+    () => {
+      const pathname = (globalThis as { location?: { pathname?: string } }).location?.pathname ?? '';
+      return !pathname.includes('/cas-mock/');
+    },
+    { timeout: 10_000 },
+  );
 }
 
 async function storedCookies(browser: BrowserSession): Promise<{ name: string; session: boolean; expires: number }[]> {

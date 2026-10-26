@@ -3,19 +3,15 @@ import { errorText, logDaemon } from './config/paths.js';
 
 const NOTIFY_MS = 5_000;
 
-const WINDOWS_SCRIPT = `
+/** Constant script. User text arrives only as RW_NOTIFY_XML. */
+export const WINDOWS_NOTIFY_SCRIPT = `
 $ErrorActionPreference = 'Stop'
-$title = [Environment]::GetEnvironmentVariable('RW_NOTIFY_TITLE')
-$body = [Environment]::GetEnvironmentVariable('RW_NOTIFY_BODY')
-if ($null -eq $title) { $title = '' }
-if ($null -eq $body) { $body = '' }
+$xmlText = [Environment]::GetEnvironmentVariable('RW_NOTIFY_XML')
+if ([string]::IsNullOrEmpty($xmlText)) { return }
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
 [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
 $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-$xml.LoadXml('<toast><visual><binding template="ToastGeneric"><text></text><text></text></binding></visual></toast>')
-$nodes = $xml.GetElementsByTagName('text')
-[void]$nodes.Item(0).AppendChild($xml.CreateTextNode($title))
-[void]$nodes.Item(1).AppendChild($xml.CreateTextNode($body))
+$xml.LoadXml($xmlText)
 $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 $appId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe'
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast)
@@ -23,40 +19,62 @@ $appId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\power
 Start-Sleep -Milliseconds 400
 `;
 
+export function windowsToastXml(input: { title: string; body: string; detail?: string }): string {
+  const lines = [input.title, input.body];
+  const detail = input.detail?.trim();
+  if (detail) lines.push(detail);
+  const texts = lines.map((line) => `<text>${xmlText(line)}</text>`).join('');
+  return `<toast duration="long"><visual><binding template="ToastGeneric">${texts}</binding></visual></toast>`;
+}
+
+function xmlText(value: string): string {
+  return value
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\r\n|\r|\n/g, '&#10;');
+}
+
 /** Best-effort desktop notification. Never throws. Disabled when RELAYWRIGHT_NOTIFY=0. */
-export function notify(title: string, body: string): void {
+export function notify(title: string, body: string, detail?: string): void {
   if (process.env.RELAYWRIGHT_NOTIFY === '0') return;
   try {
-    if (process.platform === 'win32') notifyWindows(title, body);
-    else if (process.platform === 'darwin') notifyMac(title, body);
-    else notifyLinux(title, body);
+    if (process.platform === 'win32') notifyWindows(title, body, detail);
+    else if (process.platform === 'darwin') notifyMac(title, body, detail);
+    else notifyLinux(title, body, detail);
   } catch (err) {
     logDaemon(`notify failed: ${errorText(err)}`);
   }
 }
 
-function notifyWindows(title: string, body: string): void {
-  const encoded = Buffer.from(WINDOWS_SCRIPT, 'utf16le').toString('base64');
+function notifyWindows(title: string, body: string, detail?: string): void {
+  const encoded = Buffer.from(WINDOWS_NOTIFY_SCRIPT, 'utf16le').toString('base64');
   const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
     windowsHide: true,
     stdio: 'ignore',
-    env: { ...process.env, RW_NOTIFY_TITLE: title, RW_NOTIFY_BODY: body },
+    env: { ...process.env, RW_NOTIFY_XML: windowsToastXml({ title, body, detail }) },
   });
   watch(child);
 }
 
-function notifyMac(title: string, body: string): void {
+function notifyMac(title: string, body: string, detail?: string): void {
   const child = spawn(
     'osascript',
-    ['-e', 'on run argv\ndisplay notification (item 2 of argv) with title (item 1 of argv) sound name "Glass"\nend run', title, body],
+    ['-e', 'on run argv\ndisplay notification (item 2 of argv) with title (item 1 of argv) sound name "Glass"\nend run', title, joined(body, detail)],
     { stdio: 'ignore' },
   );
   watch(child);
 }
 
-function notifyLinux(title: string, body: string): void {
-  const child = spawn('notify-send', ['--', title, body], { stdio: 'ignore' });
+function notifyLinux(title: string, body: string, detail?: string): void {
+  const child = spawn('notify-send', ['--', title, joined(body, detail)], { stdio: 'ignore' });
   watch(child);
+}
+
+function joined(body: string, detail?: string): string {
+  const extra = detail?.trim();
+  return extra ? `${body}\n${extra}` : body;
 }
 
 function watch(child: ReturnType<typeof spawn>): void {

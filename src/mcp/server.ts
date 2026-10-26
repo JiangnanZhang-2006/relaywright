@@ -266,12 +266,13 @@ export async function startMcpServer(): Promise<void> {
         'Lock the browser while a person logs in on this PC. They use the Chrome window on the screen (a phone can scan a QR code from that screen). The model cannot navigate, snapshot, or act until the handoff finishes, and this tool returns no cookies, passwords, or other credentials. If it is still waiting, call request_human again.',
       inputSchema: {
         reason: z.string().min(1).describe('Why the person needs to log in.'),
+        url: z.string().min(1).optional().describe('http(s) page to open before the person takes over.'),
         timeout_s: z.number().int().min(1).max(90).optional().describe('How long to wait, in seconds. Default 90, maximum 90.'),
       },
     },
-    async ({ reason, timeout_s }) => {
+    async ({ reason, timeout_s, url }) => {
       try {
-        await startHandoff(reason);
+        await startHandoff(reason, url);
         const view = await waitHandoff((timeout_s ?? 90) * 1000);
         return ok(handoffText(view));
       } catch (err) {

@@ -24,6 +24,7 @@ export const IdentitySchema = z.object({
   persist_days: z.number().int().positive(),
   cookie_count: z.number().int().nonnegative(),
   login_check: LoginCheckSchema.optional(),
+  login_url: z.string().min(1).optional(),
 });
 
 export type IdentityMeta = z.infer<typeof IdentitySchema>;
@@ -41,6 +42,7 @@ export type HandoffView = z.infer<typeof HandoffViewSchema>;
 
 export const HandoffStartSchema = z.object({
   reason: z.string().min(1),
+  url: z.string().min(1).optional(),
 });
 
 export const HandoffWaitSchema = z.object({

@@ -1,4 +1,4 @@
-const SECRET_FIELD = /密码|password|passwd|pwd|验证码|captcha|otp/i;
+const SECRET_FIELD = /密码|口令|password|passwd|pwd|passcode|验证码|captcha|otp/i;
 
 export interface SensitivityInput {
   role?: string;

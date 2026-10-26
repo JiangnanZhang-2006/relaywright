@@ -17,8 +17,6 @@ const RollbackBody = z.object({
   to: z.number().int().positive(),
 });
 
-const HANDOFF_PUBLIC = /^\/handoff\/(?:page|state|cancel)\/[^/]+$/;
-
 export interface AppOptions {
   token: string;
   session: BrowserControl;
@@ -36,27 +34,8 @@ export function createApp(options: AppOptions): Hono {
 
   app.notFound((c) => jsonError(c, 404, 'not_found', `No route for ${c.req.method} ${c.req.path}`));
 
-  app.get('/handoff/page/:id', (c) => {
-    const html = options.session.handoffPage(c.req.param('id'), c.req.query('t') ?? '');
-    if (!html) return jsonError(c, 404, 'not_found', 'Handoff page is not available');
-    return c.html(html);
-  });
-
-  app.get('/handoff/state/:id', (c) => {
-    const view = options.session.handoffState(c.req.param('id'), c.req.query('t') ?? '');
-    if (!view) return jsonError(c, 404, 'not_found', 'Handoff is not available');
-    return c.json(view);
-  });
-
-  app.post('/handoff/cancel/:id', async (c) => {
-    const view = await options.session.handoffCancelToken(c.req.param('id'), c.req.query('t') ?? '');
-    if (!view) return jsonError(c, 404, 'not_found', 'Handoff is not available');
-    return c.json(view);
-  });
-
   app.use('*', async (c, next) => {
     if (c.req.method === 'GET' && c.req.path === '/health') return next();
-    if (HANDOFF_PUBLIC.test(c.req.path)) return next();
     if (!bearerOk(c.req.header('authorization'), options.token)) {
       return jsonError(c, 401, 'unauthorized', 'Missing or invalid bearer token');
     }
@@ -226,7 +205,7 @@ export function createApp(options: AppOptions): Hono {
     try {
       const body = HandoffStartSchema.safeParse(await readJson(c));
       if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
-      return c.json(await options.session.requestHandoff(body.data.reason));
+      return c.json(await options.session.requestHandoff(body.data.reason, body.data.url));
     } catch (err) {
       return browserError(c, err);
     }

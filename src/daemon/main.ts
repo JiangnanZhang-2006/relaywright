@@ -97,7 +97,6 @@ async function main(): Promise<void> {
       },
     }),
   );
-  session.setDaemonOrigin(`http://127.0.0.1:${http.port}`);
   await writeDaemonInfo({
     pid: process.pid,
     port: http.port,

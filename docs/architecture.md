@@ -30,7 +30,7 @@ flowchart TB
   subgraph Clients[调用方]
     MC[MCP 客户端<br/>Cursor / Claude Desktop / Cherry Studio]
     CLI[relaywright CLI<br/>定时任务 / 脚本 / agent 通过 shell 调用]
-    Human[坐在电脑前的人<br/>系统通知 + 状态小窗口]
+    Human[坐在电脑前的人<br/>系统通知 + 提示音]
   end
 
   MC -- stdio --> MCP[MCP 前端<br/>relaywright mcp]
@@ -69,7 +69,7 @@ flowchart TB
 ### 2.2 为什么不用 Electron
 
 - Electron 自带的 Chromium 版本受 Electron 绑定，UA 带 Electron 标识，也不能复用用户的 Chrome。
-- 需要人参与时，人直接操作浏览器窗口；提示放在系统通知和后台进程提供的状态小窗口里，不需要桌面外壳。
+- 需要人参与时，人直接操作浏览器窗口；提示放在系统通知里，不需要桌面外壳。
 - 打包、签名、自动更新的成本对比赛评分没有帮助。桌面托盘（Tauri）放进路线图。
 
 ### 2.3 MCP 和 CLI 的分工
@@ -222,13 +222,16 @@ flowchart LR
 
 ### 3.8 转交真人
 
-登录和验证码由坐在电脑前的人完成：扫码本来就是用手机摄像头扫电脑屏幕上的二维码，短信验证码、账号密码也都在电脑上输入，所以不需要把画面推到手机上。参考 ChatGPT agent：提示只放在自己的界面里（对话、终端、系统通知、状态小窗口），从不往网站页面里插入内容。
+登录和验证码由坐在电脑前的人完成：扫码本来就是用手机摄像头扫电脑屏幕上的二维码，短信验证码、账号密码也都在电脑上输入，所以不需要把画面推到手机上。参考 ChatGPT agent：提示只放在自己的界面里（对话、终端、系统通知），从不往网站页面里插入内容。
 
 **触发**：
 
 - 探索时：页面出现可见的密码框，快照末尾提示 `(login required: … — ask the user with request_human)`。只提示、不上锁，由模型决定是否调用 `request_human`（"修改密码"之类的页面也有密码框）。
 - 技能回放时：打开起始页后或某一步失败时，发现被跳到登录页，自动转交。
 - 模型试图向密码框输入时直接拒绝（`human_required`），提示调用 `request_human`。
+- "密码框"包括伪装成文本框的密码框：可见的文本输入框，其 placeholder、label、name 或 id 像密码（例如正方本地登录页的 `<input type="text" id="mm" placeholder="密码">`），与 `type=password` 同样处理：快照打码、登录提示、禁止模型输入。
+
+**登录页**：同一个站点可能有多个登录入口（正方未登录时跳到自己的本地登录页，实际要走学校 CAS）。`request_human` / `handoff` 可以带 `url` 指定登录页；身份会记住人上一次实际完成登录的页面（`login_url`），下次在别的登录页上转交时先打开它。
 
 **流程**：
 
@@ -239,11 +242,11 @@ sequenceDiagram
   participant B as Chrome
   participant H as 电脑前的人
 
-  A->>D: request_human(reason)
+  A->>D: request_human(reason, url?)
   D->>D: 控制者切换为 human，模型侧工具全部返回 human_in_control
-  D->>B: 窗口最小化再还原，顶到前台
-  D->>B: 打开状态小窗口（原因、倒计时、放弃）
-  D->>H: 系统通知 + 提示音
+  D->>B: 需要时打开登录页（url 或身份记住的 login_url）
+  D->>B: 窗口最小化再还原到原状态，顶到前台
+  D->>H: 系统通知（原因、站点）+ 提示音
   H->>B: 扫码 / 短信验证码 / 账号密码
   D->>D: 轮询：离开登录页且密码框消失，或满足 login_check
   D->>B: 会话 cookie 转为持久 cookie（由 Chrome 加密存盘）
@@ -254,7 +257,8 @@ sequenceDiagram
 
 - `request_human` 每次最多等待 90 秒，没等到就返回 `waiting`，模型再次调用即可接着等同一次转交；整次转交 10 分钟超时。
 - CLI 的 `skill run` 默认在终端等待并显示剩余时间，`--no-wait` 时直接返回 `needs_human`（退出码 20）；MCP 的 `skill_run` 默认不等待。
-- 放弃方式：状态小窗口里的「放弃」、关闭登录标签页、终端 Ctrl+C。
+- 超时会再发一条系统通知。放弃方式：终端 Ctrl+C，或等待超时。
+- 有界面的 Chrome 首次启动时最大化（部分网站窄窗口下会隐藏登录入口）。
 - 远程接管（人不在电脑前，用手机看画面操作）放进路线图。
 
 ### 3.9 身份与会话持久化

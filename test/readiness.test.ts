@@ -40,9 +40,6 @@ function control(partial: Partial<BrowserControl> & Pick<BrowserControl, 'browse
     requestHandoff: fail,
     waitHandoff: fail,
     cancelHandoff: fail,
-    handoffPage: () => null,
-    handoffState: () => null,
-    handoffCancelToken: fail,
     listIdentities: () => [],
     saveIdentity: fail,
     revokeIdentity: fail,
@@ -108,11 +105,9 @@ describe('browser readiness', () => {
     expect(await response.json()).toMatchObject({ matched: false, snapshot: '(no changes)' });
   });
 
-  it('serves handoff token routes without a bearer token and keeps the start route private', async () => {
+  it('keeps the handoff start route private', async () => {
     const session = control({ browserState: () => ({ state: 'ready' }) });
     const app = createApp({ token: 'secret-token', session, onShutdown: () => undefined });
-    const page = await app.request('http://127.0.0.1/handoff/page/abc?t=nope');
-    expect(page.status).toBe(404);
     const denied = await app.request('http://127.0.0.1/handoff', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

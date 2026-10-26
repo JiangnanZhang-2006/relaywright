@@ -79,13 +79,15 @@ export class IdentityStore {
     return this.upsert({ name, domains, loginHosts: [host] });
   }
 
-  async capture(loginUrl: string, finalUrl: string): Promise<IdentityMeta> {
+  async capture(loginUrl: string, finalUrl: string, loginPageUrl?: string): Promise<IdentityMeta> {
     const loginHost = hostOfUrl(loginUrl) ?? hostOfUrl(finalUrl);
     const finalHost = hostOfUrl(finalUrl) ?? loginHost;
+    const pageHost = loginPageUrl ? hostOfUrl(loginPageUrl) : undefined;
     if (!loginHost || !finalHost) throw new Error('Login did not land on an http(s) URL');
+    const hosts = [loginHost, finalHost, ...(pageHost ? [pageHost] : [])];
     const name = registrableDomain(loginHost);
-    const domains = [...new Set([registrableDomain(loginHost), registrableDomain(finalHost)])];
-    return this.upsert({ name, domains, loginHosts: [...new Set([loginHost, finalHost])] });
+    const domains = [...new Set(hosts.map((host) => registrableDomain(host)))];
+    return this.upsert({ name, domains, loginHosts: [...new Set(hosts)], loginPageUrl });
   }
 
   async revoke(name: string): Promise<void> {
@@ -131,12 +133,13 @@ export class IdentityStore {
     });
   }
 
-  private async upsert(input: { name: string; domains: string[]; loginHosts: string[] }): Promise<IdentityMeta> {
+  private async upsert(input: { name: string; domains: string[]; loginHosts: string[]; loginPageUrl?: string }): Promise<IdentityMeta> {
     assertName(input.name);
     const domains = [...new Set(input.domains.map((domain) => registrableDomain(domain)).filter((domain) => domain.length > 0))];
     if (domains.length === 0) throw new RelayError('bad_request', 'Identity needs a domain');
     const existing = readIdentity(input.name);
     const now = new Date().toISOString();
+    const loginUrl = input.loginPageUrl || existing?.login_url;
     const meta: IdentityMeta = {
       name: input.name,
       domains: [...new Set([...(existing?.domains ?? []), ...domains])],
@@ -147,6 +150,7 @@ export class IdentityStore {
       persist_days: existing?.persist_days ?? DEFAULT_PERSIST_DAYS,
       cookie_count: existing?.cookie_count ?? 0,
       ...(existing?.login_check ? { login_check: existing.login_check } : {}),
+      ...(loginUrl ? { login_url: loginUrl } : {}),
     };
     const counts = await this.withCookies(async (cdp) => {
       const cookies = await listCookies(cdp);

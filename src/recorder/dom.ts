@@ -1,5 +1,6 @@
 import type { CDPSession } from 'puppeteer-core';
 import { errorText } from '../config/paths.js';
+import { PASSWORD_FIELD_HELPERS } from '../perception/password-like.js';
 import type { FrameRef } from './types.js';
 
 export interface DomDescriptor {
@@ -23,6 +24,7 @@ const STALE = /Could not find node|No node with given id|Node is detached|Cannot
  * Uniqueness is checked with querySelectorAll in the element's own document.
  */
 const DESCRIBE_FUNCTION = `function() {
+  ${PASSWORD_FIELD_HELPERS}
   const el = this;
   if (!el || el.nodeType !== 1) return null;
   const doc = el.ownerDocument;
@@ -59,9 +61,10 @@ const DESCRIBE_FUNCTION = `function() {
     return selector;
   }
   const tag = el.tagName.toLowerCase();
-  const password = tag === 'input' && String(el.getAttribute('type') || '').toLowerCase() === 'password';
+  const type = String(el.getAttribute('type') || 'text').toLowerCase();
   const style = getComputedStyle(el);
   const shown = style.display !== 'none' && style.visibility !== 'hidden';
+  const password = tag === 'input' && (type === 'password' || (rwShown(el) && rwPasswordLike(el)));
   // Chrome's innerText on a hidden <select> is the option list, not a label.
   const text = password || tag === 'select' || !shown ? '' : String(el.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 80);
   let css = '';

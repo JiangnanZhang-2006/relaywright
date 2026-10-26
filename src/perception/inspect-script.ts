@@ -1,3 +1,5 @@
+import { PASSWORD_FIELD_HELPERS } from './password-like.js';
+
 /** Shared page-world helpers. Inserted into isolated-world expressions and callFunctionOn bodies. */
 export const BROWSER_HELPERS = `
 function rwCompact(value) {
@@ -178,6 +180,7 @@ function rwSplitSiblings(outer) {
   }
   return null;
 }
+${PASSWORD_FIELD_HELPERS}
 `;
 
 export const INSPECT_EXPRESSION = `(() => {
@@ -239,9 +242,16 @@ ${BROWSER_HELPERS}
   }
   const passwords = [];
   let visiblePassword = false;
-  for (const input of document.querySelectorAll('input[type="password"]')) {
+  for (const input of document.querySelectorAll('input')) {
+    const type = (input.getAttribute('type') || 'text').toLowerCase();
+    if (type === 'password') {
+      passwords.push(input);
+      if (rwVisible(input)) visiblePassword = true;
+      continue;
+    }
+    if (!rwVisible(input) || !rwPasswordLike(input)) continue;
     passwords.push(input);
-    if (rwVisible(input)) visiblePassword = true;
+    visiblePassword = true;
   }
   return {
     clickables: clickables,

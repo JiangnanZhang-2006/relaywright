@@ -837,18 +837,21 @@ addJson(
     .description('Ask the person at this PC to log in. Exit 20 on timeout or cancel.')
     .argument('<reason>', 'why a person needs to take over')
     .option('--no-wait', 'start the handoff and return without waiting')
+    .option('--url <url>', 'open this page before handing the window to the person')
     .addHelpText(
       'after',
       `
 Examples:
   relaywright handoff "请扫码登录教务系统"
   relaywright handoff "请扫码登录" --no-wait
+  relaywright handoff "请登录" --url https://example.edu/login
 `,
     ),
 ).action(function (this: Command, reason: string) {
   const command = this;
   return guard(command, async () => {
-    const view = await startHandoff(reason);
+    const requested = command.getOptionValue('url') as string | undefined;
+    const view = await startHandoff(reason, requested ? parseHttpUrl(requested) : undefined);
     if (command.getOptionValue('wait') === false) {
       process.stderr.write(`等待登录… 剩余 ${formatClock(view.remaining_ms ?? 0)}\n`);
       emit(command, view.state, view);
