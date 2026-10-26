@@ -7,6 +7,21 @@ export async function startStatic(root: string): Promise<{ port: number; close: 
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      if (req.method === 'POST' && url.pathname === '/mock-llm/v1/chat/completions') {
+        const raw = await readBody(req);
+        // JSON.stringify escapes newlines, so a real [^\n] would span the whole snapshot.
+        const ref = /\[(e\d+)\](?:(?!\\n).)*检索/.exec(raw)?.[1] ?? null;
+        const content = JSON.stringify({ ref, reason: ref ? 'button text is 检索' : 'no 检索 ref' });
+        const payload = {
+          id: 'mock-heal',
+          object: 'chat.completion',
+          choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 },
+        };
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+        res.end(JSON.stringify(payload));
+        return;
+      }
       if (req.method === 'POST' && url.pathname === '/zf-mock/export.pdf') {
         await drain(req);
         const pdf = await readFile(join(base, 'sample.pdf'));
@@ -100,6 +115,15 @@ async function drain(req: IncomingMessage): Promise<void> {
   for await (const chunk of req) {
     void chunk;
   }
+}
+
+function readBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer | string) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
 }
 
 function mime(extension: string): string {

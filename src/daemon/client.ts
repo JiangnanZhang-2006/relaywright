@@ -14,12 +14,15 @@ import {
   SkillDocumentSchema,
   SkillHistorySchema,
   SkillListSchema,
+  SkillPatchResultSchema,
   type MatrixResult,
   type RunSkillInput,
   type SaveSkillInput,
   type SaveSkillResult,
   type SkillDocument,
   type SkillHistory,
+  type SkillPatchInput,
+  type SkillPatchResult,
   type SkillSummary,
 } from '../skills/schema.js';
 import { TraceViewSchema, type TraceView } from '../recorder/types.js';
@@ -347,6 +350,17 @@ export async function runSkill(name: string, input: RunSkillInput): Promise<Matr
       method: 'POST',
       body: input,
       timeoutMs: input.wait_human ? SKILL_RUN_WAIT_TIMEOUT_MS : SKILL_RUN_TIMEOUT_MS,
+    }),
+  );
+}
+
+export async function patchSkill(name: string, input: SkillPatchInput): Promise<SkillPatchResult> {
+  const info = await ensureDaemon();
+  return SkillPatchResultSchema.parse(
+    await authorized(info, `/skills/${encodeURIComponent(name)}/patch`, {
+      method: 'POST',
+      body: input,
+      timeoutMs: SKILL_RUN_TIMEOUT_MS,
     }),
   );
 }

@@ -4,7 +4,7 @@ import { recordAudit } from '../audit/log.js';
 import { errorText, logDaemon } from '../config/paths.js';
 import { notify } from '../notify.js';
 import { visiblePasswordEvaluator } from '../perception/password-like.js';
-import { loginAccountEvaluator } from '../privacy/login-account.js';
+import { loginAccountEvaluator, loginAccountWatchSource, readBindingPayload } from '../privacy/login-account.js';
 import type { HandoffView, IdentityMeta } from '../protocol.js';
 import { hostOfUrl } from './domain.js';
 import type { IdentityStore } from './identity.js';
@@ -49,6 +49,8 @@ export class HandoffManager {
   private phase: { state: 'idle' } | Waiting | Finished = { state: 'idle' };
   private finishing = false;
   private readonly waiters: Array<() => void> = [];
+  private readonly loginSessions: CDPSession[] = [];
+  private readonly armedPages = new Set<Page>();
 
   constructor(private readonly host: HandoffHost) {}
 
@@ -113,6 +115,7 @@ export class HandoffManager {
       throw err;
     }
     recordAudit('handoff_start', { id, reason, url: waiting.loginUrl });
+    await this.armLoginWatch(page, waiting);
     await raiseWindow(browser, page);
     notify('relaywright 需要你登录', reason, waiting.siteHost || undefined);
     void this.poll();
@@ -177,6 +180,8 @@ export class HandoffManager {
           await this.finish('cancelled');
           return;
         }
+        await this.armLoginWatch(page, waiting);
+        if (this.phase !== waiting) return;
         const url = page.url();
         if (isLoginPath(url)) waiting.lastLoginPageUrl = url;
         const presence = await passwordPresence(page);
@@ -259,8 +264,47 @@ export class HandoffManager {
       const waiters = this.waiters.splice(0);
       for (const waiter of waiters) waiter();
     } finally {
+      await this.disarmLoginWatch();
       this.finishing = false;
     }
+  }
+
+  private async armLoginWatch(page: Page, waiting: Waiting): Promise<void> {
+    if (page.isClosed() || this.armedPages.has(page)) return;
+    this.armedPages.add(page);
+    let cdp: CDPSession;
+    try {
+      cdp = await page.createCDPSession();
+    } catch (err) {
+      this.armedPages.delete(page);
+      logDaemon(`login watch: ${errorText(err)}`);
+      return;
+    }
+    this.loginSessions.push(cdp);
+    try {
+      await cdp.send('Runtime.addBinding', { name: 'rwLoginAccount' });
+    } catch {
+      // The binding already exists on this target. The listener below still receives calls.
+    }
+    cdp.on('Runtime.bindingCalled', (event) => {
+      if (event.name !== 'rwLoginAccount' || this.phase !== waiting) return;
+      const account = readBindingPayload(event.payload);
+      if (account) waiting.loginAccount = account;
+    });
+    const source = loginAccountWatchSource();
+    try {
+      await cdp.send('Page.enable');
+      await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source });
+      await cdp.send('Runtime.evaluate', { expression: source });
+    } catch (err) {
+      logDaemon(`login watch inject: ${errorText(err)}`);
+    }
+  }
+
+  private async disarmLoginWatch(): Promise<void> {
+    const sessions = this.loginSessions.splice(0);
+    this.armedPages.clear();
+    await Promise.all(sessions.map((session) => session.detach().catch(() => undefined)));
   }
 }
 

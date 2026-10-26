@@ -276,4 +276,51 @@ describe.skipIf(!resolved.path)('privacy de-identification', () => {
     expect(stored).toContain('student');
     expect(stored).not.toContain('secret');
   });
+
+  it('captures a username that is submitted before the next poll', async () => {
+    if (!session) throw new Error('privacy e2e did not start');
+    const cas = `http://127.0.0.1:${server?.port}/cas-mock/?service=${encodeURIComponent(`http://127.0.0.1:${server?.port}/privacy-home/`)}`;
+    const opened = await call('POST', '/navigate', { url: cas });
+    expect(opened.status).toBe(200);
+    const started = await call('POST', '/handoff', { reason: '请登录' });
+    expect(started.status).toBe(200);
+    const page = (await session.openPages()).find((item) => item.url().includes('/cas-mock/'));
+    if (!page) throw new Error('login page did not open');
+    await page.evaluate(() => {
+      const g = globalThis as {
+        document?: {
+          cookie: string;
+          getElementById(id: string): { value?: string; dispatchEvent?: (event: object) => boolean } | null;
+        };
+        location?: { href: string; search: string };
+        Event?: new (type: string, init?: { bubbles?: boolean }) => object;
+        URLSearchParams?: new (search: string) => { get(name: string): string | null };
+      };
+      const doc = g.document;
+      const user = doc?.getElementById('username');
+      const pass = doc?.getElementById('password');
+      const form = doc?.getElementById('password-form');
+      const EventCtor = g.Event;
+      if (!doc || !user || !pass || !EventCtor || !g.location || !g.URLSearchParams) throw new Error('login form missing');
+      user.value = 'fastuser99';
+      pass.value = 'secret';
+      const input = new EventCtor('input', { bubbles: true });
+      user.dispatchEvent?.(input);
+      form?.dispatchEvent?.(new EventCtor('submit', { bubbles: true }));
+      // The field is empty before this function returns, so the poll cannot read it.
+      user.value = '';
+      pass.value = '';
+      doc.cookie = 'mocksession=1; path=/';
+      const service = new g.URLSearchParams(g.location.search).get('service');
+      if (!service) throw new Error('service missing');
+      g.location.href = service;
+    });
+    const done = await call('POST', '/handoff/wait', { timeout_ms: 20_000 });
+    expect(done.status).toBe(200);
+    expect(done.text).not.toContain('fastuser99');
+    expect(done.text).not.toContain('secret');
+    const stored = readFileSync(privacyPath('127.0.0.1'), 'utf8');
+    expect(stored).toContain('fastuser99');
+    expect(stored).not.toContain('secret');
+  });
 });

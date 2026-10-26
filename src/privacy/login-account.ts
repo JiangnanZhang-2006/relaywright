@@ -52,3 +52,37 @@ function rwAccountFrom(doc, depth) {
 return rwAccountFrom(document, 0);`;
   return new Function(body) as () => string;
 }
+
+/** Page script. Reads the username on input, change, and submit, then calls the CDP binding. */
+export function loginAccountWatchSource(): string {
+  const read = loginAccountEvaluator().toString();
+  return `(() => {
+    if (globalThis.__rwLoginWatch) return;
+    globalThis.__rwLoginWatch = true;
+    const readAccount = ${read};
+    function publish() {
+      try {
+        const value = String(readAccount() || '').replace(/^\\s+|\\s+$/g, '');
+        if (!value) return;
+        const send = globalThis.rwLoginAccount;
+        if (typeof send === 'function') send(value);
+      } catch (err) {}
+    }
+    document.addEventListener('input', publish, true);
+    document.addEventListener('change', publish, true);
+    document.addEventListener('submit', publish, true);
+  })();`;
+}
+
+export function readBindingPayload(payload: string): string {
+  const trimmed = payload.trim();
+  if (!trimmed) return '';
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (typeof parsed === 'string') return parsed.trim();
+    if (Array.isArray(parsed) && typeof parsed[0] === 'string') return parsed[0].trim();
+  } catch {
+    // Some binding calls pass the argument without JSON quoting.
+  }
+  return trimmed;
+}

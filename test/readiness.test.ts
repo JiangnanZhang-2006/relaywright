@@ -56,6 +56,7 @@ function control(partial: Partial<BrowserControl> & Pick<BrowserControl, 'browse
     privacyMark: fail,
     tabs: async () => ({ tabs: [], text: '' }),
     ...partial,
+    skillPatch: partial.skillPatch ?? fail,
   };
 }
 

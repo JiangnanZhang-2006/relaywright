@@ -1,7 +1,7 @@
 import { unlink } from 'node:fs/promises';
 import type { Page } from 'puppeteer-core';
 import type { Browser } from 'puppeteer-core';
-import { recordAudit } from '../audit/log.js';
+import { flushAudit, recordAudit } from '../audit/log.js';
 import { resolveBrowserForLaunch, type ResolvedBrowser } from '../browser/resolve.js';
 import { defaultProfileDir, downloadsDir, ensureHomeLayout, errorText, logDaemon } from '../config/paths.js';
 import { browserDownloadingMessage, RelayError, staleTabRefMessage } from '../errors.js';
@@ -14,9 +14,22 @@ import type { ActInput, DaemonStatus, DownloadInfo, DownloadInput, PageBody, Pdf
 import { observedLines, TraceLog } from '../recorder/trace.js';
 import { valueForTrace } from '../recorder/redact.js';
 import type { DescribedTarget, TraceStep, TraceView } from '../recorder/types.js';
-import { buildSkill } from '../skills/save.js';
-import type { MatrixResult, RunSkillInput, SaveSkillInput, SaveSkillResult, SkillDocument, SkillHistory, SkillSummary } from '../skills/schema.js';
-import { runMatrix, runOutputDir } from '../skills/run.js';
+import { buildHealContext, HEAL_TOKEN_MS, HealLedger, MAX_PATCH_ATTEMPTS, type HealTicket } from '../skills/heal.js';
+import { bindSkill, replaceStepTarget, resumeFromStep, runMatrix, runOutputDir } from '../skills/run.js';
+import { buildSkill, toSkillTarget } from '../skills/save.js';
+import type {
+  Healer,
+  MatrixResult,
+  RunSkillInput,
+  SaveSkillInput,
+  SaveSkillResult,
+  SkillDocument,
+  SkillHistory,
+  Skill,
+  SkillPatchResult,
+  SkillSummary,
+  SkillTarget,
+} from '../skills/schema.js';
 import {
   listSkills as listStoredSkills,
   readSkill as readStoredSkill,
@@ -79,6 +92,7 @@ export interface BrowserControl {
   skillHistory(name: string): SkillHistory;
   rollbackSkill(name: string, to: number): SkillDocument;
   runSkill(name: string, input: RunSkillInput): Promise<MatrixResult>;
+  skillPatch(input: { name: string; step_id: string; ref: string; heal_token?: string; healer?: Healer; llm_tokens?: number }): Promise<SkillPatchResult>;
   requestHandoff(reason: string, url?: string): Promise<HandoffView>;
   waitHandoff(timeoutMs: number): Promise<HandoffView>;
   cancelHandoff(): Promise<HandoffView>;
@@ -120,6 +134,7 @@ export class BrowserSession implements BrowserControl {
   private persistTimer: ReturnType<typeof setInterval> | null = null;
   private readonly traceLog = new TraceLog();
   private readonly privacy = new Redactor();
+  private readonly heals = new HealLedger();
   private pageUrl = '';
   private lastRawSnapshot = '';
   private readonly identities: IdentityStore;
@@ -491,16 +506,134 @@ export class BrowserSession implements BrowserControl {
       if (err instanceof PrivacyGap) return missingSelfResult(name, input, err.message);
       throw err;
     }
+    this.heals.beginRun(input.continue_heal === true);
     await this.ensureReady();
     this.replayDepth += 1;
     try {
-      return await runMatrix(this.replayPage(), skill, runInput, {
+      const page = this.replayPage();
+      return await runMatrix(page, skill, runInput, {
         waitForHuman: runInput.wait_human ? (reason) => this.waitOutHandoff(reason) : undefined,
+        onFailure: async (site) => {
+          const snapshot = await page.fullSnapshot();
+          return buildHealContext({
+            site,
+            skillName: skill.name,
+            skillVersion: skill.version,
+            snapshot,
+            url: page.currentUrl(),
+            epoch: page.documentEpoch(),
+            outDir: site.outDir,
+            ledger: this.heals,
+          });
+        },
       });
     } finally {
       this.replayDepth -= 1;
       this.tabSet?.consumeSwitch();
     }
+  }
+
+  async skillPatch(input: {
+    name: string;
+    step_id: string;
+    ref: string;
+    heal_token?: string;
+    healer?: Healer;
+    llm_tokens?: number;
+  }): Promise<SkillPatchResult> {
+    this.assertModel();
+    await this.ensureReady();
+    this.replayDepth += 1;
+    try {
+      const page = this.replayPage();
+      const controller = await this.prepareController();
+      const decision = this.heals.beginAttempt({
+        token: input.heal_token,
+        name: input.name,
+        stepId: input.step_id,
+        now: Date.now(),
+        epoch: controller.documentEpoch(),
+        url: controller.currentUrl(),
+      });
+      if (!decision.ok) {
+        return { accepted: false, name: input.name, step_id: input.step_id, reason: decision.reason, retryable: false };
+      }
+      const ticket = decision.ticket;
+      let described;
+      try {
+        described = await this.describe(controller, input.ref);
+      } catch (err) {
+        return await this.rejectPatch(input.name, input.step_id, err instanceof RelayError ? err.code : 'stale_ref', ticket);
+      }
+      if (described.sensitive) return await this.rejectPatch(input.name, input.step_id, 'human_required', ticket);
+      const rawTarget = toSkillTarget(described.target);
+      const stored = readStoredSkill(input.name).skill;
+      if (stored.version !== ticket.version) {
+        this.heals.dropTicket();
+        return { accepted: false, name: input.name, step_id: input.step_id, reason: 'heal_token', retryable: false };
+      }
+      let cleaned;
+      try {
+        const replaced = replaceSkillStep(stored, input.step_id, rawTarget);
+        this.privacy.absorb([ticket.snapshot, rawTarget.name, rawTarget.text, rawTarget.label, rawTarget.css].filter(Boolean).join('\n'), ticket.url);
+        cleaned = this.privacy.deidentify(replaced, ticket.url);
+      } catch (err) {
+        return await this.rejectPatch(input.name, input.step_id, err instanceof Error ? err.message : 'bad_params', ticket);
+      }
+      let prepared;
+      try {
+        prepared = this.privacy.prepareRun(stored, { params: ticket.params, startUrl: ticket.url });
+      } catch (err) {
+        return await this.rejectPatch(input.name, input.step_id, err instanceof Error ? err.message : 'bad_params', ticket);
+      }
+      const bound = bindSkill(prepared.skill, ticket.params);
+      const replay = await resumeFromStep(page, bound, ticket.params, input.step_id, rawTarget, ticket.priorOutcome, ticket.outDir);
+      if (replay.outcome !== 'ok' && replay.outcome !== 'empty') {
+        return await this.rejectPatch(input.name, input.step_id, replay.broken?.reason ?? replay.outcome, ticket, replay.message);
+      }
+      const written = writeStoredSkill(cleaned.skill, true);
+      writeSkillChecks(cleaned.skill, written.path);
+      recordAudit('skill_patched', {
+        name: input.name,
+        from_version: ticket.version,
+        to_version: written.version,
+        step_id: input.step_id,
+        healer: input.healer ?? 'manual',
+        ...(input.llm_tokens !== undefined ? { llm_tokens: input.llm_tokens } : {}),
+      });
+      await flushAudit();
+      this.heals.noteHealed();
+      return {
+        accepted: true,
+        name: input.name,
+        step_id: input.step_id,
+        from_version: ticket.version,
+        to_version: written.version,
+        outcome: replay.outcome,
+        ...(replay.message ? { message: replay.message } : {}),
+      };
+    } finally {
+      this.replayDepth -= 1;
+      this.tabSet?.consumeSwitch();
+    }
+  }
+
+  private async rejectPatch(name: string, stepId: string, reason: string, ticket: HealTicket, message?: string): Promise<SkillPatchResult> {
+    let retryable = false;
+    let drop = true;
+    try {
+      const controller = await this.prepareController();
+      const samePage = ticket.epoch === controller.documentEpoch() && ticket.url === controller.currentUrl();
+      const fresh = Date.now() - ticket.createdAt <= HEAL_TOKEN_MS;
+      retryable = samePage && fresh && ticket.attempts < MAX_PATCH_ATTEMPTS;
+      // A used-up budget still names the next call heal_budget. Navigation or expiry invalidates the token.
+      drop = !samePage || !fresh;
+    } catch {
+      retryable = false;
+      drop = true;
+    }
+    if (drop) this.heals.dropTicket();
+    return { accepted: false, name, step_id: stepId, reason, retryable, ...(message ? { message } : {}) };
   }
 
   async requestHandoff(reason: string, url?: string): Promise<HandoffView> {
@@ -612,6 +745,7 @@ export class BrowserSession implements BrowserControl {
     let current: PageController | null = null;
     const use = async (): Promise<PageController> => {
       current = await session.prepareController();
+      session.pageUrl = current.currentUrl();
       return current;
     };
     return {
@@ -647,6 +781,11 @@ export class BrowserSession implements BrowserControl {
       },
       waitFor: async (input) => (await use()).waitFor(input),
       excerpt: async () => (await use()).excerpt(),
+      fullSnapshot: async () => (await (await use()).snapshot('full')).snapshot,
+      documentEpoch: () => {
+        if (!current) throw new Error('Replay has not opened a page');
+        return current.documentEpoch();
+      },
       markDownloads: () => session.downloader().mark(),
       releaseDownloads: (mark) => session.downloader().release(mark),
       waitForDownloadBegin: async (mark, timeoutMs) => {
@@ -1003,6 +1142,17 @@ export class BrowserSession implements BrowserControl {
       this.releasing = false;
     }
   }
+}
+
+function replaceSkillStep(skill: Skill, stepId: string, target: SkillTarget): Skill {
+  let found = false;
+  const steps = skill.steps.map((step) => {
+    if (step.id !== stepId) return step;
+    found = true;
+    return replaceStepTarget(step, target);
+  });
+  if (!found) throw new RelayError('bad_params', `Step ${stepId} was not found`);
+  return { ...skill, steps };
 }
 
 function missingSelfResult(name: string, input: RunSkillInput, message: string): MatrixResult {

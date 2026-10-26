@@ -139,17 +139,34 @@ export const StepResultSchema = z.object({
 
 export type StepResult = z.infer<typeof StepResultSchema>;
 
+export const HealContextSchema = z.object({
+  name: z.string(),
+  version: z.number().int().positive(),
+  step_id: z.string(),
+  kind: z.string(),
+  intent: z.string().optional(),
+  target: SkillTargetSchema.optional(),
+  reason: z.string(),
+  url: z.string(),
+  params: z.record(z.string(), z.string()),
+  snapshot: z.string(),
+  heal_token: z.string().min(1).optional(),
+});
+
+export type HealContext = z.infer<typeof HealContextSchema>;
+
 export const BrokenSchema = z.object({
   step_id: z.string(),
   intent: z.string().optional(),
   target: SkillTargetSchema.optional(),
   reason: z.string(),
   excerpt: z.string(),
+  heal: HealContextSchema.optional(),
 });
 
 export type BrokenReport = z.infer<typeof BrokenSchema>;
 
-export const OutcomeSchema = z.enum(['ok', 'empty', 'needs_human', 'broken']);
+export const OutcomeSchema = z.enum(['ok', 'empty', 'needs_human', 'broken', 'skipped']);
 
 export type SkillOutcome = z.infer<typeof OutcomeSchema>;
 
@@ -162,14 +179,26 @@ export const SkillRunResultSchema = z.object({
   broken: BrokenSchema.optional(),
   artifacts: z.array(ArtifactSchema).optional(),
   warnings: z.array(z.string()).optional(),
+  /** Set when a locator miss should stop the matrix so the page stays at the failure. */
+  halt_matrix: z.boolean().optional(),
 });
 
 export type SkillRunResult = z.infer<typeof SkillRunResultSchema>;
+
+export const LlmStepUsageSchema = z.object({
+  step_id: z.string(),
+  prompt: z.number().int().nonnegative(),
+  completion: z.number().int().nonnegative(),
+});
+
+export type LlmStepUsage = z.infer<typeof LlmStepUsageSchema>;
 
 export const MatrixResultSchema = z.object({
   results: z.array(SkillRunResultSchema),
   exit_code: z.union([z.literal(0), z.literal(20), z.literal(30)]),
   out_dir: z.string().min(1),
+  llm_tokens: z.number().int().nonnegative().optional(),
+  llm_steps: z.array(LlmStepUsageSchema).optional(),
 });
 
 export type MatrixResult = z.infer<typeof MatrixResultSchema>;
@@ -241,7 +270,37 @@ export const RunSkillInputSchema = z.object({
   startUrl: z.string().min(1).optional(),
   out_dir: z.string().min(1).optional(),
   wait_human: z.boolean().optional(),
+  /** Keep the per-run heal budget. The CLI sets this while replaying the rest of one matrix. */
+  continue_heal: z.boolean().optional(),
 });
+
+export const HealerSchema = z.enum(['mcp', 'cli', 'manual']);
+
+export type Healer = z.infer<typeof HealerSchema>;
+
+export const SkillPatchInputSchema = z.object({
+  step_id: z.string().min(1),
+  ref: z.string().min(1),
+  heal_token: z.string().min(1).optional(),
+  healer: HealerSchema.optional(),
+  llm_tokens: z.number().int().nonnegative().optional(),
+});
+
+export type SkillPatchInput = z.infer<typeof SkillPatchInputSchema>;
+
+export const SkillPatchResultSchema = z.object({
+  accepted: z.boolean(),
+  name: z.string(),
+  step_id: z.string(),
+  reason: z.string().optional(),
+  message: z.string().optional(),
+  from_version: z.number().int().positive().optional(),
+  to_version: z.number().int().positive().optional(),
+  outcome: z.enum(['ok', 'empty']).optional(),
+  retryable: z.boolean().optional(),
+});
+
+export type SkillPatchResult = z.infer<typeof SkillPatchResultSchema>;
 
 export type RunSkillInput = z.infer<typeof RunSkillInputSchema>;
 

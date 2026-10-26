@@ -36,6 +36,7 @@ export interface PrivacyFile {
 
 export interface GlobalConfig {
   privacy?: { model_redaction?: boolean };
+  heal?: { base_url?: string; model?: string; api_key_env?: string };
 }
 
 const EMPTY = (): PrivacyFile => ({
@@ -116,6 +117,17 @@ export function safeKey(name: string): string | null {
   if (!key || key === '.' || key === '..' || key.includes('..')) return null;
   if (!/^[\w.-]+$/.test(key)) return null;
   return key;
+}
+
+export function readGlobalConfig(root = relaywrightHome()): GlobalConfig {
+  return readConfig(root);
+}
+
+export function updateGlobalConfig(mutate: (config: GlobalConfig) => void, root = relaywrightHome()): GlobalConfig {
+  const config = readConfig(root);
+  mutate(config);
+  writeJson(configPath(root), config);
+  return config;
 }
 
 function readConfig(root: string): GlobalConfig {

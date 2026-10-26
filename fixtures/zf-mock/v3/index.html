@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>个人课表查询</title>
+  <style>
+    body { font-family: sans-serif; margin: 16px; color: #222; }
+    .top-nav { cursor: default; display: flex; gap: 8px; margin-bottom: 8px; }
+    .nav-item { cursor: pointer; padding: 6px 10px; background: #f3f3f3; }
+    .form-group { margin: 10px 0; }
+    .control-label { display: inline-block; width: 4em; }
+    .red { color: #c00; }
+    .picker-shell { position: relative; display: inline-block; min-width: 200px; min-height: 28px; border: 1px solid #bbb; background: #fff; }
+    .picker-single { display: block; padding: 4px 8px; color: #222; text-decoration: none; }
+    .picker-drop { display: none; position: absolute; left: 0; right: 0; background: #fff; border: 1px solid #bbb; z-index: 2; }
+    .picker-shell.open .picker-drop { display: block; }
+    .picker-results { list-style: none; margin: 0; padding: 0; max-height: 180px; overflow: auto; }
+    .picker-results li { padding: 4px 8px; cursor: pointer; }
+    #crumb { margin: 8px 0; }
+    button { margin-right: 8px; }
+    .query-nest { margin: 12px 0; }
+    .query-nest-inner { display: inline-block; }
+    #pdf-slot { margin-top: 8px; padding: 8px; background: #fafafa; }
+    iframe { display: block; width: 480px; height: 140px; margin-top: 16px; border: 1px solid #ddd; }
+    #login-box { margin-top: 24px; }
+    table { border-collapse: collapse; margin-top: 12px; }
+    th, td { border: 1px solid #ccc; padding: 4px 8px; vertical-align: top; }
+  </style>
+</head>
+<body>
+  <div class="top-nav">
+    <div class="nav-item">教学评价</div>
+    <div class="nav-item">信息查询</div>
+    <div class="nav-item">报名申请</div>
+    <div class="nav-item">首页</div>
+  </div>
+  <div id="crumb" role="status">首页</div>
+  <form id="query-form">
+    <div class="form-group">
+      <label class="control-label"><span class="red">*</span>学年</label>
+      <select id="yearPick" name="yearPick" class="year-field" style="display:none"></select>
+    </div>
+    <div class="form-group">
+      <label class="control-label"><span class="red">*</span>学期</label>
+      <select id="termPick" name="termPick" class="term-field" style="display:none"></select>
+    </div>
+  </form>
+  <div class="query-nest">
+    <div class="query-nest-inner">
+      <button type="button" id="btn-retrieve" class="primary-action">检索</button>
+    </div>
+  </div>
+  <aside id="pdf-slot">
+    <button type="button" id="pdf-go">输出PDF</button>
+  </aside>
+  <div role="tablist">
+    <button type="button" role="tab" aria-selected="true">表格</button>
+    <button type="button" role="tab">列表</button>
+  </div>
+  <h3 id="empty" hidden>该学年学期尚无您的课表！</h3>
+  <div id="table-wrap"></div>
+  <iframe src="../v1/notice.html" name="notice" title="通知"></iframe>
+  <p><button type="button" id="delay-hint">异步提示</button></p>
+  <div id="delay-out" role="status"></div>
+  <form id="login-box">
+    <label for="username">用户名</label>
+    <input id="username" type="text" value="student">
+    <label for="password">密码</label>
+    <input id="password" type="password" value="secret-fixture">
+  </form>
+  <script>
+    (function () {
+      function addOptions(select, pairs, selected) {
+        var placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = '---请选择---';
+        select.appendChild(placeholder);
+        pairs.forEach(function (pair) {
+          var option = document.createElement('option');
+          option.value = pair[0];
+          option.textContent = pair[1];
+          if (pair[0] === selected) option.selected = true;
+          select.appendChild(option);
+        });
+      }
+
+      function mountPicker(select) {
+        var widget = document.createElement('div');
+        widget.id = select.id + '_picker';
+        widget.className = 'picker-shell';
+        widget.innerHTML = '<a class="picker-single" href="#"><span></span></a><div class="picker-drop"><ul class="picker-results"></ul></div>';
+        select.insertAdjacentElement('afterend', widget);
+        var list = widget.querySelector('.picker-results');
+        Array.prototype.forEach.call(select.options, function (option, index) {
+          var item = document.createElement('li');
+          item.className = 'active-result';
+          item.setAttribute('data-option-array-index', String(index));
+          item.textContent = option.text;
+          list.appendChild(item);
+        });
+        var span = widget.querySelector('.picker-single span');
+        function sync() {
+          var option = select.options[select.selectedIndex];
+          span.textContent = option ? option.text : '';
+        }
+        sync();
+        widget.querySelector('.picker-single').addEventListener('click', function (event) {
+          event.preventDefault();
+          widget.classList.toggle('open');
+        });
+        Array.prototype.forEach.call(widget.querySelectorAll('.picker-results li'), function (item) {
+          item.addEventListener('click', function () {
+            select.selectedIndex = Number(item.getAttribute('data-option-array-index'));
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+            widget.classList.remove('open');
+          });
+        });
+        select.addEventListener('change', sync);
+      }
+
+      var years = [];
+      for (var year = 2031; year >= 2007; year -= 1) years.push([String(year), year + '-' + (year + 1)]);
+      var yearPick = document.getElementById('yearPick');
+      var termPick = document.getElementById('termPick');
+      addOptions(yearPick, years, '2026');
+      addOptions(termPick, [['3', '1'], ['12', '2'], ['16', '3']], '3');
+      mountPicker(yearPick);
+      mountPicker(termPick);
+
+      Array.prototype.forEach.call(document.querySelectorAll('.nav-item'), function (item) {
+        item.addEventListener('click', function () {
+          document.getElementById('crumb').textContent = item.textContent.trim();
+        });
+      });
+
+      function renderTable(data) {
+        var days = ['星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日'];
+        var slots = ['1-2节', '3-4节', '5-6节', '7-8节', '9-10节', '11-12节'];
+        var grid = slots.map(function () { return days.map(function () { return ''; }); });
+        data.courses.forEach(function (course) {
+          var row = grid[course.slot];
+          if (!row || course.day < 0 || course.day >= days.length) return;
+          var text = course.name + '<br>' + course.weeks + ' ' + course.room;
+          row[course.day] = row[course.day] ? row[course.day] + '<br>' + text : text;
+        });
+        var head = '<tr><th>节次</th>' + days.map(function (day) { return '<th>' + day + '</th>'; }).join('') + '</tr>';
+        var body = slots.map(function (slot, index) {
+          var cells = grid[index].map(function (value) { return '<td>' + value + '</td>'; }).join('');
+          return '<tr><th>' + slot + '</th>' + cells + '</tr>';
+        }).join('');
+        return '<table id="kbgrid_table_0" aria-label="个人课表"><thead>' + head + '</thead><tbody>' + body + '</tbody></table>';
+      }
+
+      document.getElementById('btn-retrieve').addEventListener('click', function () {
+        var empty = document.getElementById('empty');
+        var wrap = document.getElementById('table-wrap');
+        fetch('../v1/data/' + yearPick.value + '-' + termPick.value + '.json').then(function (response) {
+          if (!response.ok) throw new Error('missing');
+          return response.json();
+        }).then(function (data) {
+          empty.hidden = true;
+          wrap.innerHTML = renderTable(data);
+        }).catch(function () {
+          wrap.innerHTML = '';
+          empty.hidden = false;
+        });
+      });
+
+      document.getElementById('delay-hint').addEventListener('click', function () {
+        setTimeout(function () {
+          document.getElementById('delay-out').textContent = '查询已完成';
+        }, 1200);
+      });
+    })();
+  </script>
+</body>
+</html>

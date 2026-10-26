@@ -453,6 +453,8 @@ function fakeReplay(options: { text: string; begin: ReplayDownload | null }): { 
     },
     waitFor: async () => ({ matched: true, url: PAGE, title: 't', snapshot: '' }),
     excerpt: async () => 'excerpt',
+    fullSnapshot: async () => 'excerpt',
+    documentEpoch: () => 1,
     markDownloads: () => {
       calls.push('mark');
       return 1;

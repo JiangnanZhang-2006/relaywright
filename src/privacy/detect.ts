@@ -107,10 +107,13 @@ export function headerCandidateName(value: string): string | null {
   return cleanCandidate(value);
 }
 
+/** Short values keep only the last character. Longer values keep the last two. */
 export function maskTail(value: string): string {
   const chars = [...value];
-  if (chars.length <= 2) return value;
-  return `${'*'.repeat(chars.length - 2)}${chars.slice(-2).join('')}`;
+  if (chars.length === 0) return value;
+  const keep = chars.length <= 4 ? 1 : 2;
+  if (chars.length <= keep) return value;
+  return `${'*'.repeat(chars.length - keep)}${chars.slice(-keep).join('')}`;
 }
 
 export function otherToken(kind: TokenKind, n: number): string {

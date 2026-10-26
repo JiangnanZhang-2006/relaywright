@@ -19,6 +19,7 @@ import {
   type SkillOutcome,
   type SkillRunResult,
   type SkillStep,
+  type HealContext,
   type SkillTarget,
   type StepResult,
   type When,
@@ -57,8 +58,28 @@ export function summaryExitCode(results: readonly { outcome: string }[]): 0 | 20
   return 0;
 }
 
+export type PriorOutcome = 'undecided' | 'ok' | 'empty';
+
+export interface FailureSite {
+  step: SkillStep;
+  reason: string;
+  params: Record<string, string>;
+  priorOutcome: PriorOutcome;
+  outDir: string;
+  /** True when every locator missed, including a download whose click target was missing. */
+  healable: boolean;
+  missingTarget: boolean;
+}
+
 export interface RunHooks {
   waitForHuman?: (reason: string) => Promise<'done' | 'cancelled' | 'timeout'>;
+  onFailure?: (site: FailureSite) => Promise<HealContext | undefined>;
+}
+
+export function stopsMatrix(result: { outcome: string; broken?: { reason?: string; heal?: unknown } }): boolean {
+  const reason = result.broken?.reason;
+  if (result.outcome !== 'broken' || !result.broken?.heal) return false;
+  return reason === 'target_not_found' || reason === 'no_download';
 }
 
 export async function runMatrix(page: ReplayPage, skill: Skill, input: RunSkillInput, hooks?: RunHooks): Promise<MatrixResult> {
@@ -68,8 +89,15 @@ export async function runMatrix(page: ReplayPage, skill: Skill, input: RunSkillI
   await mkdir(outDir, { recursive: true });
   const results: SkillRunResult[] = [];
   const waitForHuman = input.wait_human ? hooks?.waitForHuman : undefined;
+  let halt = false;
   for (const params of combos) {
-    results.push(await runSkill(page, skill, params, { startUrl: input.startUrl, outDir, waitForHuman }));
+    if (halt) {
+      results.push(skippedCombo(skill, params));
+      continue;
+    }
+    const result = await runSkill(page, skill, params, { startUrl: input.startUrl, outDir, waitForHuman }, hooks);
+    results.push(result);
+    if (result.halt_matrix) halt = true;
   }
   return { results, exit_code: summaryExitCode(results), out_dir: outDir };
 }
@@ -79,18 +107,58 @@ export async function runSkill(
   skill: Skill,
   params: Record<string, string>,
   options?: { startUrl?: string; outDir?: string; waitForHuman?: RunHooks['waitForHuman'] },
+  hooks?: RunHooks,
 ): Promise<SkillRunResult> {
   const startUrl = options?.startUrl ?? skill.start_url;
-  let last = await runSkillOnce(page, skill, params, options);
+  let last = await runSkillOnce(page, skill, params, options, hooks);
   if (!(await comboNeedsHuman(page, startUrl, last))) return last;
   const message = last.message ?? 'Login required';
   if (!options?.waitForHuman) return humanResult(last, message);
   const host = hostOf(page.currentUrl());
   const decision = await options.waitForHuman(`skill ${skill.name}: 登录 ${host}`);
   if (decision !== 'done') return humanResult(last, message);
-  last = await runSkillOnce(page, skill, params, options);
+  last = await runSkillOnce(page, skill, params, options, hooks);
   if (await comboNeedsHuman(page, startUrl, last)) return humanResult(last, last.message ?? message);
   return last;
+}
+
+export async function resumeFromStep(
+  page: ReplayPage,
+  skill: Skill,
+  params: Record<string, string>,
+  fromStepId: string,
+  target: SkillTarget,
+  prior: PriorOutcome,
+  outDir: string,
+): Promise<SkillRunResult> {
+  const index = skill.steps.findIndex((step) => step.id === fromStepId);
+  if (index < 0) throw new RelayError('bad_params', `Step ${fromStepId} was not found`);
+  const steps = skill.steps.map((step, cursor) => (cursor === index ? replaceStepTarget(step, target) : step));
+  const started = Date.now();
+  await mkdir(outDir, { recursive: true });
+  const played = await driveSteps(page, steps, outDir, prior, undefined, params, index);
+  const outcome = played.outcome === 'undecided' ? 'ok' : played.outcome;
+  return {
+    outcome,
+    ...(played.message !== undefined ? { message: played.message } : {}),
+    params,
+    steps: played.steps,
+    duration_ms: Date.now() - started,
+    ...(played.broken ? { broken: played.broken } : {}),
+    ...(played.artifacts.length > 0 ? { artifacts: played.artifacts } : {}),
+    ...(played.warnings.length > 0 ? { warnings: played.warnings } : {}),
+  };
+}
+
+export function replaceStepTarget(step: SkillStep, target: SkillTarget): SkillStep {
+  if (step.click) return { ...step, click: { target } };
+  if (step.type) return { ...step, type: { ...step.type, target } };
+  if (step.select) return { ...step, select: { ...step.select, target } };
+  if (step.press?.target) return { ...step, press: { ...step.press, target } };
+  if (step.scroll?.target) return { ...step, scroll: { ...step.scroll, target } };
+  if (step.wait?.target) return { ...step, wait: { ...step.wait, target } };
+  if (step.download) return { ...step, download: { ...step.download, click: { target } } };
+  throw new RelayError('bad_params', `Step ${step.id} has no target to replace`);
 }
 
 async function runSkillOnce(
@@ -98,6 +166,7 @@ async function runSkillOnce(
   skill: Skill,
   params: Record<string, string>,
   options?: { startUrl?: string; outDir?: string },
+  hooks?: RunHooks,
 ): Promise<SkillRunResult> {
   const bound = bindSkill(skill, params);
   const outDir = options?.outDir ?? runOutputDir(skill.name);
@@ -114,21 +183,56 @@ async function runSkillOnce(
       duration_ms: Date.now() - started,
     };
   }
-  let outcome: Running = 'undecided';
+  const played = await driveSteps(page, bound.steps, outDir, 'undecided', hooks, params, 0);
+  const outcome = played.outcome === 'undecided' ? 'ok' : played.outcome;
+  return {
+    outcome,
+    ...(played.message !== undefined ? { message: played.message } : {}),
+    params,
+    steps: played.steps,
+    duration_ms: Date.now() - started,
+    ...(played.broken ? { broken: played.broken } : {}),
+    ...(played.artifacts.length > 0 ? { artifacts: played.artifacts } : {}),
+    ...(played.warnings.length > 0 ? { warnings: played.warnings } : {}),
+    ...(played.halt ? { halt_matrix: true } : {}),
+  };
+}
+
+async function driveSteps(
+  page: ReplayPage,
+  steps: readonly SkillStep[],
+  outDir: string,
+  prior: Running,
+  hooks: RunHooks | undefined,
+  params: Record<string, string>,
+  startIndex: number,
+): Promise<{
+  outcome: Running;
+  message?: string;
+  broken?: BrokenReport;
+  steps: StepResult[];
+  artifacts: SkillArtifact[];
+  warnings: string[];
+  halt: boolean;
+}> {
+  let outcome: Running = prior;
   let message: string | undefined;
   let broken: BrokenReport | undefined;
-  const steps: StepResult[] = [];
+  const done: StepResult[] = [];
   const artifacts: SkillArtifact[] = [];
   const warnings: string[] = [];
   let stop = false;
-  for (const step of bound.steps) {
+  let halt = false;
+  for (let index = startIndex; index < steps.length; index += 1) {
+    const step = steps[index];
+    if (!step) continue;
     const stepStarted = Date.now();
     if (stop || !shouldRun(step, outcome)) {
-      steps.push({ id: step.id, status: 'skipped', ms: 0 });
+      done.push({ id: step.id, status: 'skipped', ms: 0 });
       continue;
     }
     const result = await runStep(page, step, outDir);
-    steps.push({
+    done.push({
       id: step.id,
       status: result.status,
       ...(result.locator ? { locator: result.locator } : {}),
@@ -137,25 +241,32 @@ async function runSkillOnce(
     if (result.artifact) artifacts.push(result.artifact);
     if (result.warning) warnings.push(result.warning);
     if (result.broken) {
-      broken = result.broken;
+      const reason = result.broken.reason;
+      const missingTarget = result.locator === undefined && (reason === 'target_not_found' || reason === 'no_download');
+      const healable = reason === 'target_not_found' || (reason === 'no_download' && missingTarget);
+      let next = result.broken;
+      if ((healable || reason === 'expect_unmatched') && hooks?.onFailure) {
+        const heal = await hooks.onFailure({
+          step,
+          reason,
+          params,
+          priorOutcome: asPrior(outcome),
+          outDir,
+          healable,
+          missingTarget,
+        });
+        if (heal) next = { ...next, heal };
+      }
+      broken = next;
       outcome = 'broken';
+      if (healable) halt = true;
       stop = true;
       continue;
     }
     if (result.outcome) outcome = result.outcome;
     if (result.message !== undefined) message = result.message;
   }
-  if (outcome === 'undecided') outcome = 'ok';
-  return {
-    outcome,
-    ...(message !== undefined ? { message } : {}),
-    params,
-    steps,
-    duration_ms: Date.now() - started,
-    ...(broken ? { broken } : {}),
-    ...(artifacts.length > 0 ? { artifacts } : {}),
-    ...(warnings.length > 0 ? { warnings } : {}),
-  };
+  return { outcome, ...(message !== undefined ? { message } : {}), ...(broken ? { broken } : {}), steps: done, artifacts, warnings, halt };
 }
 
 export function bindSkill(skill: Skill, params: Record<string, string>): Skill {
@@ -367,8 +478,23 @@ function passwordStep(): OneStep {
 }
 
 function humanResult(result: SkillRunResult, message: string): SkillRunResult {
-  const { broken: _broken, ...rest } = result;
+  const { broken: _broken, halt_matrix: _halt, ...rest } = result;
   return { ...rest, outcome: 'needs_human', message };
+}
+
+function asPrior(outcome: Running): PriorOutcome {
+  if (outcome === 'ok' || outcome === 'empty') return outcome;
+  return 'undecided';
+}
+
+function skippedCombo(skill: Skill, params: Record<string, string>): SkillRunResult {
+  return {
+    outcome: 'skipped',
+    message: 'skipped because an earlier combination is broken',
+    params,
+    steps: skill.steps.map((step) => ({ id: step.id, status: 'skipped' as const, ms: 0 })),
+    duration_ms: 0,
+  };
 }
 
 function hostOf(url: string): string {
@@ -381,7 +507,8 @@ function hostOf(url: string): string {
 
 function reasonOf(err: unknown): string {
   if (err instanceof RelayError) return err.code;
-  return 'action_failed';
+  const message = err instanceof Error ? err.message.trim() : '';
+  return message ? `action_failed: ${message}` : 'action_failed';
 }
 
 function bindStep(step: SkillStep, render: (value: string) => string): SkillStep {

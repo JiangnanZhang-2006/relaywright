@@ -7,7 +7,7 @@ import { errorText, logDaemon, packageVersion } from '../config/paths.js';
 import { RelayError, relayStatus, type RelayErrorCode } from '../errors.js';
 import { ActSchema, DownloadSchema, HandoffStartSchema, HandoffWaitSchema, IdentitySaveSchema, issuesText, PdfSchema, SnapshotQuery, TabsCommandSchema, WaitSchema } from '../protocol.js';
 import type { BrowserControl } from '../session/browser.js';
-import { RunSkillInputSchema, SaveSkillInputSchema } from '../skills/schema.js';
+import { RunSkillInputSchema, SaveSkillInputSchema, SkillPatchInputSchema } from '../skills/schema.js';
 
 const NavigateBody = z.object({
   url: z.string().min(1),
@@ -223,6 +223,16 @@ export function createApp(options: AppOptions): Hono {
       const body = RunSkillInputSchema.safeParse(await readJson(c));
       if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
       return show(c, await options.session.runSkill(c.req.param('name'), body.data));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  app.post('/skills/:name/patch', async (c) => {
+    try {
+      const body = SkillPatchInputSchema.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return show(c, await options.session.skillPatch({ name: c.req.param('name'), ...body.data }));
     } catch (err) {
       return fail(c, err);
     }

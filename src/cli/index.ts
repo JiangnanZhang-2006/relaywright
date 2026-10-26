@@ -2,6 +2,8 @@
 import { Command } from 'commander';
 import { installChromeForTesting, whichBrowser } from '../browser/resolve.js';
 import { tailAudit, verifyAudit } from '../audit/log.js';
+import { formatHealConfig, healKeySet, readHealConfig, writeHealConfig } from '../healer/config.js';
+import { runSkillWithHeal } from '../healer/drive.js';
 import { errorText, packageVersion, readTextFile } from '../config/paths.js';
 import { normalizeActArgs } from './act-args.js';
 import { issuesText, type PageBody } from '../protocol.js';
@@ -28,8 +30,8 @@ import {
   readStatus,
   restartDaemon,
   revokeIdentity,
+  patchSkill,
   rollbackSkill,
-  runSkill,
   saveIdentity,
   privacyAdd,
   privacyCheck,
@@ -740,6 +742,7 @@ addJson(
     .option('--start-url <url>', 'open this URL instead of the skill start_url')
     .option('--out <dir>', 'directory for download and PDF artifacts')
     .option('--no-wait', 'do not wait for a person to log in')
+    .option('--no-heal', 'do not ask a model to repair a failed step')
     .addHelpText(
       'after',
       `
@@ -748,6 +751,7 @@ Examples:
   relaywright skill run zf-timetable --matrix year=2025-2026,2026-2027 --matrix term=1,2
   relaywright skill run zf-timetable --start-url http://127.0.0.1:8765/zf-mock/v2/ --param year=2025-2026 --param term=2
   relaywright skill run zf-timetable --matrix year=2025-2026 --matrix term=1,2 --out ./out
+  relaywright skill run zf-timetable --no-heal --param year=2025-2026 --param term=2
 `,
     ),
 ).action(function (this: Command, name: string) {
@@ -758,6 +762,7 @@ Examples:
     const startUrl = command.getOptionValue('startUrl') as string | undefined;
     const outDir = command.getOptionValue('out') as string | undefined;
     const wait = command.getOptionValue('wait') !== false;
+    const heal = command.getOptionValue('heal') !== false;
     const info = await ensureDaemon();
     let stopPoll = false;
     let pollTimer: ReturnType<typeof setTimeout> | undefined;
@@ -779,19 +784,58 @@ Examples:
     })();
     void poll;
     try {
-      const report = await runSkill(name, {
-        ...(Object.keys(params).length > 0 ? { params } : {}),
-        ...(Object.keys(matrix).length > 0 ? { matrix } : {}),
-        ...(startUrl ? { startUrl } : {}),
-        ...(outDir ? { out_dir: outDir } : {}),
-        wait_human: wait,
-      });
-      emit(command, formatRunReport(report.results), report);
+      const healed = await runSkillWithHeal(
+        name,
+        {
+          ...(Object.keys(params).length > 0 ? { params } : {}),
+          ...(Object.keys(matrix).length > 0 ? { matrix } : {}),
+          ...(startUrl ? { startUrl } : {}),
+          ...(outDir ? { out_dir: outDir } : {}),
+          wait_human: wait,
+        },
+        { heal },
+      );
+      if (healed.hint) process.stderr.write(`${healed.hint}\n`);
+      const report = healed.report;
+      emit(
+        command,
+        formatRunReport(report.results, { total: report.llm_tokens ?? 0, steps: report.llm_steps }),
+        report,
+      );
       if (report.exit_code !== 0) process.exitCode = report.exit_code;
     } finally {
       stopPoll = true;
       if (pollTimer) clearTimeout(pollTimer);
     }
+  });
+});
+
+addJson(
+  skill
+    .command('patch')
+    .description('Repair a failed step with the latest heal token and a snapshot ref')
+    .argument('<name>', 'skill name')
+    .requiredOption('--step <id>', 'step id from the heal block')
+    .requiredOption('--ref <ref>', 'snapshot ref that performs the step intent')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright skill patch zf-timetable --step s3-click-查询 --ref e12
+`,
+    ),
+).action(function (this: Command, name: string) {
+  const command = this;
+  return guard(command, async () => {
+    const stepId = command.getOptionValue('step') as string;
+    const ref = command.getOptionValue('ref') as string;
+    const result = await patchSkill(name, { step_id: stepId, ref, healer: 'manual' });
+    if (!result.accepted) {
+      emit(command, `rejected: ${result.reason ?? 'rejected'}`, result);
+      process.exitCode = 1;
+      return;
+    }
+    emit(command, `patched ${result.name} v${result.to_version}`, result);
   });
 });
 
@@ -978,7 +1022,7 @@ Examples:
 addJson(
   privacy
     .command('list')
-    .description('List your own values, masked except the last two characters')
+    .description('List your own values. Length 4 or less shows the last character; longer values show the last two.')
     .option('--identity <domain>', 'site to list')
     .addHelpText(
       'after',
@@ -1086,6 +1130,43 @@ Examples:
   return guard(command, async () => {
     const removed = await revokeIdentity(name);
     emit(command, `revoked ${removed.name}`, removed);
+  });
+});
+
+const heal = program.command('heal').description('Model used when the CLI repairs a failed skill step');
+addJson(heal);
+
+addJson(
+  heal
+    .command('config')
+    .description('Show or set the OpenAI-compatible heal endpoint. The API key stays in the environment.')
+    .option('--base-url <url>', 'chat completions origin, default https://api.deepseek.com')
+    .option('--model <name>', 'model name, default deepseek-chat')
+    .option('--api-key-env <var>', 'environment variable that holds the API key, default DEEPSEEK_API_KEY')
+    .addHelpText(
+      'after',
+      `
+The key is read from the environment in this process and is not written to disk.
+Examples:
+  relaywright heal config
+  relaywright heal config --base-url https://api.deepseek.com --model deepseek-chat --api-key-env DEEPSEEK_API_KEY
+`,
+    ),
+).action(function (this: Command) {
+  const command = this;
+  return guard(command, async () => {
+    const baseUrl = command.getOptionValue('baseUrl') as string | undefined;
+    const model = command.getOptionValue('model') as string | undefined;
+    const apiKeyEnv = command.getOptionValue('apiKeyEnv') as string | undefined;
+    const updating = baseUrl !== undefined || model !== undefined || apiKeyEnv !== undefined;
+    const config = updating
+      ? writeHealConfig({
+          ...(baseUrl !== undefined ? { base_url: baseUrl } : {}),
+          ...(model !== undefined ? { model } : {}),
+          ...(apiKeyEnv !== undefined ? { api_key_env: apiKeyEnv } : {}),
+        })
+      : readHealConfig();
+    emit(command, formatHealConfig(config), { ...config, api_key: healKeySet(config) ? 'set' : 'missing' });
   });
 });
 

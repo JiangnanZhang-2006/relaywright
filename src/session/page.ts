@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import type { CDPSession, Page } from 'puppeteer-core';
 import { RelayError } from '../errors.js';
 import { performAction, type ActInput } from '../actions/perform.js';
@@ -31,6 +32,39 @@ const PRINT_HOOK = `(() => {
   w.print = function () { w.__rwPrintRequests += 1; };
 })();`;
 
+const NAME_SHIM = `(() => {
+  const w = window;
+  if (typeof w.__name === 'function') return;
+  w.__name = function (target, value) {
+    try { Object.defineProperty(target, 'name', { value: value, configurable: true }); } catch (err) {}
+    return target;
+  };
+})();`;
+
+/**
+ * tsx keepNames rewrites closures passed to page.evaluate so they call __name.
+ * tsc output does not. The shim belongs only on pages driven by the TypeScript sources.
+ */
+export function needsNameShim(moduleUrl: string, argv: readonly string[] = []): boolean {
+  const path = modulePath(moduleUrl);
+  if (/\.(?:[cm]?ts|tsx)$/.test(path)) return true;
+  return argv.some((arg) => /(?:^|[\\/])tsx(?:[\\/]|$)/.test(arg));
+}
+
+function modulePath(moduleUrl: string): string {
+  const trimmed = moduleUrl.split(/[?#]/)[0] ?? moduleUrl;
+  if (!trimmed.startsWith('file:')) return trimmed;
+  try {
+    return fileURLToPath(trimmed);
+  } catch {
+    return trimmed;
+  }
+}
+
+function startupSource(): string {
+  return needsNameShim(import.meta.url, process.argv) ? `${PRINT_HOOK}\n${NAME_SHIM}` : PRINT_HOOK;
+}
+
 export interface PageModel {
   items: ModelItem[];
   tables: TableFact[];
@@ -60,6 +94,9 @@ export interface ReplayPage {
   performInput(input: ActInput): Promise<void>;
   waitFor(input: WaitInput): Promise<WaitBody>;
   excerpt(): Promise<string>;
+  fullSnapshot(): Promise<string>;
+  /** Increments when the main frame loads a new document and refs are reset. */
+  documentEpoch(): number;
   markDownloads(): number;
   releaseDownloads(mark: number): void;
   waitForDownloadBegin(mark: number, timeoutMs: number): Promise<ReplayDownload | null>;
@@ -73,6 +110,7 @@ export class PageController {
   private baseline: string[] | null = null;
   private navigatedSinceBaseline = false;
   private loaderId = '';
+  private epoch = 0;
   private inflight = 0;
   private disposed = false;
   private model: { items: ModelItem[]; tables: TableFact[] } = { items: [], tables: [] };
@@ -267,6 +305,10 @@ export class PageController {
     return page.snapshot.split('\n').slice(0, 40).join('\n');
   }
 
+  documentEpoch(): number {
+    return this.epoch;
+  }
+
   async waitFor(input: WaitInput): Promise<WaitBody> {
     const timeout = input.timeoutMs ?? 10_000;
     const deadline = Date.now() + timeout;
@@ -327,6 +369,8 @@ export class PageController {
     this.loaderId = loaderId;
     if (!hadDocument) return;
     this.registry.reset();
+    // A heal token's refs belong to this document. The next load makes them unusable.
+    this.epoch += 1;
     if (this.baseline) this.navigatedSinceBaseline = true;
   }
 
@@ -473,7 +517,7 @@ async function readPageText(page: Page): Promise<string> {
 async function installPrintHook(page: Page, cdp: CDPSession): Promise<void> {
   try {
     await bounded(
-      cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: PRINT_HOOK, runImmediately: true }),
+      cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: startupSource(), runImmediately: true }),
       CALL_TIMEOUT_MS,
       'print hook',
     );

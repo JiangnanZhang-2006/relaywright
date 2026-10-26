@@ -79,6 +79,33 @@ export function tailAudit(limit: number): AuditRecord[] {
   return records.slice(Math.max(0, records.length - limit));
 }
 
+export interface AuditQuery {
+  since?: string;
+  event?: string;
+  identity?: string;
+  skill?: string;
+  limit?: number;
+}
+
+export function queryAudit(query: AuditQuery = {}): {
+  entries: AuditRecord[];
+  chain: { ok: true } | { ok: false; where: string };
+} {
+  const limit = Math.min(200, Math.max(1, query.limit ?? 50));
+  let records = readAuditRecords().map((item) => item.record);
+  if (query.since) {
+    const since = query.since;
+    records = records.filter((record) => String(record.ts) >= since);
+  }
+  if (query.event) records = records.filter((record) => record.event === query.event);
+  if (query.identity) records = records.filter((record) => record.identity === query.identity);
+  if (query.skill) {
+    const skill = query.skill;
+    records = records.filter((record) => record.skill === skill || record.name === skill);
+  }
+  return { entries: records.slice(-limit), chain: verifyAudit() };
+}
+
 function appendAudit(event: string, fields: Record<string, unknown>): void {
   mkdirSync(auditDir(), { recursive: true });
   const prev = lastHash();

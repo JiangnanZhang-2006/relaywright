@@ -279,7 +279,7 @@ function requiredTarget(step: TraceStep, target: SkillTarget | undefined): Skill
   return target;
 }
 
-function toSkillTarget(target: TargetDescriptor): SkillTarget {
+export function toSkillTarget(target: TargetDescriptor): SkillTarget {
   return {
     role: target.role,
     name: target.name,
