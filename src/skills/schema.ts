@@ -57,7 +57,7 @@ const WaitActionSchema = z
     message: 'wait needs text, url, or target',
   });
 
-const STEP_KINDS = ['goto', 'click', 'type', 'select', 'press', 'scroll', 'wait', 'expect', 'download', 'pdf'] as const;
+const STEP_KINDS = ['goto', 'click', 'type', 'select', 'press', 'scroll', 'wait', 'expect', 'download', 'pdf', 'state_set', 'extract'] as const;
 
 export const SkillStepSchema = z
   .object({
@@ -89,6 +89,29 @@ export const SkillStepSchema = z
         save_as: z.string().min(1),
         landscape: z.boolean().optional(),
       })
+      .optional(),
+    state_set: z
+      .object({
+        ns: z.string().min(1),
+        key: z.string().min(1),
+        value: z.string(),
+      })
+      .optional(),
+    extract: z
+      .object({
+        root_selector: z.string().min(1),
+        save_as: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/),
+        limit: z.number().int().min(1).max(2000).optional(),
+        fields: z.record(
+          z.string(),
+          z.object({
+            selector: z.string().min(1),
+            attr: z.string().min(1).optional(),
+            all: z.boolean().optional(),
+          }),
+        ),
+      })
+      .refine((extract) => Object.keys(extract.fields).length > 0, { message: 'extract needs a field' })
       .optional(),
   })
   .superRefine((step, ctx) => {

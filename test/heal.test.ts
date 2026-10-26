@@ -53,6 +53,14 @@ class FakePage implements ReplayPage {
     return this.text;
   }
 
+  async extract() {
+    return { rows: [], limit: 200, truncated: false };
+  }
+
+  async evalExpr(): Promise<string> {
+    throw new Error('eval was not expected');
+  }
+
   async queryCss(): Promise<number[]> {
     return [];
   }

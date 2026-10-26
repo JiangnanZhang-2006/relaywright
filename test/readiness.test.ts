@@ -15,6 +15,8 @@ function control(partial: Partial<BrowserControl> & Pick<BrowserControl, 'browse
     status: async () => ({ pid: process.pid, uptime: 0.1, browser: partial.browserState() }),
     navigate: fail,
     snapshot: fail,
+    extract: fail,
+    evalExpr: fail,
     act: async () => {
       throw new RelayError('stale_ref', 'Unknown ref e9. Take a new snapshot.');
     },
@@ -54,6 +56,11 @@ function control(partial: Partial<BrowserControl> & Pick<BrowserControl, 'browse
     privacyList: () => ({ identity: null, self: [] }),
     privacyCheck: () => ({ identity: null, lines: [], counts: { self: 0, others: 0, candidates: 0 } }),
     privacyMark: fail,
+    attach: fail,
+    detach: fail,
+    requestAccess: fail,
+    listForeignTabs: fail,
+    adoptTab: fail,
     tabs: async () => ({ tabs: [], text: '' }),
     ...partial,
     skillPatch: partial.skillPatch ?? fail,

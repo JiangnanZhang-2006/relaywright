@@ -5,7 +5,12 @@ import { tailAudit, verifyAudit } from '../audit/log.js';
 import { formatHealConfig, healKeySet, readHealConfig, writeHealConfig } from '../healer/config.js';
 import { runSkillWithHeal } from '../healer/drive.js';
 import { errorText, packageVersion, readTextFile } from '../config/paths.js';
+import { EVAL_DISABLED_MESSAGE, setEvalEnabled } from '../config/runtime.js';
+import { parseExtractField } from '../perception/extract.js';
 import { normalizeActArgs } from './act-args.js';
+import { formatDoctor, runDoctor } from './doctor.js';
+import { maybePrintInitHint } from './hint.js';
+import { formatInit, runInit } from './init.js';
 import { issuesText, type PageBody } from '../protocol.js';
 import { formatDeidentified } from '../privacy/redactor.js';
 import { formatRunReport, formatSkillList, formatTrace } from '../skills/format.js';
@@ -13,21 +18,26 @@ import { CheckSchema, type CheckInput } from '../skills/schema.js';
 import { z } from 'zod';
 import {
   act,
+  adoptTab,
+  attachBrowser,
   browserTabs,
   clearTrace,
   daemonMismatchLine,
+  detachBrowser,
   download,
   type DaemonStatus,
   ensureDaemon,
   findHealthyDaemon,
   getSnapshot,
   getTrace,
+  listForeignTabs,
   listIdentities,
   listSkills,
   navigate,
   parseHttpUrl,
   printPdf,
   readStatus,
+  requestAccess,
   restartDaemon,
   revokeIdentity,
   patchSkill,
@@ -38,7 +48,13 @@ import {
   privacyConfirm,
   privacyList,
   privacyMode,
+  deleteState,
+  evalInPage,
+  extractPage,
+  getState,
+  listState,
   privacyReject,
+  putState,
   saveSkill,
   showSkill,
   skillHistory,
@@ -150,6 +166,9 @@ program
   .enablePositionalOptions()
   .showHelpAfterError();
 addJson(program);
+program.hook('preAction', (_thisCommand, actionCommand) => {
+  maybePrintInitHint(actionCommand);
+});
 program.addHelpText(
   'after',
   `
@@ -273,6 +292,53 @@ Examples:
       `daemon: running\n${statusText(status, info.port, info.version)}`,
       statusJson(status, info.port, info.version, info.startedAt),
     );
+  });
+});
+
+addJson(
+  daemon
+    .command('attach')
+    .description('Attach the daemon to an existing Chrome. Choose one of --auto, --cdp-url, or --user-data-dir.')
+    .option('--auto', 'read DevToolsActivePort from the default Chrome profile')
+    .option('--cdp-url <url>', 'ws(s) URL, or an http(s) base that exposes /json/version')
+    .option('--user-data-dir <dir>', 'profile directory that contains DevToolsActivePort')
+    .addHelpText(
+      'after',
+      `
+Chrome shows an allow dialog. The daemon waits up to 60s.
+Examples:
+  relaywright daemon attach --auto
+  relaywright daemon attach --user-data-dir "%LOCALAPPDATA%\\Google\\Chrome\\User Data"
+  relaywright daemon attach --cdp-url ws://127.0.0.1:9222/devtools/browser/id
+`,
+    ),
+).action(function (this: Command) {
+  const command = this;
+  return guard(command, async () => {
+    const auto = command.getOptionValue('auto') === true;
+    const cdpUrl = command.getOptionValue('cdpUrl') as string | undefined;
+    const userDataDir = command.getOptionValue('userDataDir') as string | undefined;
+    const result = await attachBrowser({ auto, cdpUrl, userDataDir });
+    emit(command, `attached ${result.mode} (${result.endpoint_kind})`, result);
+  });
+});
+
+addJson(
+  daemon
+    .command('detach')
+    .description('Disconnect from an attached Chrome. The browser stays open.')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright daemon detach
+`,
+    ),
+).action(function (this: Command) {
+  const command = this;
+  return guard(command, async () => {
+    const result = await detachBrowser();
+    emit(command, 'detached', result);
   });
 });
 
@@ -598,6 +664,61 @@ Examples:
     const page = await browserTabs({ action: 'new', ...(url ? { url: parseHttpUrl(url) } : {}) });
     if (!('snapshot' in page)) throw new Error('Expected a page snapshot');
     emit(command, formatPage(page), page);
+  });
+});
+
+addJson(
+  tabs
+    .command('adopt')
+    .description('Show tabs that were already open in an attached Chrome, or adopt one by index. Not available to the model.')
+    .option('--index <n>', '1-based index from the user-tab list', (value) => parseStepFlag('index', value))
+    .addHelpText(
+      'after',
+      `
+Without --index this prints the person's tabs and changes nothing.
+Examples:
+  relaywright tabs adopt
+  relaywright tabs adopt --index 1
+`,
+    ),
+).action(function (this: Command) {
+  const command = this;
+  return guard(command, async () => {
+    const index = command.getOptionValue('index') as number | undefined;
+    if (index === undefined) {
+      const listed = await listForeignTabs();
+      const hint = listed.tabs.length === 0 ? 'No user tabs to adopt.' : 'Run relaywright tabs adopt --index <n> to adopt one.';
+      emit(command, `${listed.text}\n${hint}`, listed);
+      return;
+    }
+    const page = await adoptTab(index);
+    emit(command, formatPage(page), page);
+  });
+});
+
+const access = program.command('access').description('Ask the person at this computer to allow a domain');
+addJson(access);
+
+addJson(
+  access
+    .command('request')
+    .description('Show the allow dialog for one registrable domain. The model cannot approve this itself.')
+    .argument('<domain>', 'registrable domain, such as example.com')
+    .option('--reason <text>', 'short reason shown in the dialog')
+    .addHelpText(
+      'after',
+      `
+Buttons are 本次允许, 始终允许, and 拒绝. No answer within 60s is a deny.
+Examples:
+  relaywright access request example.com --reason "open the course site"
+`,
+    ),
+).action(function (this: Command, domain: string) {
+  const command = this;
+  return guard(command, async () => {
+    const reason = command.getOptionValue('reason') as string | undefined;
+    const result = await requestAccess(domain, reason);
+    emit(command, `${result.domain} ${result.decision}`, result);
   });
 });
 
@@ -1232,6 +1353,45 @@ Examples:
   });
 });
 
+function splitStatePath(spec: string): { ns: string; key: string } {
+  const index = spec.indexOf('/');
+  if (index <= 0 || index === spec.length - 1 || spec.includes('/', index + 1)) {
+    throw new Error(`Expected ns/key, got ${JSON.stringify(spec)}\nExample: relaywright state get notes/last`);
+  }
+  return { ns: spec.slice(0, index), key: spec.slice(index + 1) };
+}
+
+function parseJsonArg(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new Error('Value must be JSON. Example: relaywright state set notes/last "\\"hello\\""');
+  }
+}
+
+async function readStdinJson(): Promise<unknown> {
+  if (process.stdin.isTTY) throw new Error('Pass JSON as an argument, or pipe it on stdin');
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  const text = Buffer.concat(chunks).toString('utf8').replace(/^\uFEFF/, '').trim();
+  if (!text) throw new Error('Stdin was empty');
+  return parseJsonArg(text);
+}
+
+function parseLimit(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 2000) throw new Error('--limit must be an integer from 1 to 2000');
+  return parsed;
+}
+
+function parseOptionalVersion(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) throw new Error('--if-version must be a non-negative integer');
+  return parsed;
+}
+
 function parsePrivacyState(state: string): boolean {
   const normalized = state.trim().toLowerCase();
   if (normalized === 'on') return true;
@@ -1255,6 +1415,22 @@ async function readStdinValue(): Promise<string> {
 
 function collect(value: string, previous: string[] = []): string[] {
   return [...previous, value];
+}
+
+function onOff(value: string | undefined, flag: string): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (value === 'on') return true;
+  if (value === 'off') return false;
+  throw new Error(`${flag} must be on or off`);
+}
+
+function argvBool(name: string): boolean | undefined {
+  let value: boolean | undefined;
+  for (const arg of process.argv) {
+    if (arg === `--${name}`) value = true;
+    if (arg === `--no-${name}`) value = false;
+  }
+  return value;
 }
 
 function parseStepFlag(flag: string, value: string): number {
@@ -1303,6 +1479,272 @@ function readChecks(path: string): CheckInput[] {
   if (!parsed.success) throw new Error(issuesText(parsed.error));
   return parsed.data;
 }
+
+addJson(
+  program
+    .command('extract')
+    .description('Read rows from the current page. Password fields come back as ‹redacted›.')
+    .requiredOption('--root <css>', 'selector matched once per row')
+    .option('--field <spec>', 'name=selector[@attr][*], repeatable', collect, [])
+    .option('--limit <n>', 'max rows (default 200, max 2000)')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright open https://example.com
+  relaywright extract --root .row --field title=.title --field tags=.tag* --field link=.link@href
+`,
+    ),
+).action(function (this: Command) {
+  const command = this;
+  return guard(command, async () => {
+    const root = String(command.getOptionValue('root') ?? '');
+    const specs = command.getOptionValue('field') as string[];
+    if (specs.length === 0) throw new Error('Pass at least one --field name=selector[@attr][*]');
+    const fields: Record<string, { selector: string; attr?: string; all?: boolean }> = {};
+    for (const spec of specs) {
+      const field = parseExtractField(spec);
+      if (fields[field.name]) throw new Error(`Duplicate field ${field.name}`);
+      fields[field.name] = {
+        selector: field.selector,
+        ...(field.attr ? { attr: field.attr } : {}),
+        ...(field.all ? { all: true } : {}),
+      };
+    }
+    const limit = parseLimit(command.getOptionValue('limit') as string | undefined);
+    const result = await extractPage({ root_selector: root, fields, ...(limit !== undefined ? { limit } : {}) });
+    emit(command, JSON.stringify(result, null, 2), result);
+  });
+});
+
+addJson(
+  program
+    .command('eval')
+    .description(`Run an async function body in the page. ${EVAL_DISABLED_MESSAGE}`)
+    .argument('<expr>', 'function body; args is the JSON argument array')
+    .option('--arg <json>', 'one JSON argument, repeatable', collect, [])
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright config set eval on
+  relaywright eval "return args[0] + args[1]" --arg 2 --arg 3
+`,
+    ),
+).action(function (this: Command, expr: string) {
+  const command = this;
+  return guard(command, async () => {
+    const args = (command.getOptionValue('arg') as string[]).map((item) => parseJsonArg(item));
+    const result = await evalInPage(expr, args);
+    emit(command, JSON.stringify(result, null, 2), { result });
+  });
+});
+
+const configCmd = program.command('config').description('Local daemon settings');
+addJson(configCmd);
+addJson(
+  configCmd
+    .command('set')
+    .description('Turn a setting on or off')
+    .argument('<key>', 'eval')
+    .argument('<value>', 'on or off')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright config set eval on
+  relaywright config set eval off
+`,
+    ),
+).action(function (this: Command, key: string, value: string) {
+  const command = this;
+  return guard(command, async () => {
+    if (key !== 'eval') throw new Error('Supported setting: eval');
+    const on = parsePrivacyState(value);
+    setEvalEnabled(on);
+    emit(command, `eval ${on ? 'on' : 'off'}`, { eval: on });
+  });
+});
+
+const state = program.command('state').description('JSON values shared by skills and clients');
+addJson(state);
+
+addJson(
+  state
+    .command('set')
+    .description('Write a JSON value. Pass - to read JSON from stdin.')
+    .argument('<ns/key>', 'namespace and key, for example notes/last')
+    .argument('<json>', 'JSON value, or - for stdin')
+    .option('--if-version <n>', 'write only when the current version matches (0 if the key is new)')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright state set notes/last '"hello"'
+  echo {"title":"note"} | relaywright state set notes/row -
+  relaywright state set notes/last '"hello"' --if-version 0
+`,
+    ),
+).action(function (this: Command, spec: string, json: string) {
+  const command = this;
+  return guard(command, async () => {
+    const { ns, key } = splitStatePath(spec);
+    const value = json === '-' ? await readStdinJson() : parseJsonArg(json);
+    const ifVersion = parseOptionalVersion(command.getOptionValue('ifVersion') as string | undefined);
+    const entry = await putState(ns, key, value, ifVersion);
+    emit(command, `${ns}/${key} version ${entry.version}`, { ns, key, version: entry.version, updated_at: entry.updated_at });
+  });
+});
+
+addJson(
+  state
+    .command('get')
+    .description('Read one JSON value and its version')
+    .argument('<ns/key>', 'namespace and key')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright state get notes/last
+  relaywright state get notes/last --json
+`,
+    ),
+).action(function (this: Command, spec: string) {
+  const command = this;
+  return guard(command, async () => {
+    const { ns, key } = splitStatePath(spec);
+    const entry = await getState(ns, key);
+    const text = typeof entry.value === 'string' ? entry.value : JSON.stringify(entry.value);
+    emit(command, `${text}\nversion ${entry.version}`, entry);
+  });
+});
+
+addJson(
+  state
+    .command('list')
+    .description('List keys and versions in a namespace')
+    .argument('<ns>', 'namespace')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright state list notes
+`,
+    ),
+).action(function (this: Command, ns: string) {
+  const command = this;
+  return guard(command, async () => {
+    const listed = await listState(ns);
+    const text = listed.keys.length === 0 ? '(empty)' : listed.keys.map((item) => `${item.key}  version ${item.version}`).join('\n');
+    emit(command, text, listed);
+  });
+});
+
+addJson(
+  state
+    .command('rm')
+    .description('Delete one key')
+    .argument('<ns/key>', 'namespace and key')
+    .option('--if-version <n>', 'delete only when the current version matches')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright state rm notes/last
+`,
+    ),
+).action(function (this: Command, spec: string) {
+  const command = this;
+  return guard(command, async () => {
+    const { ns, key } = splitStatePath(spec);
+    const ifVersion = parseOptionalVersion(command.getOptionValue('ifVersion') as string | undefined);
+    const removed = await deleteState(ns, key, ifVersion);
+    emit(command, `removed ${ns}/${key} (version ${removed.version})`, { ns, key, version: removed.version });
+  });
+});
+
+addJson(
+  program
+    .command('init')
+    .description('Choose browser mode, privacy, eval, and heal settings. Safe to run again.')
+    .option('--yes', 'accept the current value for every question that has no flag')
+    .option('--browser <mode>', 'own, attach, or cdp')
+    .option('--cdp-url <url>', 'endpoint used when --browser is cdp')
+    .option('--allow-domains <list>', 'comma-separated registrable domains')
+    .option('--headless', "run relaywright's own Chrome headless")
+    .option('--downloads <dir>', 'directory for saved files')
+    .option('--privacy <on|off>', 'model redaction')
+    .option('--eval <on|off>', 'page eval')
+    .option('--notify <on|off>', 'desktop notifications')
+    .option('--heal-base-url <url>', 'self-heal API base url')
+    .option('--heal-model <model>', 'self-heal model')
+    .option('--api-key-env <name>', 'env var that holds the heal API key')
+    .option('--test-llm', 'send one tiny heal request and print token counts')
+    .option('--write-mcp <target>', 'write a client config; only cursor is supported')
+    .option('--self <kind=value>', 'register a self value without printing it', collect, [])
+    .addHelpText(
+      'after',
+      `
+Non-interactive when stdin is not a TTY, or with --yes. A TTY asks; the default for test-connect is no.
+Examples:
+  relaywright init --yes --browser own --privacy off --eval off --notify off
+  relaywright init --browser attach --allow-domains example.com
+  relaywright init --write-mcp cursor
+`,
+    ),
+).action(function (this: Command) {
+  const command = this;
+  return guard(command, async () => {
+    const writeMcp = command.getOptionValue('writeMcp') as string | undefined;
+    if (writeMcp !== undefined && writeMcp !== 'cursor') throw new Error('--write-mcp only supports cursor');
+    const browser = command.getOptionValue('browser') as string | undefined;
+    if (browser !== undefined && browser !== 'own' && browser !== 'attach' && browser !== 'cdp') {
+      throw new Error('--browser must be own, attach, or cdp');
+    }
+    const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+    const result = await runInit({
+      yes: command.getOptionValue('yes') === true || !tty,
+      tty,
+      ...(browser === 'own' || browser === 'attach' || browser === 'cdp' ? { browser } : {}),
+      cdpUrl: command.getOptionValue('cdpUrl') as string | undefined,
+      allowDomains: command.getOptionValue('allowDomains') as string | undefined,
+      headless: argvBool('headless'),
+      downloads: command.getOptionValue('downloads') as string | undefined,
+      privacy: onOff(command.getOptionValue('privacy') as string | undefined, '--privacy'),
+      eval: onOff(command.getOptionValue('eval') as string | undefined, '--eval'),
+      notify: onOff(command.getOptionValue('notify') as string | undefined, '--notify'),
+      healBaseUrl: command.getOptionValue('healBaseUrl') as string | undefined,
+      healModel: command.getOptionValue('healModel') as string | undefined,
+      apiKeyEnv: command.getOptionValue('apiKeyEnv') as string | undefined,
+      testLlm: command.getOptionValue('testLlm') === true,
+      writeMcp: writeMcp === 'cursor',
+      self: (command.getOptionValue('self') as string[] | undefined) ?? [],
+    });
+    emit(command, formatInit(result), result);
+    if (result.connectError) process.exitCode = 1;
+  });
+});
+
+addJson(
+  program
+    .command('doctor')
+    .description('Check the local setup. Does not connect to a browser.')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright doctor
+  relaywright doctor --json
+`,
+    ),
+).action(function (this: Command) {
+  const command = this;
+  return guard(command, async () => {
+    const report = await runDoctor();
+    emit(command, formatDoctor(report.checks), report);
+    if (!report.ok) process.exitCode = 1;
+  });
+});
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   process.stderr.write(`Error: ${errorText(err)}\n`);

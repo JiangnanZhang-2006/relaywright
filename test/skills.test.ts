@@ -442,6 +442,10 @@ function fakeReplay(options: { text: string; begin: ReplayDownload | null }): { 
     }),
     currentUrl: () => PAGE,
     pageText: async () => options.text,
+    extract: async () => ({ rows: [], limit: 200, truncated: false }),
+    evalExpr: async () => {
+      throw new Error('eval was not expected');
+    },
     queryCss: async () => [],
     hasVisiblePassword: async () => false,
     isPasswordBackend: async () => false,

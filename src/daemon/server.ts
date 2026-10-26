@@ -5,12 +5,30 @@ import type { Server } from 'node:http';
 import { z } from 'zod';
 import { errorText, logDaemon, packageVersion } from '../config/paths.js';
 import { RelayError, relayStatus, type RelayErrorCode } from '../errors.js';
+import { stateDelete, stateGet, stateList, statePut } from '../state/store.js';
+import { EVAL_DISABLED_MESSAGE, evalEnabled } from '../config/runtime.js';
+import { EXTRACT_MAX_LIMIT } from '../perception/extract.js';
 import { ActSchema, DownloadSchema, HandoffStartSchema, HandoffWaitSchema, IdentitySaveSchema, issuesText, PdfSchema, SnapshotQuery, TabsCommandSchema, WaitSchema } from '../protocol.js';
 import type { BrowserControl } from '../session/browser.js';
 import { RunSkillInputSchema, SaveSkillInputSchema, SkillPatchInputSchema } from '../skills/schema.js';
 
 const NavigateBody = z.object({
   url: z.string().min(1),
+});
+
+const AttachBody = z.object({
+  auto: z.boolean().optional(),
+  cdp_url: z.string().min(1).optional(),
+  user_data_dir: z.string().min(1).optional(),
+});
+
+const AccessBody = z.object({
+  domain: z.string().min(1),
+  reason: z.string().max(500).optional(),
+});
+
+const AdoptBody = z.object({
+  index: z.number().int().positive(),
 });
 
 const RollbackBody = z.object({
@@ -41,6 +59,41 @@ const PrivacyMarkBody = z.object({
   ref: z.string().min(1).optional(),
   value: z.string().min(1).optional(),
   as: PrivacyKind,
+});
+
+const StatePutBody = z.object({
+  ns: z.string().min(1),
+  key: z.string().min(1),
+  value: z.unknown(),
+  if_version: z.number().int().nonnegative().optional(),
+});
+
+const StateKeyBody = z.object({
+  ns: z.string().min(1),
+  key: z.string().min(1),
+  if_version: z.number().int().nonnegative().optional(),
+});
+
+const StateListBody = z.object({
+  ns: z.string().min(1),
+});
+
+const ExtractBody = z.object({
+  root_selector: z.string().min(1),
+  fields: z.record(
+    z.string(),
+    z.object({
+      selector: z.string().min(1),
+      attr: z.string().min(1).optional(),
+      all: z.boolean().optional(),
+    }),
+  ),
+  limit: z.number().int().min(1).max(EXTRACT_MAX_LIMIT).optional(),
+});
+
+const EvalBody = z.object({
+  expr: z.string().min(1),
+  args: z.array(z.unknown()).optional(),
 });
 
 export interface AppOptions {
@@ -366,6 +419,115 @@ export function createApp(options: AppOptions): Hono {
     }
   });
 
+  app.post('/extract', async (c) => {
+    try {
+      const body = ExtractBody.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return show(c, await options.session.extract(body.data));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  app.post('/eval', async (c) => {
+    try {
+      if (!evalEnabled()) throw new RelayError('eval_disabled', EVAL_DISABLED_MESSAGE);
+      const body = EvalBody.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return show(c, { result: await options.session.evalExpr(body.data.expr, body.data.args ?? []) });
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  app.post('/state/put', async (c) => {
+    try {
+      const body = StatePutBody.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      const entry = await statePut(body.data.ns, body.data.key, body.data.value, body.data.if_version);
+      return show(c, { version: entry.version, updated_at: entry.updated_at });
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  app.post('/state/get', async (c) => {
+    try {
+      const body = StateKeyBody.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      const entry = await stateGet(body.data.ns, body.data.key);
+      return show(c, entry);
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  app.post('/state/list', async (c) => {
+    try {
+      const body = StateListBody.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return show(c, { keys: await stateList(body.data.ns) });
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  app.post('/state/delete', async (c) => {
+    try {
+      const body = StateKeyBody.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return show(c, await stateDelete(body.data.ns, body.data.key, body.data.if_version));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  app.post('/browser/attach', async (c) => {
+    try {
+      const body = AttachBody.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return show(c, await options.session.attach({ auto: body.data.auto, cdpUrl: body.data.cdp_url, userDataDir: body.data.user_data_dir }));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  app.post('/browser/detach', async (c) => {
+    try {
+      return show(c, await options.session.detach());
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  app.post('/access/request', async (c) => {
+    try {
+      const body = AccessBody.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return show(c, await options.session.requestAccess(body.data.domain, body.data.reason));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  app.get('/tabs/foreign', async (c) => {
+    try {
+      return show(c, await options.session.listForeignTabs());
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  app.post('/tabs/adopt', async (c) => {
+    try {
+      const body = AdoptBody.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return show(c, await options.session.adoptTab(body.data.index));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
   app.post('/shutdown', async (c) => {
     let closeBrowser = false;
     const text = await c.req.text();
@@ -457,7 +619,17 @@ function browserError(c: Context, err: unknown, redact: (message: string) => str
   if (err instanceof HttpError) return jsonError(c, err.status, err.code, redact(err.message));
   if (err instanceof RelayError) {
     logDaemon(`${err.code}: ${err.message}`);
-    return jsonError(c, relayStatus(err.code), err.code, redact(err.message));
+    const version = err.details.version;
+    return c.json(
+      {
+        error: {
+          code: err.code,
+          message: redact(err.message),
+          ...(typeof version === 'number' ? { version } : {}),
+        },
+      },
+      relayStatus(err.code),
+    );
   }
   const timeout = err instanceof Error && err.name === 'TimeoutError';
   const message = errorText(err);

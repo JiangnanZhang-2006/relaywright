@@ -2,12 +2,15 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ActInput } from '../actions/perform.js';
-import { downloadsDir } from '../config/paths.js';
+import { relaywrightHome } from '../config/paths.js';
+import { activeDownloadsDir } from '../config/runtime.js';
 import { RelayError } from '../errors.js';
 import type { ModelItem } from '../perception/snapshot.js';
 import { assertSaveAs } from '../session/downloads.js';
 import { pageNeedsLogin } from '../session/login.js';
 import type { ReplayPage } from '../session/page.js';
+import { parseStateValue, statePut } from '../state/store.js';
+import { resolveStateText, resolveStateValue } from '../state/template.js';
 import { chooseLocator, type LocatorKind } from './locate.js';
 import {
   stepTarget,
@@ -109,15 +112,23 @@ export async function runSkill(
   options?: { startUrl?: string; outDir?: string; waitForHuman?: RunHooks['waitForHuman'] },
   hooks?: RunHooks,
 ): Promise<SkillRunResult> {
-  const startUrl = options?.startUrl ?? skill.start_url;
-  let last = await runSkillOnce(page, skill, params, options, hooks);
+  const bound = bindSkill(skill, params);
+  let startUrl: string;
+  try {
+    startUrl = await resolveStateText(options?.startUrl ?? bound.start_url);
+  } catch (err) {
+    // A missing state value is a broken step. The previous page must not be treated as a login wall.
+    return failedBeforeSteps(bound, params, reasonOf(err), Date.now());
+  }
+  const nextOptions = { ...options, startUrl };
+  let last = await runSkillOnce(page, skill, params, nextOptions, hooks);
   if (!(await comboNeedsHuman(page, startUrl, last))) return last;
   const message = last.message ?? 'Login required';
   if (!options?.waitForHuman) return humanResult(last, message);
   const host = hostOf(page.currentUrl());
   const decision = await options.waitForHuman(`skill ${skill.name}: 登录 ${host}`);
   if (decision !== 'done') return humanResult(last, message);
-  last = await runSkillOnce(page, skill, params, options, hooks);
+  last = await runSkillOnce(page, skill, params, nextOptions, hooks);
   if (await comboNeedsHuman(page, startUrl, last)) return humanResult(last, last.message ?? message);
   return last;
 }
@@ -170,9 +181,14 @@ async function runSkillOnce(
 ): Promise<SkillRunResult> {
   const bound = bindSkill(skill, params);
   const outDir = options?.outDir ?? runOutputDir(skill.name);
-  const startUrl = options?.startUrl ?? bound.start_url;
   await mkdir(outDir, { recursive: true });
   const started = Date.now();
+  let startUrl: string;
+  try {
+    startUrl = await resolveStateText(options?.startUrl ?? bound.start_url);
+  } catch (err) {
+    return failedBeforeSteps(bound, params, reasonOf(err), started);
+  }
   await page.navigate(startUrl);
   if (await loginGate(page, startUrl)) {
     return {
@@ -183,7 +199,7 @@ async function runSkillOnce(
       duration_ms: Date.now() - started,
     };
   }
-  const played = await driveSteps(page, bound.steps, outDir, 'undecided', hooks, params, 0);
+  const played = await driveSteps(page, bound.steps, outDir, 'undecided', hooks, params, 0, {});
   const outcome = played.outcome === 'undecided' ? 'ok' : played.outcome;
   return {
     outcome,
@@ -206,6 +222,7 @@ async function driveSteps(
   hooks: RunHooks | undefined,
   params: Record<string, string>,
   startIndex: number,
+  memory: Record<string, unknown> = {},
 ): Promise<{
   outcome: Running;
   message?: string;
@@ -215,6 +232,7 @@ async function driveSteps(
   warnings: string[];
   halt: boolean;
 }> {
+  const extractSteps = priorExtractSteps(steps, startIndex);
   let outcome: Running = prior;
   let message: string | undefined;
   let broken: BrokenReport | undefined;
@@ -231,7 +249,7 @@ async function driveSteps(
       done.push({ id: step.id, status: 'skipped', ms: 0 });
       continue;
     }
-    const result = await runStep(page, step, outDir);
+    const result = await runStep(page, step, outDir, memory, extractSteps);
     done.push({
       id: step.id,
       status: result.status,
@@ -279,26 +297,64 @@ export function bindSkill(skill: Skill, params: Record<string, string>): Skill {
   };
 }
 
+function priorExtractSteps(steps: readonly SkillStep[], startIndex: number): Record<string, string> {
+  const hints: Record<string, string> = {};
+  for (let index = 0; index < startIndex; index += 1) {
+    const step = steps[index];
+    if (step?.extract) hints[step.extract.save_as] = step.id;
+  }
+  return hints;
+}
+
 function shouldRun(step: SkillStep, outcome: Running): boolean {
   if (outcome === 'broken' || outcome === 'needs_human') return false;
   if (step.when_outcome) return outcome === step.when_outcome;
   return outcome === 'undecided' || outcome === 'ok';
 }
 
-async function runStep(page: ReplayPage, step: SkillStep, outDir: string): Promise<OneStep> {
+async function runStep(
+  page: ReplayPage,
+  step: SkillStep,
+  outDir: string,
+  memory: Record<string, unknown>,
+  extractSteps: Record<string, string>,
+): Promise<OneStep> {
+  let current = step;
   try {
-    if (step.goto) {
-      await page.navigate(step.goto.url);
+    current = await resolveStateValue(step, relaywrightHome(), { extract: memory, extractSteps });
+    if (current.extract) return await runExtract(page, current, memory);
+    if (current.state_set) return await runStateSet(current);
+    if (current.goto) {
+      await page.navigate(current.goto.url);
       return { status: 'done' };
     }
-    if (step.expect) return await runExpect(page, step);
-    if (step.wait) return await runWait(page, step);
-    if (step.download) return await runDownload(page, step, outDir);
-    if (step.pdf) return await runPdf(page, step, outDir);
-    return await runAct(page, step);
+    if (current.expect) return await runExpect(page, current);
+    if (current.wait) return await runWait(page, current);
+    if (current.download) return await runDownload(page, current, outDir);
+    if (current.pdf) return await runPdf(page, current, outDir);
+    return await runAct(page, current);
   } catch (err) {
-    return { status: 'failed', broken: await report(page, step, reasonOf(err)) };
+    return { status: 'failed', broken: await report(page, current, reasonOf(err)) };
   }
+}
+
+async function runExtract(page: ReplayPage, step: SkillStep, memory: Record<string, unknown>): Promise<OneStep> {
+  const action = step.extract;
+  if (!action) return { status: 'done' };
+  const result = await page.extract({
+    root_selector: action.root_selector,
+    fields: action.fields,
+    ...(action.limit !== undefined ? { limit: action.limit } : {}),
+  });
+  memory[action.save_as] = result.rows;
+  return { status: 'done' };
+}
+
+async function runStateSet(step: SkillStep): Promise<OneStep> {
+  const action = step.state_set;
+  if (!action) return { status: 'done' };
+  await statePut(action.ns, action.key, parseStateValue(action.value));
+  return { status: 'done' };
 }
 
 async function runDownload(page: ReplayPage, step: SkillStep, outDir: string): Promise<OneStep> {
@@ -506,9 +562,24 @@ function hostOf(url: string): string {
 }
 
 function reasonOf(err: unknown): string {
-  if (err instanceof RelayError) return err.code;
+  if (err instanceof RelayError) {
+    if (err.code === 'state_missing' || err.code === 'extract_missing' || err.code === 'domain_not_allowed') {
+      return `${err.code}: ${err.message}`;
+    }
+    return err.code;
+  }
   const message = err instanceof Error ? err.message.trim() : '';
   return message ? `action_failed: ${message}` : 'action_failed';
+}
+
+function failedBeforeSteps(skill: Skill, params: Record<string, string>, reason: string, started: number): SkillRunResult {
+  return {
+    outcome: 'broken',
+    params,
+    steps: skill.steps.map((step) => ({ id: step.id, status: 'skipped' as const, ms: 0 })),
+    duration_ms: Date.now() - started,
+    broken: { step_id: 'start', reason, excerpt: '' },
+  };
 }
 
 function bindStep(step: SkillStep, render: (value: string) => string): SkillStep {
@@ -567,7 +638,37 @@ function bindStep(step: SkillStep, render: (value: string) => string): SkillStep
       ...(step.pdf.landscape !== undefined ? { landscape: step.pdf.landscape } : {}),
     };
   }
+  if (step.state_set) {
+    next.state_set = {
+      ns: render(step.state_set.ns),
+      key: render(step.state_set.key),
+      value: render(step.state_set.value),
+    };
+  }
+  if (step.extract) {
+    next.extract = {
+      root_selector: render(step.extract.root_selector),
+      save_as: render(step.extract.save_as),
+      ...(step.extract.limit !== undefined ? { limit: step.extract.limit } : {}),
+      fields: bindExtractFields(step.extract.fields, render),
+    };
+  }
   return next;
+}
+
+function bindExtractFields(
+  fields: NonNullable<SkillStep['extract']>['fields'],
+  render: (value: string) => string,
+): NonNullable<SkillStep['extract']>['fields'] {
+  const out: NonNullable<SkillStep['extract']>['fields'] = {};
+  for (const [name, field] of Object.entries(fields)) {
+    out[name] = {
+      selector: render(field.selector),
+      ...(field.attr !== undefined ? { attr: render(field.attr) } : {}),
+      ...(field.all !== undefined ? { all: field.all } : {}),
+    };
+  }
+  return out;
 }
 
 function bindTarget(target: SkillTarget, render: (value: string) => string): SkillTarget {
@@ -596,7 +697,7 @@ function artifactOf(stepId: string, file: { path: string; bytes: number; sha256:
 
 /** One directory for every combo in a matrix run, so rendered names stay comparable. */
 export function runOutputDir(skillName: string, at = new Date()): string {
-  const root = join(downloadsDir(), skillName);
+  const root = join(activeDownloadsDir(), skillName);
   const stamp = runStamp(at);
   let dir = join(root, stamp);
   let extra = 2;

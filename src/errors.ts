@@ -14,18 +14,29 @@ export const RELAY_ERROR_CODES = [
   'pdf_unsupported',
   'human_required',
   'human_in_control',
+  'version_conflict',
+  'not_found',
+  'state_missing',
+  'extract_missing',
+  'eval_disabled',
+  'domain_not_allowed',
+  'attach_timeout',
+  'attach_failed',
 ] as const;
 
 export type RelayErrorCode = (typeof RELAY_ERROR_CODES)[number];
 
 export class RelayError extends Error {
   readonly name = 'RelayError';
+  readonly details: Record<string, unknown>;
 
   constructor(
     readonly code: RelayErrorCode,
     message: string,
+    details?: Record<string, unknown>,
   ) {
     super(message);
+    this.details = details ?? {};
   }
 }
 
@@ -35,15 +46,23 @@ export function relayStatus(code: RelayErrorCode): 400 | 404 | 409 | 423 | 500 |
     case 'occluded':
     case 'skill_exists':
     case 'no_download':
+    case 'version_conflict':
       return 409;
     case 'no_such_option':
     case 'bad_request':
     case 'bad_params':
     case 'param_unused':
+    case 'state_missing':
+    case 'extract_missing':
+    case 'eval_disabled':
+    case 'domain_not_allowed':
+    case 'attach_failed':
       return 400;
     case 'skill_not_found':
+    case 'not_found':
       return 404;
     case 'timeout':
+    case 'attach_timeout':
       return 504;
     case 'browser_not_ready':
       return 503;

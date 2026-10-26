@@ -3,6 +3,8 @@ import type { CDPSession, Page } from 'puppeteer-core';
 import { RelayError } from '../errors.js';
 import { performAction, type ActInput } from '../actions/perform.js';
 import { loadDocument } from '../perception/capture.js';
+import { EXTRACT_SOURCE } from '../perception/extract-script.js';
+import { normalizeExtract, type ExtractInput, type ExtractResult, type ExtractRow } from '../perception/extract.js';
 import { BROWSER_HELPERS } from '../perception/inspect-script.js';
 import { diffLines } from '../perception/diff.js';
 import { RefRegistry } from '../perception/registry.js';
@@ -87,6 +89,9 @@ export interface ReplayPage {
   capture(): Promise<PageModel>;
   currentUrl(): string;
   pageText(): Promise<string>;
+  extract(input: ExtractInput): Promise<ExtractResult>;
+  /** Returns the JSON text of an eval result. The caller audits and enforces the size cap. */
+  evalExpr(expr: string, args: unknown[]): Promise<string>;
   queryCss(css: string, frame?: FrameRef): Promise<number[]>;
   hasVisiblePassword(): Promise<boolean>;
   isPasswordBackend(backend: number): Promise<boolean>;
@@ -200,6 +205,51 @@ export class PageController {
 
   pageText(): Promise<string> {
     return readPageText(this.page);
+  }
+
+  async extract(input: ExtractInput): Promise<ExtractResult> {
+    const request = normalizeExtract(input);
+    try {
+      const raw = await bounded(
+        this.page.evaluate(
+          (source: string, payload: ExtractInput & { limit: number }) => {
+            const fn = new Function('request', source) as (request: ExtractInput & { limit: number }) => {
+              rows: ExtractRow[];
+              truncated: boolean;
+            };
+            return fn(payload);
+          },
+          EXTRACT_SOURCE,
+          request,
+        ),
+        10_000,
+        'extract',
+      );
+      return { rows: raw.rows, limit: request.limit, truncated: Boolean(raw.truncated) };
+    } catch (err) {
+      if (err instanceof RelayError) throw err;
+      const message = err instanceof Error ? err.message : 'Extract failed';
+      throw new RelayError('bad_request', message.includes('Invalid selector') ? message : `Extract failed: ${message}`);
+    }
+  }
+
+  async evalExpr(expr: string, args: unknown[]): Promise<string> {
+    return bounded(
+      this.page.evaluate((input: { expr: string; args: unknown[] }) => {
+        const ctor = globalThis.eval('(async function(){}).constructor') as new (
+          names: string,
+          source: string,
+        ) => (args: unknown[]) => Promise<unknown>;
+        const fn = new ctor('args', input.expr);
+        return fn(input.args).then((value) => {
+          const text = JSON.stringify(value);
+          if (typeof text !== 'string') throw new Error('EVAL_NOT_JSON');
+          return text;
+        });
+      }, { expr, args }),
+      10_000,
+      'eval',
+    );
   }
 
   /** Role and name come from the last snapshot model; CSS is read from the live node before it can disappear. */

@@ -3,7 +3,8 @@ import { createReadStream, existsSync, mkdirSync, readdirSync, statSync, writeFi
 import { copyFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import type { Browser, CDPSession } from 'puppeteer-core';
-import { downloadsDir, downloadsStagingDir, errorText, logDaemon, readTextFile } from '../config/paths.js';
+import { downloadsStagingDir, errorText, logDaemon, readTextFile } from '../config/paths.js';
+import { activeDownloadsDir } from '../config/runtime.js';
 import { RelayError } from '../errors.js';
 import type { DownloadInfo } from '../protocol.js';
 
@@ -211,16 +212,19 @@ export class DownloadManager {
 
   private constructor(private readonly session: CDPSession) {}
 
-  static async start(browser: Browser): Promise<DownloadManager> {
+  static async start(browser: Browser, options?: { applyBehavior?: boolean }): Promise<DownloadManager> {
     mkdirSync(downloadsStagingDir(), { recursive: true });
     const session = await browser.target().createCDPSession();
     const manager = new DownloadManager(session);
     // allowAndName stores the bytes as <staging>/<guid>, not the suggested name.
-    await session.send('Browser.setDownloadBehavior', {
-      behavior: 'allowAndName',
-      downloadPath: downloadsStagingDir(),
-      eventsEnabled: true,
-    });
+    // Skip it when attached: the command applies to the whole profile, not one tab.
+    if (options?.applyBehavior !== false) {
+      await session.send('Browser.setDownloadBehavior', {
+        behavior: 'allowAndName',
+        downloadPath: downloadsStagingDir(),
+        eventsEnabled: true,
+      });
+    }
     session.on('Browser.downloadWillBegin', (event) => manager.onBegin(event));
     session.on('Browser.downloadProgress', (event) => manager.onProgress(event));
     return manager;
@@ -419,7 +423,7 @@ export class DownloadManager {
         return;
       }
       const published = await this.finalize(item, {
-        dir: downloadsDir(),
+        dir: activeDownloadsDir(),
         fileName: item.suggestedFilename,
         dedupe: true,
       });

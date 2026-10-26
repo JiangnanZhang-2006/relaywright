@@ -1,9 +1,14 @@
+import { createHash } from 'node:crypto';
 import { unlink } from 'node:fs/promises';
 import type { Page } from 'puppeteer-core';
 import type { Browser } from 'puppeteer-core';
 import { flushAudit, recordAudit } from '../audit/log.js';
 import { resolveBrowserForLaunch, type ResolvedBrowser } from '../browser/resolve.js';
-import { defaultProfileDir, downloadsDir, ensureHomeLayout, errorText, logDaemon } from '../config/paths.js';
+import { defaultProfileDir, ensureHomeLayout, errorText, logDaemon } from '../config/paths.js';
+import { activeDownloadsDir, EVAL_DISABLED_MESSAGE, EVAL_MAX_BYTES, evalEnabled, headlessEnabled } from '../config/runtime.js';
+import { notify } from '../notify.js';
+import { readGlobalConfig, updateGlobalConfig } from '../privacy/store.js';
+import type { ExtractInput, ExtractResult } from '../perception/extract.js';
 import { browserDownloadingMessage, RelayError, staleTabRefMessage } from '../errors.js';
 import type { SelfKind } from '../privacy/detect.js';
 import { headerCandidatesEvaluator } from '../privacy/header-candidates.js';
@@ -53,6 +58,21 @@ import {
 import { HandoffManager } from './handoff.js';
 import { bounded } from './timeout.js';
 import { IdentityStore } from './identity.js';
+import { domainNotAllowed, navigationDecision, normalizeAllowDomain, readAllowDomains, type BrowserModeName } from './allowlist.js';
+import { askAccess, type AccessDecision } from './access-dialog.js';
+import {
+  ATTACH_ALLOW_HINT,
+  ATTACH_TIMEOUT_MS,
+  ATTACH_TRANSFERS_MESSAGE,
+  attachIsDeferred,
+  connectWebSocket,
+  mapAttachError,
+  resolveAttachRequest,
+  resolveStoredAttach,
+  type EndpointKind,
+  type ResolvedAttach,
+} from './connect.js';
+import { armNavigationGate } from './nav-gate.js';
 import { adoptChrome, HEADLESS_VIEWPORT, launchChrome, type LaunchBrowserRequest } from './launch.js';
 import { HANDOFF_TIMEOUT_MS } from './login.js';
 import { PageController, type ReplayPage } from './page.js';
@@ -72,6 +92,7 @@ export interface BrowserStateView {
   state: BrowserPhase['state'];
   percent?: number;
   message?: string;
+  deferred?: boolean;
 }
 
 export interface BrowserControl {
@@ -79,6 +100,8 @@ export interface BrowserControl {
   status(): Promise<DaemonStatus>;
   navigate(url: string): Promise<PageBody>;
   snapshot(options?: { mode?: 'full' | 'diff'; maxRows?: number }): Promise<PageBody>;
+  extract(input: ExtractInput): Promise<ExtractResult>;
+  evalExpr(expr: string, args?: unknown[]): Promise<unknown>;
   act(input: ActInput): Promise<PageBody>;
   download(input: DownloadInput): Promise<PageBody>;
   pdf(input: PdfInput): Promise<PdfResult>;
@@ -106,6 +129,11 @@ export interface BrowserControl {
   privacyList(identity?: string): PrivacyList;
   privacyCheck(): PrivacyCheck;
   privacyMark(input: { ref?: string; value?: string; as: SelfKind }): Promise<{ token: string; as: SelfKind }>;
+  attach(input: { auto?: boolean; cdpUrl?: string; userDataDir?: string }): Promise<{ mode: 'attach' | 'cdp'; endpoint_kind: EndpointKind }>;
+  detach(): Promise<{ mode: 'own'; endpoint_kind: 'own' }>;
+  requestAccess(domain: string, reason?: string): Promise<{ domain: string; decision: AccessDecision }>;
+  listForeignTabs(): Promise<TabsList>;
+  adoptTab(index: number): Promise<PageBody>;
 }
 
 export type LaunchBrowser = (request: LaunchBrowserRequest) => Promise<Browser>;
@@ -135,12 +163,20 @@ export class BrowserSession implements BrowserControl {
   private readonly traceLog = new TraceLog();
   private readonly privacy = new Redactor();
   private readonly heals = new HealLedger();
+  private startupError: RelayError | null = null;
   private pageUrl = '';
   private lastRawSnapshot = '';
   private readonly identities: IdentityStore;
   private readonly handoff: HandoffManager;
   private readonly resolveExecutable: NonNullable<BrowserSessionOptions['resolveExecutable']>;
   private readonly launchBrowser: LaunchBrowser;
+  private connection: 'own' | 'attached' = 'own';
+  private launchedHeadless = false;
+  private transfersDisabled = false;
+  private blockedDomain: string | null = null;
+  private attachedMode: 'attach' | 'cdp' | null = null;
+  private endpointKind: EndpointKind | 'own' = 'own';
+  private readonly sessionGrants = new Set<string>();
 
   constructor(options: BrowserSessionOptions = {}) {
     this.resolveExecutable = options.resolveExecutable ?? resolveBrowserForLaunch;
@@ -159,9 +195,14 @@ export class BrowserSession implements BrowserControl {
   }
 
   browserState(): BrowserStateView {
-    if (this.phase.state === 'downloading') return { state: 'downloading', percent: this.phase.percent };
-    if (this.phase.state === 'error') return { state: 'error', message: this.phase.message };
-    return { state: this.phase.state };
+    const view: BrowserStateView =
+      this.phase.state === 'downloading'
+        ? { state: 'downloading', percent: this.phase.percent }
+        : this.phase.state === 'error'
+          ? { state: 'error', message: this.phase.message }
+          : { state: this.phase.state };
+    if (attachIsDeferred(readGlobalConfig(), this.phase.state, this.browser?.connected === true)) view.deferred = true;
+    return view;
   }
 
   warmUp(): void {
@@ -196,6 +237,7 @@ export class BrowserSession implements BrowserControl {
     const controller = await this.prepareController();
     const urlBefore = controller.currentUrl();
     const target = this.privacy.reveal(url, 'navigate', urlBefore || url);
+    this.assertNavigation(target);
     const actionPage = controller.pageHandle();
     const page = await controller.navigate(target, this.tabset().tabHint());
     const shown = await this.finishLive(page);
@@ -219,6 +261,41 @@ export class BrowserSession implements BrowserControl {
     return this.finishLive(body);
   }
 
+  async extract(input: ExtractInput): Promise<ExtractResult> {
+    this.assertModel();
+    const controller = await this.prepareController();
+    return controller.extract(input);
+  }
+
+  async evalExpr(expr: string, args: unknown[] = []): Promise<unknown> {
+    this.assertModel();
+    if (!evalEnabled()) throw new RelayError('eval_disabled', EVAL_DISABLED_MESSAGE);
+    if (!expr.trim()) throw new RelayError('bad_request', 'expr is required');
+    if (!Array.isArray(args)) throw new RelayError('bad_request', 'args must be an array');
+    const controller = await this.prepareController();
+    const origin = pageOrigin(controller.currentUrl());
+    const exprSha = createHash('sha256').update(expr).digest('hex');
+    const exprLen = Buffer.byteLength(expr);
+    try {
+      const json = await controller.evalExpr(expr, args);
+      const resultLen = Buffer.byteLength(json);
+      if (resultLen > EVAL_MAX_BYTES) {
+        await noteEval(exprSha, exprLen, origin, false, resultLen);
+        throw new RelayError('bad_request', `Eval result exceeds ${EVAL_MAX_BYTES} bytes`);
+      }
+      const value = JSON.parse(json) as unknown;
+      await noteEval(exprSha, exprLen, origin, true, resultLen);
+      return value;
+    } catch (err) {
+      if (err instanceof RelayError && err.message.startsWith('Eval result exceeds')) throw err;
+      await noteEval(exprSha, exprLen, origin, false, 0);
+      if (err instanceof RelayError) throw err;
+      const message = err instanceof Error ? err.message : 'Eval failed';
+      if (message.includes('EVAL_NOT_JSON')) throw new RelayError('bad_request', 'Eval result must be JSON');
+      throw new RelayError('bad_request', `Eval failed: ${message}`);
+    }
+  }
+
   async act(input: ActInput): Promise<PageBody> {
     this.assertModel();
     const controller = await this.prepareController();
@@ -230,11 +307,13 @@ export class BrowserSession implements BrowserControl {
       throw new RelayError('human_required', 'Passwords are typed by a human. Call request_human.');
     }
     const revealed = this.revealAct(input, urlBefore);
+    this.blockedDomain = null;
     const since = this.tabset().generation();
     const mark = this.downloader().mark();
     const printBefore = await controller.printCount();
     try {
       await controller.performInput(revealed);
+      this.throwIfBlocked();
       const switched = await this.tabset().waitForPopup(since, actionPage, input.action === 'click' ? POPUP_GRACE_MS : 0);
       // target=_blank (a PDF form, for example) can emit the download after the click returns.
       if (input.action === 'click' && this.tabset().generation() !== since) {
@@ -265,6 +344,8 @@ export class BrowserSession implements BrowserControl {
 
   async download(input: DownloadInput): Promise<PageBody> {
     this.assertModel();
+    await this.ensureReady();
+    this.assertTransfers();
     const saveAs = input.save_as ? this.privacy.reveal(input.save_as, 'download', this.pageUrl) : undefined;
     if (saveAs) assertSaveAs(saveAs);
     const controller = await this.prepareController();
@@ -293,7 +374,7 @@ export class BrowserSession implements BrowserControl {
         lines.push(canceledLine(done.suggestedFilename));
       } else {
         const published = await this.downloader().finalize(done, {
-          dir: downloadsDir(),
+          dir: activeDownloadsDir(),
           fileName: saveAs ?? done.suggestedFilename,
           dedupe: true,
         });
@@ -325,6 +406,8 @@ export class BrowserSession implements BrowserControl {
 
   async pdf(input: PdfInput): Promise<PdfResult> {
     this.assertModel();
+    await this.ensureReady();
+    this.assertTransfers();
     const saveAs = input.save_as ? this.privacy.reveal(input.save_as, 'pdf', this.pageUrl) : undefined;
     if (saveAs) assertSaveAs(saveAs);
     const controller = await this.prepareController();
@@ -336,7 +419,7 @@ export class BrowserSession implements BrowserControl {
     try {
       const published = await publishDownload({
         sourcePath,
-        dir: downloadsDir(),
+        dir: activeDownloadsDir(),
         fileName,
         url: stripDownloadUrl(url),
         mime: 'application/pdf',
@@ -414,7 +497,9 @@ export class BrowserSession implements BrowserControl {
       const controller = await tabs.openBlank();
       if (input.url) {
         const opened = this.privacy.reveal(input.url, 'tabs', this.pageUrl || input.url);
-        const body = await controller.navigate(parseHttpUrl(opened), tabs.tabHint());
+        const target = parseHttpUrl(opened);
+        this.assertNavigation(target);
+        const body = await controller.navigate(target, tabs.tabHint());
         return this.finishLive(body);
       }
       return this.finishLive(await controller.snapshot('full', undefined, tabs.tabHint()));
@@ -640,6 +725,7 @@ export class BrowserSession implements BrowserControl {
     await this.ensureReady();
     const revealed = url === undefined ? undefined : this.privacy.reveal(url, 'handoff', this.pageUrl || url);
     const target = revealed === undefined ? undefined : parseHttpUrl(revealed);
+    if (target) this.assertNavigation(target);
     return this.handoff.start(reason, target);
   }
 
@@ -657,6 +743,9 @@ export class BrowserSession implements BrowserControl {
 
   async saveIdentity(input: { name?: string; domains?: string[] }): Promise<IdentityMeta> {
     this.assertModel();
+    if (this.connection === 'attached') {
+      throw new RelayError('bad_request', 'Identity cookies are not saved while attached to an existing Chrome.');
+    }
     await this.ensureReady();
     const controller = await this.prepareController();
     return this.identities.saveManual({ ...input, pageUrl: controller.currentUrl() });
@@ -727,7 +816,10 @@ export class BrowserSession implements BrowserControl {
     const launchInFlight = this.browser !== null || this.phase.state === 'launching' || this.phase.state === 'ready';
     if (launchInFlight && this.attempt) await this.attempt.catch(() => undefined);
     this.stopPersistTimer();
-    await this.identities.persistAll().catch((err: unknown) => logDaemon(`cookie persist failed: ${errorText(err)}`));
+    if (this.connection === 'attached') await this.tabSet?.closeCreated().catch(() => undefined);
+    if (this.connection !== 'attached') {
+      await this.identities.persistAll().catch((err: unknown) => logDaemon(`cookie persist failed: ${errorText(err)}`));
+    }
     await this.handoff.shutdown().catch((err: unknown) => logDaemon(`handoff shutdown: ${errorText(err)}`));
     const downloads = this.downloads;
     this.downloads = null;
@@ -750,7 +842,9 @@ export class BrowserSession implements BrowserControl {
     };
     return {
       navigate: async (url) => {
-        const body = await (await use()).navigate(url);
+        const controller = await use();
+        session.assertNavigation(url);
+        const body = await controller.navigate(url);
         session.identities.touch(body.url);
         return body;
       },
@@ -762,6 +856,8 @@ export class BrowserSession implements BrowserControl {
         return current.currentUrl();
       },
       pageText: async () => (await use()).pageText(),
+      extract: async (input) => (await use()).extract(input),
+      evalExpr: async (expr, args) => (await use()).evalExpr(expr, args),
       queryCss: async (css, frame) => (await use()).queryCss(css, frame),
       performBackend: async (backend, input) => {
         const page = await use();
@@ -885,7 +981,7 @@ export class BrowserSession implements BrowserControl {
         continue;
       }
       const published = await this.downloader().finalize(done, {
-        dir: downloadsDir(),
+        dir: activeDownloadsDir(),
         fileName: done.suggestedFilename,
         dedupe: true,
       });
@@ -963,7 +1059,7 @@ export class BrowserSession implements BrowserControl {
 
     // Re-read phase after every await. The background launch mutates it.
     if (this.launchInFlight()) {
-      await this.waitPhase(READY_WAIT_MS);
+      await this.waitPhase(this.readyWaitMs());
       if (this.isReady()) return;
       const waited = this.downloadError();
       if (waited) throw waited;
@@ -977,11 +1073,11 @@ export class BrowserSession implements BrowserControl {
     if (beforeRetry) throw beforeRetry;
 
     this.warmUp();
-    await this.waitPhase(READY_WAIT_MS);
+    await this.waitPhase(this.readyWaitMs());
     if (this.isReady()) return;
     const finished = this.downloadError();
     if (finished) throw finished;
-    if (this.phase.state === 'error') throw new Error(this.phase.message);
+    if (this.phase.state === 'error') throw this.startupError ?? new Error(this.phase.message);
     throw new RelayError('browser_not_ready', 'Browser is still starting. Retry shortly, or run: relaywright browser install');
   }
 
@@ -1008,7 +1104,92 @@ export class BrowserSession implements BrowserControl {
     return this.phase.state === 'ready' && this.browser?.connected === true && this.tabSet !== null;
   }
 
+  async attach(input: { auto?: boolean; cdpUrl?: string; userDataDir?: string }): Promise<{ mode: 'attach' | 'cdp'; endpoint_kind: EndpointKind }> {
+    this.assertModel();
+    if (this.closed) throw new Error('Browser session is closed');
+    if (this.attempt) await this.attempt.catch(() => undefined);
+    let result: { mode: 'attach' | 'cdp'; endpoint_kind: EndpointKind } | undefined;
+    this.phase = { state: 'launching' };
+    this.attempt = this.performAttach(input)
+      .then((attached) => {
+        result = attached;
+      })
+      .finally(() => {
+        this.attempt = null;
+      });
+    await this.attempt;
+    if (!result) throw new RelayError('attach_failed', 'Attach did not connect');
+    return result;
+  }
+
+  async detach(): Promise<{ mode: 'own'; endpoint_kind: 'own' }> {
+    this.assertModel();
+    if (this.attempt) await this.attempt.catch(() => undefined);
+    const mode = this.attachedMode ?? 'own';
+    const endpointKind = this.endpointKind;
+    await this.dropBrowser('disconnect');
+    this.phase = { state: 'idle' };
+    this.sessionGrants.clear();
+    updateGlobalConfig((config) => {
+      config.browser = { ...(config.browser ?? {}), mode: 'own' };
+      delete config.browser.cdp_url;
+      delete config.browser.user_data_dir;
+    });
+    recordAudit('detach', { mode, endpoint_kind: endpointKind });
+    await flushAudit();
+    return { mode: 'own', endpoint_kind: 'own' };
+  }
+
+  async requestAccess(domain: string, reason = ''): Promise<{ domain: string; decision: AccessDecision }> {
+    const normalized = normalizeAllowDomain(domain);
+    const decision = await askAccess(normalized, reason.slice(0, 500));
+    if (decision === 'once') this.sessionGrants.add(normalized);
+    if (decision === 'always') {
+      updateGlobalConfig((config) => {
+        const next = new Set(readAllowDomains());
+        next.add(normalized);
+        config.allow_domains = [...next];
+      });
+    }
+    recordAudit('access_request', { domain: normalized, decision });
+    await flushAudit();
+    return { domain: normalized, decision };
+  }
+
+  async listForeignTabs(): Promise<TabsList> {
+    this.assertModel();
+    await this.ensureReady();
+    if (this.connection !== 'attached') throw new RelayError('bad_request', 'Adopt is only available while attached to an existing browser');
+    const tabs = await this.tabset().listForeign();
+    return { tabs, text: formatTabList(tabs) };
+  }
+
+  async adoptTab(index: number): Promise<PageBody> {
+    this.assertModel();
+    await this.ensureReady();
+    if (this.connection !== 'attached') throw new RelayError('bad_request', 'Adopt is only available while attached to an existing browser');
+    const controller = await this.tabset().adopt(index);
+    return this.finishLive(await controller.snapshot('full', undefined, this.tabset().tabHint()));
+  }
+
+  private readyWaitMs(): number {
+    const mode = readGlobalConfig().browser?.mode;
+    if (mode === 'attach' || mode === 'cdp') return ATTACH_TIMEOUT_MS + 5_000;
+    return READY_WAIT_MS;
+  }
+
   private async launchAttempt(): Promise<void> {
+    this.startupError = null;
+    const config = readGlobalConfig();
+    const mode = config.browser?.mode ?? 'own';
+    if (mode === 'attach' || mode === 'cdp') {
+      await this.launchConfiguredAttach(config);
+      return;
+    }
+    await this.launchOwn();
+  }
+
+  private async launchOwn(): Promise<void> {
     this.phase = { state: 'resolving' };
     try {
       const resolved = await this.resolveExecutable((percent) => {
@@ -1018,7 +1199,7 @@ export class BrowserSession implements BrowserControl {
       this.phase = { state: 'launching' };
       ensureHomeLayout();
       preferExternalPdf(defaultProfileDir());
-      const headless = process.env.RELAYWRIGHT_HEADLESS === '1';
+      const headless = headlessEnabled();
       const profile = defaultProfileDir();
       const viewport = headless ? { width: HEADLESS_VIEWPORT.width, height: HEADLESS_VIEWPORT.height } : null;
       let browser = await adoptChrome(profile, viewport);
@@ -1047,23 +1228,8 @@ export class BrowserSession implements BrowserControl {
         return;
       }
       this.downloads = downloads;
-      browser.on('disconnected', () => {
-        logDaemon('browser disconnected');
-        if (this.browser === browser) {
-          this.browser = null;
-          const open = this.tabSet;
-          this.tabSet = null;
-          const caught = this.downloads;
-          this.downloads = null;
-          this.stopPersistTimer();
-          void caught?.dispose().catch(() => undefined);
-          void open?.dispose().catch(() => undefined);
-          if (!this.closed && !this.releasing && this.phase.state === 'ready') {
-            this.phase = { state: 'error', message: 'Browser disconnected' };
-          }
-        }
-      });
-      const tabs = new TabSet(browser);
+      this.watchBrowser(browser);
+      const tabs = new TabSet(browser, { onController: (controller) => this.armController(controller) });
       this.tabSet = tabs;
       await tabs.start();
       await tabs.attachAll();
@@ -1077,6 +1243,11 @@ export class BrowserSession implements BrowserControl {
         return;
       }
       this.tabSet = tabs;
+      this.connection = 'own';
+      this.transfersDisabled = false;
+      this.launchedHeadless = headless;
+      this.attachedMode = null;
+      this.endpointKind = 'own';
       this.executablePath = resolved.path;
       this.browserVersion = await browser.version();
       this.phase = { state: 'ready' };
@@ -1097,6 +1268,183 @@ export class BrowserSession implements BrowserControl {
       this.browser = null;
       if (browser) await this.releaseBrowser(browser);
     }
+  }
+
+  private async launchConfiguredAttach(config: ReturnType<typeof readGlobalConfig>): Promise<void> {
+    this.phase = { state: 'launching' };
+    try {
+      const target = await resolveStoredAttach(config);
+      notify('relaywright', ATTACH_ALLOW_HINT);
+      const browser = await connectWebSocket(target.endpoint, ATTACH_TIMEOUT_MS);
+      if (this.closed) {
+        await browser.disconnect().catch(() => undefined);
+        return;
+      }
+      await this.finishAttached(browser, target);
+      logDaemon(`attached ${target.endpointKind}`);
+    } catch (err) {
+      if (this.browser) await this.dropBrowser('disconnect').catch(() => undefined);
+      if (this.closed) return;
+      const mapped = mapAttachError(err);
+      logDaemon(`attach failed: ${mapped.message}`);
+      this.startupError = mapped;
+      this.phase = { state: 'error', message: mapped.message };
+    }
+  }
+
+  private async performAttach(input: { auto?: boolean; cdpUrl?: string; userDataDir?: string }): Promise<{ mode: 'attach' | 'cdp'; endpoint_kind: EndpointKind }> {
+    const target = await resolveAttachRequest(input);
+    notify('relaywright', ATTACH_ALLOW_HINT);
+    const headlessOwn = this.connection !== 'attached' && (this.launchedHeadless || process.env.RELAYWRIGHT_HEADLESS === '1');
+    await this.dropBrowser(this.connection === 'attached' || !headlessOwn ? 'disconnect' : 'close');
+    let browser: Browser;
+    try {
+      browser = await connectWebSocket(target.endpoint, ATTACH_TIMEOUT_MS);
+    } catch (err) {
+      const mapped = mapAttachError(err);
+      this.phase = { state: 'error', message: mapped.message };
+      throw mapped;
+    }
+    if (this.closed) {
+      await browser.disconnect().catch(() => undefined);
+      throw new RelayError('attach_failed', 'Browser session is closed');
+    }
+    try {
+      await this.finishAttached(browser, target);
+    } catch (err) {
+      if (this.browser === browser) await this.dropBrowser('disconnect').catch(() => undefined);
+      else await browser.disconnect().catch(() => undefined);
+      const mapped = mapAttachError(err);
+      this.phase = { state: 'error', message: mapped.message };
+      throw mapped;
+    }
+    this.rememberAttach(target);
+    recordAudit('attach', { mode: target.mode, endpoint_kind: target.endpointKind });
+    await flushAudit();
+    logDaemon(`attached ${target.endpointKind}`);
+    return { mode: target.mode, endpoint_kind: target.endpointKind };
+  }
+
+  private rememberAttach(target: ResolvedAttach): void {
+    updateGlobalConfig((config) => {
+      const browser = { ...(config.browser ?? {}), mode: target.mode };
+      if (target.mode === 'attach') {
+        browser.user_data_dir = target.userDataDir;
+        delete browser.cdp_url;
+      } else {
+        browser.cdp_url = target.cdpUrl;
+        delete browser.user_data_dir;
+      }
+      config.browser = browser;
+      if (!config.attach?.reconnect) config.attach = { ...(config.attach ?? {}), reconnect: 'lazy' };
+    });
+  }
+
+  private async finishAttached(browser: Browser, target: ResolvedAttach): Promise<void> {
+    this.browser = browser;
+    this.connection = 'attached';
+    this.transfersDisabled = true;
+    this.attachedMode = target.mode;
+    this.endpointKind = target.endpointKind;
+    this.executablePath = '';
+    this.launchedHeadless = false;
+    this.watchBrowser(browser);
+    const downloads = await DownloadManager.start(browser, { applyBehavior: false });
+    this.downloads = downloads;
+    const tabs = new TabSet(browser, {
+      scope: 'owned',
+      onController: (controller) => this.armController(controller),
+    });
+    this.tabSet = tabs;
+    await tabs.start();
+    if (this.closed) {
+      await this.dropBrowser('disconnect');
+      return;
+    }
+    this.browserVersion = await browser.version().catch(() => '');
+    this.phase = { state: 'ready' };
+  }
+
+  private async dropBrowser(policy: 'close' | 'disconnect'): Promise<void> {
+    this.stopPersistTimer();
+    const attached = this.connection === 'attached';
+    if (!attached && policy === 'close') {
+      await this.identities.persistAll().catch((err: unknown) => logDaemon(`cookie persist failed: ${errorText(err)}`));
+    }
+    if (attached) await this.tabSet?.closeCreated().catch(() => undefined);
+    const downloads = this.downloads;
+    this.downloads = null;
+    await downloads?.dispose().catch(() => undefined);
+    const tabs = this.tabSet;
+    this.tabSet = null;
+    await tabs?.dispose().catch(() => undefined);
+    const browser = this.browser;
+    this.browser = null;
+    this.transfersDisabled = false;
+    this.attachedMode = null;
+    this.endpointKind = 'own';
+    if (browser) {
+      this.releasing = true;
+      try {
+        if (attached || policy === 'disconnect') await browser.disconnect().catch(() => undefined);
+        else await browser.close().catch(() => undefined);
+      } finally {
+        this.releasing = false;
+      }
+    }
+    this.connection = 'own';
+  }
+
+  private watchBrowser(browser: Browser): void {
+    browser.on('disconnected', () => {
+      logDaemon('browser disconnected');
+      if (this.browser !== browser) return;
+      this.browser = null;
+      const open = this.tabSet;
+      this.tabSet = null;
+      const caught = this.downloads;
+      this.downloads = null;
+      this.stopPersistTimer();
+      void caught?.dispose().catch(() => undefined);
+      void open?.dispose().catch(() => undefined);
+      if (!this.closed && !this.releasing && this.phase.state === 'ready') {
+        this.phase = { state: 'error', message: 'Browser disconnected' };
+      }
+    });
+  }
+
+  private async armController(controller: PageController): Promise<void> {
+    if (!this.shouldGate()) return;
+    const page = controller.pageHandle();
+    await armNavigationGate(page, (url) => this.decision(url), (domain) => {
+      this.blockedDomain = domain;
+    });
+  }
+
+  private shouldGate(): boolean {
+    if (this.connection === 'attached') return true;
+    return readAllowDomains().length > 0 || this.sessionGrants.size > 0;
+  }
+
+  private decision(url: string): { ok: true } | { ok: false; domain: string } {
+    const mode: BrowserModeName = this.connection === 'attached' ? (this.attachedMode ?? 'attach') : 'own';
+    return navigationDecision(url, mode, readAllowDomains(), [...this.sessionGrants]);
+  }
+
+  private assertNavigation(url: string): void {
+    const decision = this.decision(url);
+    if (!decision.ok) throw domainNotAllowed(decision.domain);
+  }
+
+  private throwIfBlocked(): void {
+    if (!this.blockedDomain) return;
+    const domain = this.blockedDomain;
+    this.blockedDomain = null;
+    throw domainNotAllowed(domain);
+  }
+
+  private assertTransfers(): void {
+    if (this.transfersDisabled) throw new RelayError('bad_request', ATTACH_TRANSFERS_MESSAGE);
   }
 
   private withHandoff(body: DaemonStatus): DaemonStatus {
@@ -1136,7 +1484,7 @@ export class BrowserSession implements BrowserControl {
   private async releaseBrowser(browser: Browser): Promise<void> {
     this.releasing = true;
     try {
-      if (this.keepBrowser) await browser.disconnect().catch(() => undefined);
+      if (this.connection === 'attached' || this.keepBrowser) await browser.disconnect().catch(() => undefined);
       else await browser.close().catch(() => undefined);
     } finally {
       this.releasing = false;
@@ -1153,6 +1501,25 @@ function replaceSkillStep(skill: Skill, stepId: string, target: SkillTarget): Sk
   });
   if (!found) throw new RelayError('bad_params', `Step ${stepId} was not found`);
   return { ...skill, steps };
+}
+
+function pageOrigin(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return 'null';
+  }
+}
+
+async function noteEval(exprSha: string, exprLen: number, origin: string, ok: boolean, resultLen: number): Promise<void> {
+  recordAudit('eval', {
+    expr_sha256: exprSha,
+    expr_len: exprLen,
+    url_origin: origin,
+    ok,
+    result_len: resultLen,
+  });
+  await flushAudit();
 }
 
 function missingSelfResult(name: string, input: RunSkillInput, message: string): MatrixResult {

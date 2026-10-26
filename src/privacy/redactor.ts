@@ -403,6 +403,25 @@ export class Redactor {
       };
     }
     if (step.pdf) next.pdf = { save_as: text(step.pdf.save_as), ...(step.pdf.landscape !== undefined ? { landscape: step.pdf.landscape } : {}) };
+    if (step.state_set) {
+      next.state_set = { ns: step.state_set.ns, key: step.state_set.key, value: text(step.state_set.value) };
+    }
+    if (step.extract) {
+      const fields: NonNullable<SkillStep['extract']>['fields'] = {};
+      for (const [name, field] of Object.entries(step.extract.fields)) {
+        fields[name] = {
+          selector: text(field.selector),
+          ...(field.attr ? { attr: text(field.attr) } : {}),
+          ...(field.all ? { all: true } : {}),
+        };
+      }
+      next.extract = {
+        root_selector: text(step.extract.root_selector),
+        save_as: step.extract.save_as,
+        ...(step.extract.limit !== undefined ? { limit: step.extract.limit } : {}),
+        fields,
+      };
+    }
     return next;
   }
 

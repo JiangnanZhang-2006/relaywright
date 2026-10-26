@@ -11,8 +11,18 @@ import {
   sanitizeFilename,
   stripDownloadUrl,
 } from '../src/session/downloads.js';
+import { followablePopupUrl } from '../src/session/tabs.js';
 
 describe('download file names', () => {
+  it('does not follow a blank download popup', () => {
+    expect(followablePopupUrl('about:blank')).toBe(false);
+    expect(followablePopupUrl('about:blank#blocked')).toBe(false);
+    expect(followablePopupUrl('')).toBe(false);
+    expect(followablePopupUrl('chrome-error://chromewebdata/')).toBe(false);
+    expect(followablePopupUrl('chrome://newtab/')).toBe(false);
+    expect(followablePopupUrl('http://127.0.0.1/zf-mock/v1/')).toBe(true);
+  });
+
   it('sanitizes Windows-invalid characters, reserved names, and length', () => {
     expect(sanitizeFilename('a<b>c:d.pdf')).toBe('a_b_c_d.pdf');
     expect(sanitizeFilename('quote"star*bar?.pdf')).toBe('quote_star_bar_.pdf');

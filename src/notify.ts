@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { errorText, logDaemon } from './config/paths.js';
+import { readGlobalConfig } from './privacy/store.js';
 
 const NOTIFY_MS = 5_000;
 
@@ -40,6 +41,7 @@ function xmlText(value: string): string {
 export function notify(title: string, body: string, detail?: string): void {
   if (process.env.RELAYWRIGHT_NOTIFY === '0') return;
   try {
+    if (readGlobalConfig().notify === false) return;
     if (process.platform === 'win32') notifyWindows(title, body, detail);
     else if (process.platform === 'darwin') notifyMac(title, body, detail);
     else notifyLinux(title, body, detail);

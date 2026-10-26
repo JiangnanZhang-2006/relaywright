@@ -9,7 +9,9 @@ import {
   writeDaemonInfo,
 } from './client.js';
 import { listen, createApp, type ListeningServer } from './server.js';
+import { readGlobalConfig } from '../privacy/store.js';
 import { BrowserSession } from '../session/browser.js';
+import { shouldWarmOnStartup } from '../session/connect.js';
 import { daemonJsonPath, ensureHomeLayout, errorText, logDaemon, packageVersion } from '../config/paths.js';
 import { readBuildFingerprint } from './build.js';
 
@@ -106,7 +108,7 @@ async function main(): Promise<void> {
     build,
   });
   logDaemon(`ready port=${http.port}`);
-  session.warmUp();
+  if (shouldWarmOnStartup(readGlobalConfig())) session.warmUp();
 }
 
 process.on('unhandledRejection', (err) => {

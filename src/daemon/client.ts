@@ -62,6 +62,7 @@ const HealthSchema = z.object({
       state: z.enum(['idle', 'resolving', 'downloading', 'launching', 'ready', 'error']),
       percent: z.number().optional(),
       message: z.string().optional(),
+      deferred: z.boolean().optional(),
     })
     .optional(),
 });
@@ -293,6 +294,57 @@ export async function waitFor(input: { text?: string; ref?: string; url?: string
   );
 }
 
+const AttachResultSchema = z.object({
+  mode: z.enum(['attach', 'cdp', 'own']),
+  endpoint_kind: z.enum(['devtools-file', 'cdp-http', 'cdp-ws', 'own']),
+});
+
+const AccessResultSchema = z.object({
+  domain: z.string(),
+  decision: z.enum(['once', 'always', 'deny']),
+});
+
+export async function attachBrowser(input: { auto?: boolean; cdpUrl?: string; userDataDir?: string }): Promise<z.infer<typeof AttachResultSchema>> {
+  const info = await ensureDaemon();
+  return AttachResultSchema.parse(
+    await authorized(info, '/browser/attach', {
+      method: 'POST',
+      body: {
+        ...(input.auto ? { auto: true } : {}),
+        ...(input.cdpUrl ? { cdp_url: input.cdpUrl } : {}),
+        ...(input.userDataDir ? { user_data_dir: input.userDataDir } : {}),
+      },
+      timeoutMs: 120_000,
+    }),
+  );
+}
+
+export async function detachBrowser(): Promise<z.infer<typeof AttachResultSchema>> {
+  const info = await ensureDaemon();
+  return AttachResultSchema.parse(await authorized(info, '/browser/detach', { method: 'POST', body: {}, timeoutMs: 30_000 }));
+}
+
+export async function requestAccess(domain: string, reason?: string): Promise<z.infer<typeof AccessResultSchema>> {
+  const info = await ensureDaemon();
+  return AccessResultSchema.parse(
+    await authorized(info, '/access/request', {
+      method: 'POST',
+      body: { domain, ...(reason ? { reason } : {}) },
+      timeoutMs: 70_000,
+    }),
+  );
+}
+
+export async function listForeignTabs(): Promise<TabsList> {
+  const info = await ensureDaemon();
+  return TabsListSchema.parse(await authorized(info, '/tabs/foreign', { timeoutMs: 30_000 }));
+}
+
+export async function adoptTab(index: number): Promise<PageBody> {
+  const info = await ensureDaemon();
+  return PageSchema.parse(await authorized(info, '/tabs/adopt', { method: 'POST', body: { index }, timeoutMs: 30_000 }));
+}
+
 export async function browserTabs(input: TabsCommand): Promise<TabsList | PageBody> {
   const parsed = TabsCommandSchema.parse(input);
   const info = await ensureDaemon();
@@ -470,6 +522,80 @@ export async function privacyCheck(): Promise<z.infer<typeof PrivacyCheckSchema>
   return PrivacyCheckSchema.parse(await authorized(info, '/privacy/check'));
 }
 
+const ExtractResultSchema = z.object({
+  rows: z.array(z.record(z.string(), z.unknown())),
+  limit: z.number().int().positive(),
+  truncated: z.boolean(),
+});
+
+const EvalResultSchema = z.object({
+  result: z.unknown(),
+});
+
+export async function extractPage(input: {
+  root_selector: string;
+  fields: Record<string, { selector: string; attr?: string; all?: boolean }>;
+  limit?: number;
+}): Promise<z.infer<typeof ExtractResultSchema>> {
+  const info = await ensureDaemon();
+  return ExtractResultSchema.parse(await authorized(info, '/extract', { method: 'POST', body: input, timeoutMs: 30_000 }));
+}
+
+export async function evalInPage(expr: string, args: unknown[] = []): Promise<unknown> {
+  const info = await ensureDaemon();
+  return EvalResultSchema.parse(await authorized(info, '/eval', { method: 'POST', body: { expr, args }, timeoutMs: 20_000 })).result;
+}
+
+const StatePutResultSchema = z.object({
+  version: z.number().int().positive(),
+  updated_at: z.string(),
+});
+
+const StateEntrySchema = z.object({
+  value: z.unknown(),
+  version: z.number().int().positive(),
+  updated_at: z.string(),
+});
+
+const StateListResultSchema = z.object({
+  keys: z.array(z.object({ key: z.string(), version: z.number().int().positive(), updated_at: z.string() })),
+});
+
+const StateDeleteResultSchema = z.object({
+  key: z.string(),
+  version: z.number().int().positive(),
+});
+
+export async function putState(ns: string, key: string, value: unknown, ifVersion?: number): Promise<z.infer<typeof StatePutResultSchema>> {
+  const info = await ensureDaemon();
+  return StatePutResultSchema.parse(
+    await authorized(info, '/state/put', {
+      method: 'POST',
+      body: { ns, key, value, ...(ifVersion !== undefined ? { if_version: ifVersion } : {}) },
+    }),
+  );
+}
+
+export async function getState(ns: string, key: string): Promise<z.infer<typeof StateEntrySchema>> {
+  const info = await ensureDaemon();
+  return StateEntrySchema.parse(await authorized(info, '/state/get', { method: 'POST', body: { ns, key } }));
+}
+
+export async function listState(ns: string): Promise<z.infer<typeof StateListResultSchema>> {
+  const info = await ensureDaemon();
+  return StateListResultSchema.parse(await authorized(info, '/state/list', { method: 'POST', body: { ns } }));
+}
+
+export async function deleteState(ns: string, key: string, ifVersion?: number): Promise<z.infer<typeof StateDeleteResultSchema>> {
+  const info = await ensureDaemon();
+  return StateDeleteResultSchema.parse(
+    await authorized(info, '/state/delete', {
+      method: 'POST',
+      body: { ns, key, ...(ifVersion !== undefined ? { if_version: ifVersion } : {}) },
+    }),
+  );
+}
+
 export async function privacyMark(input: { ref?: string; value?: string; as: PrivacyKindName }): Promise<{ token: string; as: PrivacyKindName }> {
   const info = await ensureDaemon();
   return PrivacyTokenResultSchema.parse(await authorized(info, '/privacy/mark', { method: 'POST', body: input })) as {
@@ -494,6 +620,7 @@ export async function waitForBrowserReady(info: DaemonInfo): Promise<void> {
       }
     }
     if (state === 'ready') return;
+    if (state === 'idle' && health?.browser?.deferred === true) return;
     if (state === 'error') throw new Error(health?.browser?.message || 'Browser failed to start');
     const limit = sawDownload ? BROWSER_DOWNLOAD_TIMEOUT_MS : BROWSER_START_TIMEOUT_MS;
     if (Date.now() - started > limit) {

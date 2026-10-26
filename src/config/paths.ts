@@ -73,6 +73,10 @@ export function privacyDir(root = relaywrightHome()): string {
   return join(root, 'privacy');
 }
 
+export function stateDir(root = relaywrightHome()): string {
+  return join(root, 'state');
+}
+
 export function privacyPath(identity: string, root = relaywrightHome()): string {
   return join(privacyDir(root), `${identity}.json`);
 }
@@ -87,6 +91,7 @@ export function ensureHomeLayout(): void {
   mkdirSync(identitiesDir(), { recursive: true });
   mkdirSync(auditDir(), { recursive: true });
   mkdirSync(privacyDir(), { recursive: true });
+  mkdirSync(stateDir(), { recursive: true });
 }
 
 let cachedVersion: string | undefined;

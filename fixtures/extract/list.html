@@ -1,0 +1,17 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>extract list</title>
+<ul id="list"></ul>
+<iframe name="extra" src="frame.html"></iframe>
+<script>
+  const list = document.getElementById('list');
+  for (let i = 1; i <= 60; i += 1) {
+    const li = document.createElement('li');
+    li.className = 'row';
+    const secret = i === 1
+      ? '<input class="secret" type="password" value="hunter2"><input class="alt" type="text" name="password" value="secret-like">'
+      : '';
+    li.innerHTML = '<span class="title">Item ' + i + '</span><div class="meta"><span class="year">2025</span></div><span class="tag">a</span><span class="tag">b</span><a class="link" href="/item/' + i + '">open</a>' + secret;
+    list.appendChild(li);
+  }
+</script>
