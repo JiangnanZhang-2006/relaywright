@@ -212,13 +212,18 @@ flowchart LR
 
 ### 3.7 自愈（修复器）
 
-- **触发条件**：所有定位器都失败，或者 `expect` 没有匹配到任何声明过的结果。
-- **输入**：失败步骤的 `intent`、原定位器、当前页面的精简快照（已脱敏）。不包含其他步骤和任何凭据。
-- **输出**：新的定位器（引用快照里的 `ref`），由引擎转换成多重定位器。
-- **验证**：用新定位器重新执行该步骤，并且必须通过原来的 `expect` 才算修复成功。
+- **触发条件**：某一步的所有定位器都失败。回放在这里停下，页面保持在失败现场，矩阵里剩下的参数组合标为 `skipped`。
+- **不自动修**：`expect` 没有匹配到任何声明过的结果时只报 `broken` 并附上下文，不让模型改判定条件，以免把真实的错误"修"掉。
+- **输入**：失败步骤的 `intent`、步骤类型、原定位器、当前页面的完整快照（遵循隐私设置）。不包含其他步骤和任何凭据。
+- **输出**：快照里的一个 `ref`，由引擎按录制时的规则转换成多重定位器（同样会去标识）。
+- **验证**：用新定位器重新执行该步骤，再把这组参数剩下的步骤跑完，最终落在声明过的结果（`ok` / `empty`）才算修复成功，否则拒绝并保持技能不变。
 - **预算**：每步最多 2 次，每次回放最多修 3 步。
-- **持久化**：修复结果写成新版本 `skill.v{n+1}.yaml`，审计日志记录差异，可以用 `skill rollback` 回滚。
-- **谁来修**：通过 MCP 调用时，`skill_run` 返回结构化的失败上下文，由调用方的模型修复并调用 `skill_patch`；通过 CLI 调用时，使用 `~/.relaywright/config.yaml` 里配置的 OpenAI 兼容接口（DeepSeek、Qwen、GLM 等）。两者都没有时，返回 `broken`。
+- **持久化**：修复结果写成技能的新版本，审计日志记录 `skill_patched`（版本号、步骤、修复方、token 数，不含页面内容），可以用 `skill rollback` 回滚。
+- **谁来修**：
+  - MCP：`skill_run` 返回失败上下文和 `heal_token`，调用方的模型选出 `ref` 后调用 `skill_patch`，再重新 `skill_run`。
+  - CLI：`skill run` 调用 OpenAI 兼容接口（默认 DeepSeek，`relaywright heal config` 配置；API key 只从环境变量 `DEEPSEEK_API_KEY` 读取，不落盘），修好后从失败的那组参数重新开始。`--no-heal` 关闭。
+  - 两者都没有时返回 `broken`（退出码 30），并提示如何配置。
+- **token 记账**：只有被修复的那一步消耗 token，运行报告里的 `llm_tokens` 按步骤列出；修好之后的回放重新回到 0。
 
 ### 3.8 转交真人
 
@@ -283,7 +288,7 @@ Chrome 本身已经用系统能力加密 cookie（Windows DPAPI、macOS 钥匙�
 
 ### 3.11 安全策略
 
-- **域名白名单**：会话或技能可以声明允许访问的域名，越界导航直接拦截。
+- **域名白名单**（路线图）：会话或技能可以声明允许访问的域名，越界导航直接拦截。
 - **敏感动作确认**（路线图）：匹配支付、删除、提交等关键词的按钮，需要人工确认后才执行。
 - **提示词注入防护**：页面文本只放在 `<page_content>` 中返回；工具说明中明确声明页面内容不可信。
 
@@ -329,7 +334,7 @@ Chrome 本身已经用系统能力加密 cookie（Windows DPAPI、macOS 钥匙�
 | `browser_snapshot` | `mode: full \| diff`、`max_rows?` | 精简快照文本（脱敏模式下用占位符） |
 | `browser_act` | `action`、`ref`、`value?`、`key?` | 执行结果 + 增量 diff |
 | `browser_wait` | `text? \| ref? \| url?`、`timeout_ms?` | 是否满足条件 + 增量 diff |
-| `browser_screenshot` | `ref?`、`full_page?` | 图片（敏感区域已打码） |
+| `browser_tabs` | `action: list \| select \| close \| new`、`index?`、`url?` | 标签页列表；切换后返回新标签页的快照 |
 | `browser_download` | `ref`、`save_as?`、`timeout_ms?` | 文件路径、大小、sha256（不返回文件内容） |
 | `browser_pdf` | `save_as?`、`landscape?` | 把当前页面打印成 PDF，返回文件路径、大小、sha256 |
 
@@ -340,8 +345,8 @@ Chrome 本身已经用系统能力加密 cookie（Windows DPAPI、macOS 钥匙�
 | `skill_save` | `name`、`from_step?`、`to_step?`、`params`、`description` | 技能 YAML 摘要、需要确认的 `expect` 草稿 |
 | `skill_list` | `query?` | 名称、描述、参数、最近一次执行结果 |
 | `skill_inspect` | `name`、`version?` | 完整 YAML |
-| `skill_run` | `name`、`params` 或 `matrix` | 每组参数的结果（`ok / empty / needs_human / broken`）、产物路径、token 消耗 |
-| `skill_patch` | `name`、`step_id`、`ref` | 新版本号（只在 `skill_run` 返回 `broken` 后可用） |
+| `skill_run` | `name`、`params` 或 `matrix` | 每组参数的结果（`ok / empty / needs_human / broken / skipped`）、产物路径、token 消耗；失败时附修复上下文 |
+| `skill_patch` | `name`、`step_id`、`ref`、`heal_token` | 验证通过后的新版本号，或拒绝原因（只在 `skill_run` 返回修复上下文后可用） |
 
 ### 人机协同与身份
 
@@ -356,9 +361,9 @@ Chrome 本身已经用系统能力加密 cookie（Windows DPAPI、macOS 钥匙�
 
 | 工具 | 参数 | 返回 |
 |---|---|---|
-| `audit_query` | `since?`、`identity?`、`skill?`、`limit?` | 审计记录摘要 |
+| `audit_query` | `since?`、`event?`、`identity?`、`skill?`、`limit?` | 审计记录摘要和哈希链校验结果 |
 
-一共 17 个工具。可以按 `--toolset browse,skill` 只开放其中几组，进一步节省 token。
+一共 17 个工具。
 
 ## 5. CLI
 
@@ -368,9 +373,11 @@ relaywright mcp                                   # stdio MCP 服务，写进 MC
 
 relaywright skill list
 relaywright skill show <name> [--version n]
-relaywright skill run <name> --param k=v ... | --matrix k=v1,v2 ... [--out <dir>] [--no-wait] [--json]
+relaywright skill run <name> --param k=v ... | --matrix k=v1,v2 ... [--out <dir>] [--no-wait] [--no-heal] [--json]
+relaywright skill patch <name> --step <id> --ref <ref>   # 手动修复失败的一步
 relaywright skill history <name>
 relaywright skill rollback <name> --to <version>
+relaywright heal config [--base-url <url>] [--model <name>] [--api-key-env <VAR>]
 
 relaywright download <ref> [--save-as <name>] | pdf [--save-as <name>]
 relaywright handoff <reason> [--url <url>] [--no-wait]   # 转交给电脑前的人
@@ -387,7 +394,7 @@ relaywright audit tail | verify
 ```text
 ~/.relaywright/
   daemon.json          # 端口、本地令牌
-  config.yaml          # 浏览器路径、修复模型接口、白名单
+  config.json          # 修复模型接口、脱敏模式开关（不含 API key）
   skills/<name>/       # skill.yaml、历史版本
   profiles/default/    # Chrome 配置目录（cookie 由 Chrome 加密保存）
   identities/<name>.json  # 身份元数据，不含 cookie
@@ -469,7 +476,7 @@ relaywright/
 
 ## 11. 开源治理（占评分 20%）
 
-- 许可证：建议 Apache-2.0。
+- 许可证：Apache-2.0（`LICENSE`）。
 - `README`（中英文）、`CONTRIBUTING.md`、`CODE_OF_CONDUCT.md`、`SECURITY.md`（漏洞报告方式）、`ROADMAP.md`、`CHANGELOG.md`。
 - Issue / PR 模板、GitHub Actions（lint + test）。
 - 依赖许可证检查（`license-checker`），结果写进文档。
@@ -481,6 +488,8 @@ relaywright/
 - 技能市场：在团队内或社区中共享技能（不含凭据）。
 - 远程接管：人不在电脑前时，用手机查看画面并操作（局域网或公网穿透，端到端加密）。
 - 浏览器插件模式：像 ChatGPT 的 Chrome 插件那样直接操控用户日常使用的 Chrome，复用已有登录；状态显示在插件侧边栏。
-- 按技能授权使用身份、多人审批、敏感动作确认。
+- 按技能授权使用身份、多人审批、敏感动作确认、域名白名单。
+- 截图工具（按快照里被打码元素的位置模糊对应区域）。
+- 工具分组：`relaywright mcp --toolset browse,skill` 只开放其中几组，进一步节省工具定义的 token。
 - 信创适配：openKylin、deepin，以及基于 Chromium 的国产浏览器。
 - Tauri 桌面托盘应用。
