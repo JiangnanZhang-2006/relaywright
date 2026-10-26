@@ -6,6 +6,7 @@ import { resolveBrowserForLaunch, type ResolvedBrowser } from '../browser/resolv
 import { defaultProfileDir, downloadsDir, ensureHomeLayout, errorText, logDaemon } from '../config/paths.js';
 import { browserDownloadingMessage, RelayError, staleTabRefMessage } from '../errors.js';
 import type { SelfKind } from '../privacy/detect.js';
+import { headerCandidatesEvaluator } from '../privacy/header-candidates.js';
 import { PrivacyGap, Redactor, type PrivacyCheck, type PrivacyList } from '../privacy/redactor.js';
 import type { HandoffView, IdentityMeta } from '../protocol.js';
 import { ensureTabHeader, pageHeader, switchBanner } from '../perception/snapshot.js';
@@ -37,12 +38,12 @@ import {
   stripDownloadUrl,
 } from './downloads.js';
 import { HandoffManager } from './handoff.js';
+import { bounded } from './timeout.js';
 import { IdentityStore } from './identity.js';
 import { adoptChrome, HEADLESS_VIEWPORT, launchChrome, type LaunchBrowserRequest } from './launch.js';
 import { HANDOFF_TIMEOUT_MS } from './login.js';
 import { PageController, type ReplayPage } from './page.js';
 import { formatTabList, POPUP_GRACE_MS, TabSet } from './tabs.js';
-import { bounded } from './timeout.js';
 
 export type { PageBody };
 
@@ -182,7 +183,7 @@ export class BrowserSession implements BrowserControl {
     const target = this.privacy.reveal(url, 'navigate', urlBefore || url);
     const actionPage = controller.pageHandle();
     const page = await controller.navigate(target, this.tabset().tabHint());
-    const shown = this.finishPage(page);
+    const shown = await this.finishLive(page);
     this.identities.touch(shown.url);
     return this.record(shown, {
       action: 'goto',
@@ -200,7 +201,7 @@ export class BrowserSession implements BrowserControl {
     const kind = this.tabset().peekSwitch();
     const mode = options?.mode ?? 'full';
     const body = await controller.snapshot(kind ? 'full' : mode, options?.maxRows, this.tabset().tabHint());
-    return this.finishPage(body);
+    return this.finishLive(body);
   }
 
   async act(input: ActInput): Promise<PageBody> {
@@ -229,7 +230,7 @@ export class BrowserSession implements BrowserControl {
       if (await this.printIncreased(controller, printBefore)) lines.push(PRINT_REQUESTED_LINE);
       const kind = this.tabset().peekSwitch();
       const body = await this.readSnapshot(kind || switched ? 'full' : 'diff');
-      const shown = this.finishPage(body, { downloads: caught.files, lines });
+      const shown = await this.finishLive(body, { downloads: caught.files, lines });
       const produced = input.action === 'click' && caught.files.length > 0;
       return this.record(shown, {
         action: produced ? 'download' : revealed.action,
@@ -288,7 +289,7 @@ export class BrowserSession implements BrowserControl {
       if (await this.printIncreased(controller, printBefore)) lines.push(PRINT_REQUESTED_LINE);
       const kind = this.tabset().peekSwitch();
       const body = await this.readSnapshot(kind ? 'full' : 'diff');
-      const shown = this.finishPage(body, { downloads: files, lines });
+      const shown = await this.finishLive(body, { downloads: files, lines });
       const file = files[0];
       if (!file) return shown;
       return this.record(shown, {
@@ -363,7 +364,7 @@ export class BrowserSession implements BrowserControl {
       const body = await current.snapshot('full', undefined, this.tabset().tabHint());
       result = { matched: result.matched, url: body.url, title: body.title, snapshot: body.snapshot };
     }
-    const shown = this.finishPage(result);
+    const shown = await this.finishLive(result);
     const withMatch = { ...shown, matched: result.matched };
     if (!result.matched) return withMatch;
     return this.record(withMatch, {
@@ -392,16 +393,16 @@ export class BrowserSession implements BrowserControl {
     if (input.action === 'select') {
       if (input.index === undefined) throw new RelayError('bad_request', 'index is required for select');
       const controller = await tabs.select(input.index);
-      return this.finishPage(await controller.snapshot('full', undefined, tabs.tabHint()));
+      return this.finishLive(await controller.snapshot('full', undefined, tabs.tabHint()));
     }
     if (input.action === 'new') {
       const controller = await tabs.openBlank();
       if (input.url) {
         const opened = this.privacy.reveal(input.url, 'tabs', this.pageUrl || input.url);
         const body = await controller.navigate(parseHttpUrl(opened), tabs.tabHint());
-        return this.finishPage(body);
+        return this.finishLive(body);
       }
-      return this.finishPage(await controller.snapshot('full', undefined, tabs.tabHint()));
+      return this.finishLive(await controller.snapshot('full', undefined, tabs.tabHint()));
     }
     await tabs.closeIndex(input.index);
     const described = await tabs.describe();
@@ -705,6 +706,17 @@ export class BrowserSession implements BrowserControl {
       throw new RelayError('stale_ref', staleTabRefMessage(ref));
     }
     return controller.describeRef(ref);
+  }
+
+  private async finishLive<T extends PageBody>(body: T, extra?: { downloads?: DownloadInfo[]; lines?: string[] }): Promise<T> {
+    try {
+      const page = (await this.tabset().current()).pageHandle();
+      const values = await bounded(page.evaluate(headerCandidatesEvaluator()), 1_500, 'header candidates').catch(() => [] as string[]);
+      if (Array.isArray(values)) this.privacy.noteHeaderCandidates(values.filter((item): item is string => typeof item === 'string'), body.url);
+    } catch (err) {
+      logDaemon(`header candidate scan failed: ${errorText(err)}`);
+    }
+    return this.finishPage(body, extra);
   }
 
   private finishPage<T extends PageBody>(body: T, extra?: { downloads?: DownloadInfo[]; lines?: string[] }): T {

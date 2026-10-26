@@ -2,47 +2,60 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>张三的主页</title>
+<title>教学管理信息服务平台</title>
 </head>
 <body>
-  <img alt="头像" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
-  <h4>张三 学生</h4>
-  <button type="button" id="logout">退出</button>
+<div class="container head-t"><div class="navbar-header">
+  <a class="navbar-brand logo_2" href="#"><img src="/zftal-ui-v5-1.0.2/assets/images/logo/logo_jw_w.png" width="120" height="40" alt=""><span id="xtmc">教学管理信息服务平台</span></a>
+  <button type="button" id="exit_btn" class="navbar-toggle collapsed">退出</button>
+  <button type="button" id="js_btn" class="navbar-toggle collapsed"><img src="/zftal-ui-v5-1.0.2/assets/images/user_logo.jpg" width="42" height="32" alt=""><span>功能菜单</span></button>
   <button type="button" id="refresh">刷新</button>
-  <table>
-    <caption>名单</caption>
-    <thead>
-      <tr><th>姓名</th><th>学号</th><th>手机</th><th>教师</th></tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td>李四</td>
-        <td>20219999</td>
-        <td>13800138000</td>
-        <td>韩易辰</td>
-      </tr>
-    </tbody>
-  </table>
-  <label for="sid">学号</label>
-  <input id="sid" value="20210001">
-  <label for="nick">昵称</label>
-  <input id="nick" value="小张">
-  <p>身份证：110101199003078515</p>
-  <p>邮箱：li.si@example.com</p>
-  <p>银行卡：4111111111111111</p>
-  <h3>课表 2025-2026-1-北校区-南3-B101-周八</h3>
-  <p><button type="button" id="get">下载名单</button></p>
-  <script>
-    document.getElementById('get').addEventListener('click', function () {
-      var blob = new Blob(['roster'], { type: 'text/plain' });
-      var url = URL.createObjectURL(blob);
-      var link = document.createElement('a');
-      link.href = url;
-      link.download = '张三-20210001.txt';
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-    });
-  </script>
+</div></div>
+<div class="index_wdyy"><h3><span>我的应用</span><a href="#" class="sz" id="wdyy_szbtn"></a></h3><ul id="index_wdyy"></ul></div>
+<div class="col-md-5" id="yhxxIndex">
+  <input type="hidden" name="xxdm1" value="10351" id="xxdm1">
+  <div class="media">
+    <a class="pull-left" href="#"><img class="media-object" alt="110x110" src="/jwglxt/xtgl/photo_cxXszp4.html?xh_id=2025000000&amp;zplx=rxhzp" style="width:110px;height:110px"></a>
+    <div class="media-body">
+      <h4 class="media-heading">张三&nbsp;&nbsp;学生</h4>
+      <p>计算机与人工智能学院 25计算机2</p>
+    </div>
+  </div>
+</div>
+<table>
+  <caption>名单</caption>
+  <thead>
+    <tr><th>姓名</th><th>学号</th><th>手机</th><th>教师</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>李四</td>
+      <td>20219999</td>
+      <td>13800138000</td>
+      <td>韩易辰</td>
+    </tr>
+  </tbody>
+</table>
+<label for="sid">学号</label>
+<input id="sid" value="20210001">
+<label for="nick">昵称</label>
+<input id="nick" value="小张">
+<p>身份证：110101199003078515</p>
+<p>邮箱：li.si@example.com</p>
+<p>银行卡：4111111111111111</p>
+<h3>课表 2025-2026-1-北校区-南3-B101-周八</h3>
+<p><button type="button" id="get">下载名单</button></p>
+<script>
+  document.getElementById('get').addEventListener('click', function () {
+    var blob = new Blob(['roster'], { type: 'text/plain' });
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement('a');
+    link.href = url;
+    link.download = '张三-20210001.txt';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  });
+</script>
 </body>
 </html>

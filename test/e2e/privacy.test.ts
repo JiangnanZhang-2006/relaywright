@@ -1,10 +1,10 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { whichBrowser } from '../../src/browser/resolve.js';
-import { privacyPath, tracesDir } from '../../src/config/paths.js';
+import { privacyDir, privacyPath, tracesDir } from '../../src/config/paths.js';
 import { createApp } from '../../src/daemon/server.js';
 import { BrowserSession } from '../../src/session/browser.js';
 import { startStatic } from './static-server.js';
@@ -86,6 +86,21 @@ describe.skipIf(!resolved.path)('privacy de-identification', () => {
     url.searchParams.set('sid', STUDENT);
     url.searchParams.set('nick', NICK);
     pageUrl = url.toString();
+    mkdirSync(privacyDir(), { recursive: true });
+    writeFileSync(
+      privacyPath('127.0.0.1'),
+      `${JSON.stringify({
+        self: {},
+        rejections: [],
+        allow: [],
+        others: {},
+        candidates: { 我的应用: { token: '‹候选1›', n: 1, value: '我的应用' } },
+        aliases: {},
+        retired: {},
+        next: { 候选: 4 },
+        categories: {},
+      })}\n`,
+    );
     session = new BrowserSession();
     app = createApp({ token: TOKEN, session, onShutdown: () => undefined });
   });
@@ -109,7 +124,11 @@ describe.skipIf(!resolved.path)('privacy de-identification', () => {
     const opened = await call('POST', '/navigate', { url: pageUrl });
     expect(opened.status).toBe(200);
     expect(opened.text).toContain(NAME);
+    expect(opened.text).toContain('功能菜单');
     expect(opened.text).toContain(PHONE);
+    const privacyFile = readFileSync(privacyPath('127.0.0.1'), 'utf8');
+    expect(privacyFile).not.toContain('我的应用');
+    expect(privacyFile).not.toContain('‹候选');
     expect(opened.text).toContain(TEACHER);
     expect(opened.text).not.toContain('(privacy:');
 
@@ -118,6 +137,9 @@ describe.skipIf(!resolved.path)('privacy de-identification', () => {
     expect(snapshot.text).toContain(NAME);
     expect(snapshot.text).toContain('周八');
     const openedBody = JSON.parse(snapshot.text) as { snapshot: string };
+    const nick = refFor(openedBody.snapshot, /\[(e\d+)\][^\n]*昵称/);
+    const typed = await call('POST', '/act', { action: 'type', ref: nick, value: NAME });
+    expect(typed.status, typed.text.slice(0, 300)).toBe(200);
     const downloadRef = refFor(openedBody.snapshot, /\[(e\d+)\][^\n]*下载名单/);
     const downloaded = await call('POST', '/download', { ref: downloadRef, timeout_ms: 15_000 });
     expect(downloaded.status, downloaded.text.slice(0, 400)).toBe(200);
@@ -148,7 +170,7 @@ describe.skipIf(!resolved.path)('privacy de-identification', () => {
     const checksPath = join(dirname(body.path), 'checks.json');
     expect(existsSync(checksPath)).toBe(true);
     assertClean(yaml + readFileSync(checksPath, 'utf8'), 'skill files');
-    expect(yaml).toContain('{{');
+    expect(yaml).toMatch(/\{\{name\d*\}\}/);
   });
 
   it('redacts every model-facing response when privacy mode is on', async () => {
@@ -170,6 +192,11 @@ describe.skipIf(!resolved.path)('privacy de-identification', () => {
     const full = await call('GET', '/snapshot');
     texts.push(full.text);
     expect(full.text).toContain('周八');
+    expect(full.text).toContain('我的应用');
+    expect(full.text).toContain('功能菜单');
+    expect(full.text).toContain('教学管理信息服务平台');
+    expect(full.text).toMatch(/‹候选\d+›/);
+    expect(full.text).not.toContain('2025000000');
     expect(full.text).toContain('(privacy:');
     const fullBody = JSON.parse(full.text) as { snapshot: string };
     const refresh = refFor(fullBody.snapshot, /\[(e\d+)\][^\n]*刷新/);
@@ -203,6 +230,7 @@ describe.skipIf(!resolved.path)('privacy de-identification', () => {
 
     const combined = texts.join('\n');
     assertClean(combined, 'model responses');
+    expect(combined).not.toContain('2025000000');
     const yaml = readFileSync(savedBody.path, 'utf8');
     const checksPath = join(dirname(savedBody.path), 'checks.json');
     assertClean(yaml + (existsSync(checksPath) ? readFileSync(checksPath, 'utf8') : ''), 'redacted skill files');

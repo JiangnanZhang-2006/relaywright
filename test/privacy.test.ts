@@ -2,8 +2,9 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { privacyDir } from '../src/config/paths.js';
-import { findStructured, luhn, validId15, validId18 } from '../src/privacy/detect.js';
+import { privacyDir, privacyPath } from '../src/config/paths.js';
+import { findStructured, fold, luhn, matchesAvatarSignal, stripRole, validId15, validId18 } from '../src/privacy/detect.js';
+import { collectHeaderCandidates } from '../src/privacy/header-candidates.js';
 import { PrivacyGap, Redactor, formatDeidentified } from '../src/privacy/redactor.js';
 import { stringifySkill, type Skill } from '../src/skills/schema.js';
 
@@ -51,9 +52,11 @@ function home(): string {
 
 function page(): string {
   return [
-    `page: ${NAME}的主页  url: ${URL}?su=${ACCOUNT}&who=${NAME_ENCODED}`,
-    `h4 "${NAME} 学生"`,
-    '[e1] button "退出"',
+    `page: 教学管理信息服务平台  url: ${URL}?su=${ACCOUNT}&who=${NAME_ENCODED}`,
+    '[e1] link "教学管理信息服务平台"',
+    '[e2] button "退出"',
+    'h3 "我的应用"',
+    `h4 "${NAME}\u00A0\u00A0学生"`,
     'table "名单" rows=1 cols: 姓名 | 学号 | 手机 | 教师 | 昵称',
     `  | ${OTHER} | ${STUDENT} | ${PHONE} | ${TEACHER} | ${NICK} |`,
     `身份证：${ID18}`,
@@ -94,6 +97,117 @@ function skillWith(): Skill {
   };
 }
 
+class FakeEl {
+  tagName: string;
+  id = '';
+  className = '';
+  attrs: Record<string, string> = {};
+  parentElement: FakeEl | null = null;
+  children: FakeEl[] = [];
+  ownText = '';
+
+  constructor(tag: string) {
+    this.tagName = tag.toUpperCase();
+  }
+
+  getAttribute(name: string): string | null {
+    return this.attrs[name] ?? null;
+  }
+
+  get childNodes(): Array<{ nodeType: number; textContent: string }> {
+    return this.ownText ? [{ nodeType: 3, textContent: this.ownText }] : [];
+  }
+
+  get textContent(): string {
+    return this.ownText + this.children.map((child) => child.textContent).join('');
+  }
+
+  get nextElementSibling(): FakeEl | null {
+    if (!this.parentElement) return null;
+    const index = this.parentElement.children.indexOf(this);
+    return this.parentElement.children[index + 1] ?? null;
+  }
+
+  querySelectorAll(selector: string): FakeEl[] {
+    const tags = new Set(selector.split(',').map((part) => part.trim().toUpperCase()));
+    const found: FakeEl[] = [];
+    const walk = (el: FakeEl): void => {
+      for (const child of el.children) {
+        if (tags.has(child.tagName)) found.push(child);
+        walk(child);
+      }
+    };
+    walk(this);
+    return found;
+  }
+
+  compareDocumentPosition(other: FakeEl): number {
+    const order: FakeEl[] = [];
+    let root: FakeEl = this;
+    while (root.parentElement) root = root.parentElement;
+    const walk = (el: FakeEl): void => {
+      order.push(el);
+      for (const child of el.children) walk(child);
+    };
+    walk(root);
+    const left = order.indexOf(this);
+    const right = order.indexOf(other);
+    if (right > left) return 4;
+    if (right < left) return 2;
+    return 0;
+  }
+
+  getBoundingClientRect(): { width: number; height: number } {
+    return { width: 0, height: 0 };
+  }
+}
+
+function fake(tag: string, attrs: Record<string, string>, text = '', kids: FakeEl[] = []): FakeEl {
+  const el = new FakeEl(tag);
+  el.id = attrs.id ?? '';
+  el.className = attrs.class ?? '';
+  el.attrs = { ...attrs };
+  if (attrs.class) el.attrs.class = attrs.class;
+  el.ownText = text;
+  for (const kid of kids) {
+    kid.parentElement = el;
+    el.children.push(kid);
+  }
+  return el;
+}
+
+function headerDoc(): { title: string; querySelectorAll(selector: string): FakeEl[] } {
+  const logo = fake('img', { src: '/assets/images/logo/logo_jw_w.png', width: '120', height: '40', alt: '' });
+  const brand = fake('a', { class: 'navbar-brand logo_2', href: '#' }, '', [logo, fake('span', { id: 'xtmc' }, '教学管理信息服务平台')]);
+  const userImg = fake('img', { src: '/assets/images/user_logo.jpg', width: '42', height: '32', alt: '' });
+  const navbar = fake('div', { class: 'navbar-header' }, '', [
+    brand,
+    fake('button', { id: 'exit_btn', type: 'button' }, '退出'),
+    fake('button', { id: 'js_btn', type: 'button' }, '', [userImg, fake('span', {}, '功能菜单')]),
+    fake('div', { role: 'button' }, '', [fake('span', {}, '菜单项')]),
+    fake('span', { onclick: 'void 0' }, '快捷入口'),
+  ]);
+  const head = fake('div', { class: 'container head-t' }, '', [navbar]);
+  const appHeading = fake('h3', {}, '', [fake('span', {}, '我的应用'), fake('a', { class: 'sz', href: '#' })]);
+  const apps = fake('div', { class: 'index_wdyy' }, '', [appHeading, fake('ul', { id: 'index_wdyy' })]);
+  const photo = fake('img', {
+    class: 'media-object',
+    alt: '110x110',
+    src: '/jwglxt/xtgl/photo_cxXszp4.html?xh_id=2025000000&zplx=rxhzp',
+    style: 'width:110px;height:110px',
+  });
+  const media = fake('div', { class: 'media' }, '', [
+    fake('a', { class: 'pull-left', href: '#' }, '', [photo]),
+    fake('div', { class: 'media-body' }, '', [fake('h4', { class: 'media-heading' }, '张三\u00A0\u00A0学生'), fake('p', {}, '计算机与人工智能学院 25计算机2')]),
+  ]);
+  const tiny = fake('div', {}, '', [
+    fake('img', { class: 'avatar', src: 'avatar.png', width: '16', height: '16' }),
+    fake('h4', {}, '不应入选'),
+  ]);
+  const root = fake('div', {}, '', [head, apps, fake('div', { id: 'yhxxIndex' }, '', [media]), tiny]);
+  return { title: '教学管理信息服务平台', querySelectorAll: (selector) => root.querySelectorAll(selector) };
+}
+
 describe('privacy detectors', () => {
   it('accepts the resident id checksum, the legacy id, and Luhn, and skips lookalikes', () => {
     expect(validId18(ID18)).toBe(true);
@@ -114,6 +228,74 @@ describe('privacy detectors', () => {
     expect(hits.some((hit) => hit.includes('CS2026'))).toBe(false);
     expect(hits.some((hit) => hit.includes('199013'))).toBe(false);
   });
+
+  it('normalises nbsp and keeps section headings out of header candidates', () => {
+    expect(stripRole('张三\u00A0\u00A0学生')).toBe('张三');
+    expect(fold('张\u00A0三')).toBe('张三');
+    expect(matchesAvatarSignal('cxXszp4')).toBe(true);
+    expect(matchesAvatarSignal('photo_cxXszp4.html')).toBe(true);
+    expect(matchesAvatarSignal('user_logo.jpg')).toBe(true);
+    expect(matchesAvatarSignal('media-heading')).toBe(false);
+    expect(matchesAvatarSignal('logo_jw_w.png')).toBe(false);
+    expect(collectHeaderCandidates(headerDoc())).toEqual(['张三']);
+
+    const root = home();
+    const redactor = new Redactor({ root });
+    redactor.setGlobalMode(true);
+    const far = ['page: 教学管理信息服务平台  url: https://school.edu.cn/home', '[e1] button "退出"', 'h3 "我的应用"', 'p "介绍"', 'h4 "远处的人"'].join('\n');
+    const masked = redactor.present(far, 'https://school.edu.cn/home');
+    expect(masked).toContain('我的应用');
+    expect(masked).toContain('远处的人');
+    expect(masked).not.toContain('‹候选');
+    redactor.noteHeaderCandidates(['张\u00A0三'], 'https://school.edu.cn/home');
+    expect(redactor.present('张\u00A0三', 'https://school.edu.cn/home')).toBe('‹候选1›');
+  });
+
+  it('ignores a stale candidate file and does not store unconfirmed candidates', () => {
+    const root = home();
+    mkdirSync(privacyDir(root), { recursive: true });
+    const path = privacyPath('school.edu.cn', root);
+    writeFileSync(
+      path,
+      `${JSON.stringify({
+        self: { account: ACCOUNT },
+        rejections: [],
+        allow: [],
+        others: {},
+        candidates: { 我的应用: { token: '‹候选1›', n: 1, value: '我的应用' } },
+        aliases: {},
+        retired: {},
+        next: { 候选: 7, 手机: 2 },
+        categories: {},
+      })}\n`,
+    );
+    const text = [
+      'page: 教学管理信息服务平台  url: https://school.edu.cn/home',
+      '[e1] button "退出"',
+      '[e2] button "功能菜单"',
+      `h4 "${NAME} 学生"`,
+      '我的应用',
+    ].join('\n');
+    const redactor = new Redactor({ root });
+    redactor.setGlobalMode(true);
+    const masked = redactor.present(text, URL);
+    expect(masked).toContain('我的应用');
+    expect(masked).toContain('功能菜单');
+    expect(masked).toContain('‹候选1›');
+    expect(masked).not.toContain(NAME);
+    const stored = JSON.parse(readFileSync(path, 'utf8')) as { candidates: Record<string, unknown>; next: Record<string, number>; self: { account?: string } };
+    expect(stored.candidates).toEqual({});
+    expect(stored.next['候选']).toBeUndefined();
+    expect(stored.next['手机']).toBe(2);
+    expect(stored.self.account).toBe(ACCOUNT);
+    expect(JSON.stringify(stored)).not.toContain('我的应用');
+    expect(JSON.stringify(stored)).not.toContain(NAME);
+
+    const restarted = new Redactor({ root });
+    restarted.setGlobalMode(true);
+    expect(restarted.present(text, URL)).toContain('‹候选1›');
+    expect(restarted.present('我的应用', URL)).toBe('我的应用');
+  });
 });
 
 describe('privacy redactor', () => {
@@ -131,6 +313,8 @@ describe('privacy redactor', () => {
     expect(masked).not.toContain(PHONE);
     expect(masked).not.toContain(TEACHER);
     expect(masked).toContain('周八');
+    expect(masked).toContain('我的应用');
+    expect(masked).toContain('教学管理信息服务平台');
     expect(masked).toContain('‹候选1›');
     expect(masked).toContain('(privacy: ‹候选1› looks like the user\'s own info; ask the user and call privacy_confirm)');
     expect(redactor.present(snapshot, URL)).toBe(masked);

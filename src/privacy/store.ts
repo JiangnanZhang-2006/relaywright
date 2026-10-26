@@ -77,19 +77,25 @@ export class PrivacyStore {
     if (!existsSync(path)) return EMPTY();
     try {
       const parsed = JSON.parse(readTextFile(path)) as Partial<PrivacyFile>;
-      return {
+      const next = { ...(parsed.next ?? {}) };
+      const hadCounter = Object.prototype.hasOwnProperty.call(next, '候选');
+      delete next['候选'];
+      const hadCandidates = parsed.candidates != null && Object.keys(parsed.candidates).length > 0;
+      const file: PrivacyFile = {
         ...EMPTY(),
         ...parsed,
         self: parsed.self ?? {},
         rejections: parsed.rejections ?? [],
         allow: parsed.allow ?? [],
         others: parsed.others ?? {},
-        candidates: parsed.candidates ?? {},
+        candidates: {},
         aliases: parsed.aliases ?? {},
         retired: parsed.retired ?? {},
-        next: parsed.next ?? {},
+        next,
         categories: {},
       };
+      if (hadCandidates || hadCounter) this.write(key, file);
+      return file;
     } catch {
       return EMPTY();
     }
@@ -98,7 +104,9 @@ export class PrivacyStore {
   write(identity: string, file: PrivacyFile): void {
     const key = safeKey(identity);
     if (!key) return;
-    const stored: PrivacyFile = { ...file, categories: {} };
+    const next = { ...file.next };
+    delete next['候选'];
+    const stored: PrivacyFile = { ...file, candidates: {}, next, categories: {} };
     writeJson(privacyPath(key, this.root), stored);
   }
 }

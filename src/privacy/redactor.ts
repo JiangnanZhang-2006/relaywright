@@ -9,6 +9,7 @@ import {
   findStructured,
   findVariants,
   fold,
+  headerCandidateName,
   labelOf,
   looksLikePage,
   maskTail,
@@ -20,7 +21,7 @@ import {
   type TokenKind,
   type ValueKind,
 } from './detect.js';
-import { PrivacyStore, safeKey, type PrivacyFile, type StoredCandidate, type StoredOther } from './store.js';
+import { PrivacyStore, safeKey, type PrivacyFile, type StoredOther } from './store.js';
 
 export class PrivacyGap extends RelayError {
   readonly gap = true;
@@ -57,10 +58,19 @@ interface Pending {
   sources: Set<Source>;
 }
 
+interface SessionCandidate {
+  token: string;
+  n: number;
+  value: string;
+}
+
 interface Bucket {
   key: string | null;
   file: PrivacyFile;
   pending: Map<string, Pending>;
+  /** Unconfirmed header candidates. Session-local; never written to the privacy file. */
+  sessionCandidates: Map<string, SessionCandidate>;
+  sessionCandidateNext: number;
   dirty: boolean;
 }
 
@@ -139,6 +149,16 @@ export class Redactor {
     this.save(bucket);
   }
 
+  /** Names from the live header (avatar / logout). Raw values are not returned to the model. */
+  noteHeaderCandidates(values: readonly string[], url?: string): void {
+    const bucket = this.bucketFor(url);
+    for (const value of values) {
+      const cleaned = headerCandidateName(value);
+      if (!cleaned) continue;
+      this.addPending(bucket, cleaned, { kind: 'name', param: 'name', tokenKind: '候选', source: 'candidate' });
+    }
+  }
+
   /** Learn labelled values, patterns, and self candidates. Does not mask and does not allocate tokens. */
   absorb(text: string, url?: string): void {
     if (!text) return;
@@ -187,6 +207,7 @@ export class Redactor {
       bucket.file.self[kind] = cleaned;
       const folded = fold(cleaned);
       delete bucket.file.candidates[folded];
+      bucket.sessionCandidates.delete(folded);
       bucket.pending.delete(folded);
       bucket.dirty = true;
       this.save(bucket);
@@ -201,6 +222,7 @@ export class Redactor {
     const kind = as ?? 'name';
     bucket.file.self[kind] = found.value;
     delete bucket.file.candidates[found.folded];
+    bucket.sessionCandidates.delete(found.folded);
     bucket.pending.delete(found.folded);
     bucket.file.aliases[token] = SELF_TOKEN[kind];
     bucket.dirty = true;
@@ -214,6 +236,7 @@ export class Redactor {
     if (!found) throw new RelayError('bad_request', `Unknown privacy token ${token}`);
     if (!bucket.file.rejections.includes(found.folded)) bucket.file.rejections.push(found.folded);
     delete bucket.file.candidates[found.folded];
+    bucket.sessionCandidates.delete(found.folded);
     bucket.pending.delete(found.folded);
     bucket.file.retired[token] = found.value;
     bucket.dirty = true;
@@ -507,27 +530,32 @@ export class Redactor {
   private tokenFor(bucket: Bucket, pending: Pending): string {
     const storedOther = bucket.file.others[pending.folded];
     if (storedOther) return storedOther.token;
-    const storedCandidate = bucket.file.candidates[pending.folded];
-    if (storedCandidate) return storedCandidate.token;
     const want = wantKind(pending);
+    if (want === '候选') return this.sessionCandidateToken(bucket, pending);
     const n = (bucket.file.next[want] ?? 0) + 1;
     bucket.file.next[want] = n;
     const token = otherToken(want, n);
-    if (want === '候选') {
-      const stored: StoredCandidate = { token, n, value: pending.value };
-      bucket.file.candidates[pending.folded] = stored;
-    } else {
-      const stored: StoredOther = {
-        token,
-        n,
-        value: pending.value,
-        kind: pending.kind,
-        param: paramStem(pending),
-        tokenKind: want,
-      };
-      bucket.file.others[pending.folded] = stored;
-    }
+    const stored: StoredOther = {
+      token,
+      n,
+      value: pending.value,
+      kind: pending.kind,
+      param: paramStem(pending),
+      tokenKind: want,
+    };
+    bucket.file.others[pending.folded] = stored;
     bucket.dirty = true;
+    return token;
+  }
+
+  /** Candidate numbers restart with the process and are not stored. */
+  private sessionCandidateToken(bucket: Bucket, pending: Pending): string {
+    const known = bucket.sessionCandidates.get(pending.folded);
+    if (known) return known.token;
+    const n = bucket.sessionCandidateNext + 1;
+    bucket.sessionCandidateNext = n;
+    const token = otherToken('候选', n);
+    bucket.sessionCandidates.set(pending.folded, { token, n, value: pending.value });
     return token;
   }
 
@@ -589,22 +617,6 @@ export class Redactor {
         param: other.param,
         tokenKind: other.tokenKind,
         sources: new Set(['label']),
-      });
-    }
-    for (const [key, candidate] of Object.entries(bucket.file.candidates)) {
-      if (this.selfFold(bucket, key)) continue;
-      const existing = bucket.pending.get(key);
-      if (existing) {
-        existing.sources.add('candidate');
-        continue;
-      }
-      bucket.pending.set(key, {
-        folded: key,
-        value: candidate.value,
-        kind: 'name',
-        param: 'name',
-        tokenKind: '候选',
-        sources: new Set(['candidate']),
       });
     }
   }
@@ -681,7 +693,7 @@ export class Redactor {
     for (const other of Object.values(bucket.file.others)) {
       if (other.token === current) return other.value;
     }
-    for (const candidate of Object.values(bucket.file.candidates)) {
+    for (const candidate of bucket.sessionCandidates.values()) {
       if (candidate.token === current) return candidate.value;
     }
     return bucket.file.retired?.[current];
@@ -695,13 +707,8 @@ export class Redactor {
   }
 
   private candidateByToken(bucket: Bucket, token: string): { folded: string; value: string } | null {
-    for (const [folded, candidate] of Object.entries(bucket.file.candidates)) {
+    for (const [folded, candidate] of bucket.sessionCandidates) {
       if (candidate.token === token) return { folded, value: candidate.value };
-    }
-    for (const pending of bucket.pending.values()) {
-      if (!pending.sources.has('candidate')) continue;
-      const stored = bucket.file.candidates[pending.folded];
-      if (stored?.token === token) return { folded: pending.folded, value: pending.value };
     }
     return null;
   }
@@ -719,7 +726,14 @@ export class Redactor {
     const cacheKey = key ?? '';
     const cached = this.buckets.get(cacheKey);
     if (cached) return cached;
-    const bucket: Bucket = { key, file: key ? this.store.read(key) : emptyFile(), pending: new Map(), dirty: false };
+    const bucket: Bucket = {
+      key,
+      file: key ? this.store.read(key) : emptyFile(),
+      pending: new Map(),
+      sessionCandidates: new Map(),
+      sessionCandidateNext: 0,
+      dirty: false,
+    };
     this.buckets.set(cacheKey, bucket);
     return bucket;
   }

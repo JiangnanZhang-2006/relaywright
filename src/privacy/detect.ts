@@ -66,7 +66,10 @@ const ID_CODES = ['1', '0', 'X', '9', '8', '7', '6', '5', '4', '3', '2'];
 
 const ROLE_WORDS = /学生|教师|老师|同学/g;
 const LOGOUT = /退出|注销|登出|logout|log\s*out|sign\s*out/i;
-const AVATAR = /avatar|photo|head|portrait|头像|zp|xszp/i;
+/** `head` must not match `heading` / `header`. `cxXszp4` matches via `xszp`. */
+export const AVATAR_PATTERN =
+  'avatar|photo|portrait|头像|user_?logo|(?:^|[^a-z])head(?:img|pic|photo)?(?![a-z])|(?:^|[^a-z])(?:xs)?zp(?![a-z])|xszp(?![a-z])';
+const SPACE = /[\t\n\r\f\v\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+/g;
 
 export interface StructuredHit {
   start: number;
@@ -83,12 +86,25 @@ export interface LabelHit {
   spec: LabelSpec;
 }
 
+/** Collapse NBSP, ideographic spaces, and other Unicode spaces to a single ASCII space. */
+export function normalizeSpace(value: string): string {
+  return value.replace(SPACE, ' ').trim();
+}
+
 export function fold(value: string): string {
-  return value.normalize('NFKC').replace(/[\s\u3000]+/g, '');
+  return normalizeSpace(value.normalize('NFKC')).replace(/ /g, '');
 }
 
 export function stripRole(value: string): string {
-  return value.replace(ROLE_WORDS, ' ').replace(/\s+/g, ' ').trim();
+  return normalizeSpace(normalizeSpace(value).replace(ROLE_WORDS, ' '));
+}
+
+export function matchesAvatarSignal(value: string): boolean {
+  return new RegExp(AVATAR_PATTERN, 'i').test(value);
+}
+
+export function headerCandidateName(value: string): string | null {
+  return cleanCandidate(value);
 }
 
 export function maskTail(value: string): string {
@@ -227,11 +243,13 @@ export function findLabels(text: string): LabelHit[] {
 
 export function findCandidates(text: string, selfValues: readonly string[]): string[] {
   const lines = text.split('\n');
+  const title = pageTitle(lines);
   const found: string[] = [];
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i] ?? '';
-    if (LOGOUT.test(line) || AVATAR.test(line)) {
-      const near = nearestName(lines, i);
+    const logout = LOGOUT.test(line) && !/^(?:h[1-6]|heading)\b/.test(line);
+    if (logout || isAvatarLine(line)) {
+      const near = nearbyHeaderName(lines, i, title);
       if (near) found.push(near);
     }
   }
@@ -239,7 +257,7 @@ export function findCandidates(text: string, selfValues: readonly string[]): str
     const flex = flexBody(self);
     if (!flex) continue;
     const wrapped = new RegExp(`([\\p{L}][\\p{L}\\p{N}]{0,19})\\s*[（(]\\s*${flex}\\s*[）)]`, 'gu');
-    const beside = new RegExp(`([\\p{L}][\\p{L}\\p{N}]{0,19})[ \\u3000]+${flex}(?![\\p{L}\\p{N}])`, 'gu');
+    const beside = new RegExp(`([\\p{L}][\\p{L}\\p{N}]{0,19})[\\t \\u00a0\\u3000]+${flex}(?![\\p{L}\\p{N}])`, 'gu');
     for (const match of text.matchAll(wrapped)) {
       const name = cleanCandidate(match[1] ?? '');
       if (name) found.push(name);
@@ -276,25 +294,49 @@ export function looksLikePage(text: string): boolean {
   return text.startsWith('page:') || text.startsWith('(navigated:') || text.startsWith('(switched to');
 }
 
-function nearestName(lines: readonly string[], index: number): string | null {
-  for (let delta = 1; delta <= 8; delta += 1) {
-    const around = [lines[index - delta], lines[index + delta]];
-    for (const line of around) {
+function pageTitle(lines: readonly string[]): string {
+  const line = lines.find((item) => item.startsWith('page:')) ?? '';
+  return /^page:\s+(.*?)\s+url:\s+/.exec(line)?.[1]?.trim() ?? '';
+}
+
+function containedInTitle(name: string, title: string): boolean {
+  const foldedName = normalizeSpace(name).toLowerCase();
+  const foldedTitle = normalizeSpace(title).toLowerCase();
+  return foldedName.length > 0 && foldedTitle.includes(foldedName);
+}
+
+/** Snapshot fallback: only h4–h6 within two lines. h1–h3 and section titles are not the user. */
+function nearbyHeaderName(lines: readonly string[], index: number, title: string): string | null {
+  for (let delta = 1; delta <= 2; delta += 1) {
+    for (const at of [index + delta, index - delta]) {
+      const line = lines[at];
       if (!line) continue;
-      const heading = /^(?:h[1-6]|heading)\s+"([^"]+)"/.exec(line);
-      if (!heading?.[1]) continue;
-      const name = cleanCandidate(heading[1]);
-      if (name) return name;
-    }
-    for (const line of around) {
-      if (!line || /^\[e\d+\]/.test(line) || line.startsWith('  | ') || line.startsWith('table ')) continue;
-      const quoted = /"([^"]+)"/.exec(line);
-      if (!quoted?.[1]) continue;
-      const name = cleanCandidate(quoted[1]);
+      const heading = /^(h[4-6])\s+"([^"]*)"/.exec(line);
+      if (!heading) continue;
+      if (sectionTitleLine(lines, at)) continue;
+      const name = acceptableCandidate(heading[2] ?? '', title);
       if (name) return name;
     }
   }
   return null;
+}
+
+function sectionTitleLine(lines: readonly string[], index: number): boolean {
+  const next = (lines[index + 1] ?? '').trim();
+  return /^(?:ul|ol|list|section|dl)\b/i.test(next);
+}
+
+function acceptableCandidate(value: string, title: string): string | null {
+  const name = cleanCandidate(value);
+  if (!name || containedInTitle(name, title)) return null;
+  return name;
+}
+
+function isAvatarLine(line: string): boolean {
+  if (/^(?:h[1-6]|heading)\s+"/.test(line) || line.startsWith('page:')) return false;
+  const lower = line.toLowerCase();
+  if (lower.includes('logo') && !/user_?logo/.test(lower)) return false;
+  return matchesAvatarSignal(line);
 }
 
 function cleanCandidate(value: string): string | null {
@@ -361,7 +403,7 @@ function flexBody(value: string): string | null {
       if (full === ch) return half;
       return `(?:${half}|${escapeRegExp(full)})`;
     })
-    .join('[\\t \\u3000]*');
+    .join('[\\t \\u00a0\\u3000]*');
 }
 
 function encodedAlt(value: string): string | null {
