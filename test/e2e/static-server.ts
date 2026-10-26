@@ -47,6 +47,16 @@ export async function startStatic(root: string): Promise<{ port: number; close: 
         res.end(data);
         return;
       }
+      if (req.method === 'GET' && url.pathname === '/privacy-home/roster.txt') {
+        const filename = encodeURIComponent('张三-20210001.txt');
+        res.writeHead(200, {
+          'content-type': 'text/plain; charset=utf-8',
+          'content-disposition': `attachment; filename="roster.txt"; filename*=UTF-8''${filename}`,
+          'cache-control': 'no-store',
+        });
+        res.end('roster');
+        return;
+      }
       if (req.method === 'GET' && url.pathname === '/zf-mock/attachment.pdf') {
         const pdf = await readFile(join(base, 'sample.pdf'));
         res.writeHead(200, {

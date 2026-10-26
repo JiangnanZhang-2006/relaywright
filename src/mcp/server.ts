@@ -12,6 +12,9 @@ import {
   listSkills,
   navigate,
   printPdf,
+  privacyConfirm,
+  privacyMark,
+  privacyReject,
   runSkill,
   saveSkill,
   showSkill,
@@ -21,6 +24,7 @@ import {
 } from '../daemon/client.js';
 import { ActSchema, DownloadSchema, issuesText, PdfSchema, TabsCommandSchema, WaitSchema, type HandoffView, type PageBody } from '../protocol.js';
 import { formatClock } from '../session/login.js';
+import { formatDeidentified } from '../privacy/redactor.js';
 import { formatRunReport } from '../skills/format.js';
 import { CheckSchema, RunSkillInputSchema, SaveSkillInputSchema } from '../skills/schema.js';
 
@@ -186,7 +190,7 @@ export async function startMcpServer(): Promise<void> {
       try {
         const saved = await saveSkill(parsed.data);
         const warnings = saved.warnings.length === 0 ? 'warnings: 0' : saved.warnings.map((warning) => `- ${warning}`).join('\n');
-        return ok(`saved: ${saved.name} v${saved.version}\npath: ${saved.path}\n${warnings}\n\n${saved.yaml}`);
+        return ok(`saved: ${saved.name} v${saved.version}\npath: ${saved.path}\n${formatDeidentified(saved.deidentified)}\n${warnings}\n\n${saved.yaml}`);
       } catch (err) {
         return toolError(err);
       }
@@ -314,6 +318,52 @@ export async function startMcpServer(): Promise<void> {
         const result = await browserTabs(parsed.data);
         if ('snapshot' in result) return ok(pageText(result));
         return ok(result.text);
+      } catch (err) {
+        return toolError(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'privacy_mark',
+    {
+      description:
+        "Remember one of the user's own values, such as the name shown in the page header. Pass a snapshot ref or a value, and as=name|account|phone|email|idcard. The reply names the token only and does not echo the value.",
+      inputSchema: {
+        as: z.enum(['name', 'account', 'phone', 'email', 'idcard']).describe('Which self value this is.'),
+        ref: z.string().optional().describe('Snapshot ref whose text is the value.'),
+        value: z.string().optional().describe('The value itself. Prefer ref when the text is on the page.'),
+      },
+    },
+    async (args) => {
+      try {
+        const result = await privacyMark(args);
+        return ok(`marked ${result.token}`);
+      } catch (err) {
+        return toolError(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'privacy_confirm',
+    {
+      description:
+        'Confirm or reject a ‹候选N› token from model-redaction mode. Confirm maps it to a self token. The reply does not include the value.',
+      inputSchema: {
+        token: z.string().describe('Candidate token, for example ‹候选1›.'),
+        as: z.enum(['name', 'account', 'phone', 'email', 'idcard']).optional().describe('Self kind to store. Defaults to name.'),
+        reject: z.boolean().optional().describe('Reject the candidate instead of confirming it.'),
+      },
+    },
+    async ({ token, as, reject }) => {
+      try {
+        if (reject) {
+          const result = await privacyReject(token);
+          return ok(`rejected ${result.token}`);
+        }
+        const result = await privacyConfirm(token, as ?? 'name');
+        return ok(`confirmed ${result.token}`);
       } catch (err) {
         return toolError(err);
       }

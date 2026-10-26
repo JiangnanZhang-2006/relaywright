@@ -17,6 +17,32 @@ const RollbackBody = z.object({
   to: z.number().int().positive(),
 });
 
+const PrivacyKind = z.enum(['name', 'account', 'phone', 'email', 'idcard']);
+
+const PrivacyModeBody = z.object({
+  on: z.boolean(),
+  identity: z.string().min(1).optional(),
+});
+
+const PrivacyAddBody = z.object({
+  kind: PrivacyKind,
+  value: z.string().min(1),
+  identity: z.string().min(1).optional(),
+});
+
+const PrivacyConfirmBody = z.object({
+  token: z.string().min(1),
+  as: PrivacyKind.optional(),
+  reject: z.boolean().optional(),
+  identity: z.string().min(1).optional(),
+});
+
+const PrivacyMarkBody = z.object({
+  ref: z.string().min(1).optional(),
+  value: z.string().min(1).optional(),
+  as: PrivacyKind,
+});
+
 export interface AppOptions {
   token: string;
   session: BrowserControl;
@@ -26,6 +52,15 @@ export interface AppOptions {
 
 export function createApp(options: AppOptions): Hono {
   const app = new Hono();
+  const show = (c: Context, body: unknown): Response => c.json(options.session.redactOutbound(body));
+  const fail = (c: Context, err: unknown): Response =>
+    browserError(c, err, (message) => {
+      try {
+        return options.session.redactOutbound(message);
+      } catch {
+        return 'Request failed';
+      }
+    });
 
   app.onError((err, c) => {
     logDaemon(`http error: ${errorText(err)}`);
@@ -55,9 +90,9 @@ export function createApp(options: AppOptions): Hono {
   app.get('/status', async (c) => {
     try {
       const status = await options.session.status();
-      return c.json(options.build ? { ...status, build: options.build } : status);
+      return show(c, options.build ? { ...status, build: options.build } : status);
     } catch (err) {
-      return browserError(c, err);
+      return fail(c, err);
     }
   });
 
@@ -66,9 +101,9 @@ export function createApp(options: AppOptions): Hono {
       const body = NavigateBody.safeParse(await readJson(c));
       if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
       const url = parseHttpUrl(body.data.url);
-      return c.json(await options.session.navigate(url));
+      return show(c, await options.session.navigate(url));
     } catch (err) {
-      return browserError(c, err);
+      return fail(c, err);
     }
   });
 
@@ -79,9 +114,9 @@ export function createApp(options: AppOptions): Hono {
         maxRows: emptyAsUndefined(c.req.query('maxRows')) === undefined ? undefined : Number(c.req.query('maxRows')),
       });
       if (!parsed.success) return jsonError(c, 400, 'bad_request', issuesText(parsed.error));
-      return c.json(await options.session.snapshot({ mode: parsed.data.mode, maxRows: parsed.data.maxRows }));
+      return show(c, await options.session.snapshot({ mode: parsed.data.mode, maxRows: parsed.data.maxRows }));
     } catch (err) {
-      return browserError(c, err);
+      return fail(c, err);
     }
   });
 
@@ -89,9 +124,9 @@ export function createApp(options: AppOptions): Hono {
     try {
       const body = ActSchema.safeParse(await readJson(c));
       if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
-      return c.json(await options.session.act(body.data));
+      return show(c, await options.session.act(body.data));
     } catch (err) {
-      return browserError(c, err);
+      return fail(c, err);
     }
   });
 
@@ -99,9 +134,9 @@ export function createApp(options: AppOptions): Hono {
     try {
       const body = DownloadSchema.safeParse(await readJson(c));
       if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
-      return c.json(await options.session.download(body.data));
+      return show(c, await options.session.download(body.data));
     } catch (err) {
-      return browserError(c, err);
+      return fail(c, err);
     }
   });
 
@@ -109,9 +144,9 @@ export function createApp(options: AppOptions): Hono {
     try {
       const body = PdfSchema.safeParse(await readJson(c));
       if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
-      return c.json(await options.session.pdf(body.data));
+      return show(c, await options.session.pdf(body.data));
     } catch (err) {
-      return browserError(c, err);
+      return fail(c, err);
     }
   });
 
@@ -119,17 +154,17 @@ export function createApp(options: AppOptions): Hono {
     try {
       const body = WaitSchema.safeParse(await readJson(c));
       if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
-      return c.json(await options.session.waitFor(body.data));
+      return show(c, await options.session.waitFor(body.data));
     } catch (err) {
-      return browserError(c, err);
+      return fail(c, err);
     }
   });
 
   app.get('/tabs', async (c) => {
     try {
-      return c.json(await options.session.tabs({ action: 'list' }));
+      return show(c, await options.session.tabs({ action: 'list' }));
     } catch (err) {
-      return browserError(c, err);
+      return fail(c, err);
     }
   });
 
@@ -137,39 +172,39 @@ export function createApp(options: AppOptions): Hono {
     try {
       const body = TabsCommandSchema.safeParse(await readJson(c));
       if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
-      return c.json(await options.session.tabs(body.data));
+      return show(c, await options.session.tabs(body.data));
     } catch (err) {
-      return browserError(c, err);
+      return fail(c, err);
     }
   });
 
-  app.get('/trace', (c) => c.json(options.session.trace()));
+  app.get('/trace', (c) => show(c, options.session.trace()));
 
-  app.post('/trace/clear', (c) => c.json(options.session.clearTrace()));
+  app.post('/trace/clear', (c) => show(c, options.session.clearTrace()));
 
   app.post('/skills/save', async (c) => {
     try {
       const body = SaveSkillInputSchema.safeParse(await readJson(c));
       if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
-      return c.json(options.session.saveSkill(body.data));
+      return show(c, options.session.saveSkill(body.data));
     } catch (err) {
-      return browserError(c, err);
+      return fail(c, err);
     }
   });
 
   app.get('/skills', (c) => {
     try {
-      return c.json({ skills: options.session.listSkills() });
+      return show(c, { skills: options.session.listSkills() });
     } catch (err) {
-      return browserError(c, err);
+      return fail(c, err);
     }
   });
 
   app.get('/skills/:name/history', (c) => {
     try {
-      return c.json(options.session.skillHistory(c.req.param('name')));
+      return show(c, options.session.skillHistory(c.req.param('name')));
     } catch (err) {
-      return browserError(c, err);
+      return fail(c, err);
     }
   });
 
@@ -177,9 +212,9 @@ export function createApp(options: AppOptions): Hono {
     try {
       const body = RollbackBody.safeParse(await readJson(c));
       if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
-      return c.json(options.session.rollbackSkill(c.req.param('name'), body.data.to));
+      return show(c, options.session.rollbackSkill(c.req.param('name'), body.data.to));
     } catch (err) {
-      return browserError(c, err);
+      return fail(c, err);
     }
   });
 
@@ -187,17 +222,17 @@ export function createApp(options: AppOptions): Hono {
     try {
       const body = RunSkillInputSchema.safeParse(await readJson(c));
       if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
-      return c.json(await options.session.runSkill(c.req.param('name'), body.data));
+      return show(c, await options.session.runSkill(c.req.param('name'), body.data));
     } catch (err) {
-      return browserError(c, err);
+      return fail(c, err);
     }
   });
 
   app.get('/skills/:name', (c) => {
     try {
-      return c.json(options.session.readSkill(c.req.param('name'), parseVersion(c.req.query('version'))));
+      return show(c, options.session.readSkill(c.req.param('name'), parseVersion(c.req.query('version'))));
     } catch (err) {
-      return browserError(c, err);
+      return fail(c, err);
     }
   });
 
@@ -205,9 +240,9 @@ export function createApp(options: AppOptions): Hono {
     try {
       const body = HandoffStartSchema.safeParse(await readJson(c));
       if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
-      return c.json(await options.session.requestHandoff(body.data.reason, body.data.url));
+      return show(c, await options.session.requestHandoff(body.data.reason, body.data.url));
     } catch (err) {
-      return browserError(c, err);
+      return fail(c, err);
     }
   });
 
@@ -215,25 +250,25 @@ export function createApp(options: AppOptions): Hono {
     try {
       const body = HandoffWaitSchema.safeParse(await readJson(c));
       if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
-      return c.json(await options.session.waitHandoff(body.data.timeout_ms));
+      return show(c, await options.session.waitHandoff(body.data.timeout_ms));
     } catch (err) {
-      return browserError(c, err);
+      return fail(c, err);
     }
   });
 
   app.post('/handoff/cancel', async (c) => {
     try {
-      return c.json(await options.session.cancelHandoff());
+      return show(c, await options.session.cancelHandoff());
     } catch (err) {
-      return browserError(c, err);
+      return fail(c, err);
     }
   });
 
   app.get('/identities', (c) => {
     try {
-      return c.json({ identities: options.session.listIdentities() });
+      return show(c, { identities: options.session.listIdentities() });
     } catch (err) {
-      return browserError(c, err);
+      return fail(c, err);
     }
   });
 
@@ -241,17 +276,83 @@ export function createApp(options: AppOptions): Hono {
     try {
       const body = IdentitySaveSchema.safeParse(await readJson(c));
       if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
-      return c.json(await options.session.saveIdentity(body.data));
+      return show(c, await options.session.saveIdentity(body.data));
     } catch (err) {
-      return browserError(c, err);
+      return fail(c, err);
     }
   });
 
   app.post('/identities/:name/revoke', async (c) => {
     try {
-      return c.json(await options.session.revokeIdentity(c.req.param('name')));
+      return show(c, await options.session.revokeIdentity(c.req.param('name')));
     } catch (err) {
-      return browserError(c, err);
+      return fail(c, err);
+    }
+  });
+
+  app.post('/privacy/mode', async (c) => {
+    try {
+      const body = PrivacyModeBody.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return c.json(options.session.privacyMode(body.data.on, body.data.identity));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  app.post('/privacy/add', async (c) => {
+    try {
+      const body = PrivacyAddBody.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return c.json(options.session.privacyAdd(body.data.kind, body.data.value, body.data.identity));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  app.post('/privacy/confirm', async (c) => {
+    try {
+      const body = PrivacyConfirmBody.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return c.json(options.session.privacyConfirm(body.data));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  app.post('/privacy/reject', async (c) => {
+    try {
+      const body = PrivacyConfirmBody.pick({ token: true, identity: true }).safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return c.json(options.session.privacyConfirm({ ...body.data, reject: true }));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  app.get('/privacy/list', (c) => {
+    try {
+      return c.json(options.session.privacyList(emptyAsUndefined(c.req.query('identity'))));
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  app.get('/privacy/check', (c) => {
+    try {
+      return c.json(options.session.privacyCheck());
+    } catch (err) {
+      return fail(c, err);
+    }
+  });
+
+  app.post('/privacy/mark', async (c) => {
+    try {
+      const body = PrivacyMarkBody.safeParse(await readJson(c));
+      if (!body.success) return jsonError(c, 400, 'bad_request', issuesText(body.error));
+      return c.json(await options.session.privacyMark(body.data));
+    } catch (err) {
+      return fail(c, err);
     }
   });
 
@@ -342,17 +443,17 @@ function parseHttpUrl(value: string): string {
   return url.toString();
 }
 
-function browserError(c: Context, err: unknown): Response {
-  if (err instanceof HttpError) return jsonError(c, err.status, err.code, err.message);
+function browserError(c: Context, err: unknown, redact: (message: string) => string = (message) => message): Response {
+  if (err instanceof HttpError) return jsonError(c, err.status, err.code, redact(err.message));
   if (err instanceof RelayError) {
     logDaemon(`${err.code}: ${err.message}`);
-    return jsonError(c, relayStatus(err.code), err.code, err.message);
+    return jsonError(c, relayStatus(err.code), err.code, redact(err.message));
   }
   const timeout = err instanceof Error && err.name === 'TimeoutError';
   const message = errorText(err);
   logDaemon(`${timeout ? 'timeout' : 'browser_error'}: ${message}`);
   const code: RelayErrorCode | 'browser_error' = timeout ? 'timeout' : 'browser_error';
-  return jsonError(c, timeout ? 504 : 500, code, message);
+  return jsonError(c, timeout ? 504 : 500, code, redact(message));
 }
 
 function jsonError(

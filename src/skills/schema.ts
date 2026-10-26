@@ -186,12 +186,20 @@ export const SaveSkillInputSchema = z.object({
 
 export type SaveSkillInput = z.infer<typeof SaveSkillInputSchema>;
 
+export const DeidentifiedSchema = z.object({
+  tokens: z.array(z.object({ name: z.string(), count: z.number().int().nonnegative() })),
+  params: z.array(z.object({ name: z.string(), kind: z.string(), count: z.number().int().nonnegative() })),
+});
+
+export type DeidentifiedReport = z.infer<typeof DeidentifiedSchema>;
+
 export const SaveResultSchema = z.object({
   name: z.string(),
   version: z.number().int().positive(),
   path: z.string(),
   yaml: z.string(),
   warnings: z.array(z.string()),
+  deidentified: DeidentifiedSchema.optional(),
 });
 
 export type SaveSkillResult = z.infer<typeof SaveResultSchema>;

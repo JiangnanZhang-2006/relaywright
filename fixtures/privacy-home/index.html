@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>张三的主页</title>
+</head>
+<body>
+  <img alt="头像" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+  <h4>张三 学生</h4>
+  <button type="button" id="logout">退出</button>
+  <button type="button" id="refresh">刷新</button>
+  <table>
+    <caption>名单</caption>
+    <thead>
+      <tr><th>姓名</th><th>学号</th><th>手机</th><th>教师</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>李四</td>
+        <td>20219999</td>
+        <td>13800138000</td>
+        <td>韩易辰</td>
+      </tr>
+    </tbody>
+  </table>
+  <label for="sid">学号</label>
+  <input id="sid" value="20210001">
+  <label for="nick">昵称</label>
+  <input id="nick" value="小张">
+  <p>身份证：110101199003078515</p>
+  <p>邮箱：li.si@example.com</p>
+  <p>银行卡：4111111111111111</p>
+  <h3>课表 2025-2026-1-北校区-南3-B101-周八</h3>
+  <p><button type="button" id="get">下载名单</button></p>
+  <script>
+    document.getElementById('get').addEventListener('click', function () {
+      var blob = new Blob(['roster'], { type: 'text/plain' });
+      var url = URL.createObjectURL(blob);
+      var link = document.createElement('a');
+      link.href = url;
+      link.download = '张三-20210001.txt';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    });
+  </script>
+</body>
+</html>

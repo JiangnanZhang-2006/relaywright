@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { readTextFile, relaywrightHome } from '../config/paths.js';
 import { RelayError } from '../errors.js';
 import { parseSkill, SkillNameSchema, stringifySkill, type Skill, type SkillDocument, type SkillHistory, type SkillSummary } from './schema.js';
@@ -18,6 +18,13 @@ export function writeSkill(skill: Skill, overwrite: boolean, root = relaywrightH
   writeFileSync(join(versions, `v${version}.yaml`), yaml, 'utf8');
   writeFileSync(current, yaml, 'utf8');
   return { path: current, yaml, version };
+}
+
+/** Checks travel with the skill. They are already de-identified by the time they are written. */
+export function writeSkillChecks(skill: Skill, yamlPath: string): void {
+  const checks = skill.steps.filter((step) => step.expect).map((step) => ({ id: step.id, any: step.expect?.any ?? [] }));
+  if (checks.length === 0) return;
+  writeFileSync(join(dirname(yamlPath), 'checks.json'), `${JSON.stringify(checks, null, 2)}\n`, 'utf8');
 }
 
 export function readSkill(name: string, version?: number, root = relaywrightHome()): SkillDocument {

@@ -4,6 +4,7 @@ import { recordAudit } from '../audit/log.js';
 import { errorText, logDaemon } from '../config/paths.js';
 import { notify } from '../notify.js';
 import { visiblePasswordEvaluator } from '../perception/password-like.js';
+import { loginAccountEvaluator } from '../privacy/login-account.js';
 import type { HandoffView, IdentityMeta } from '../protocol.js';
 import { hostOfUrl } from './domain.js';
 import type { IdentityStore } from './identity.js';
@@ -23,6 +24,8 @@ interface Waiting {
   /** Last poll URL before completion. Fallback when no password page was seen. */
   humanPageUrl: string;
   siteHost: string;
+  /** Last non-empty username seen on the login page. Never returned to the model. */
+  loginAccount: string;
 }
 
 interface Finished {
@@ -39,6 +42,7 @@ export interface HandoffHost {
   getBrowser: () => Browser | null;
   getTabs: () => TabSet | null;
   identities: IdentityStore;
+  noteLoginAccount?: (account: string, urls: string[]) => void;
 }
 
 export class HandoffManager {
@@ -93,6 +97,7 @@ export class HandoffManager {
       lastLoginPageUrl: null,
       humanPageUrl: page.url(),
       siteHost: hostOfUrl(page.url()) ?? '',
+      loginAccount: '',
     };
     this.phase = waiting;
     try {
@@ -184,6 +189,11 @@ export class HandoffManager {
         const moved = now !== url;
         if (!moved && (presence === 'yes' || isLoginPath(now))) waiting.lastLoginPageUrl = now;
         if (moved && isLoginPath(now)) waiting.lastLoginPageUrl = now;
+        if (presence !== 'unknown' && (presence === 'yes' || isLoginPath(now))) {
+          const account = await readLoginAccount(page);
+          if (this.phase !== waiting) return;
+          if (account) waiting.loginAccount = account;
+        }
         const visible = moved || presence !== 'no';
         const check = this.host.identities.findByUrl(waiting.loginUrl)?.login_check;
         const text = check?.text_absent ? await pageText(page) : '';
@@ -218,6 +228,14 @@ export class HandoffManager {
           identity = await this.host.identities.capture(waiting.loginUrl, finalUrl, loginPageUrl);
         } catch (err) {
           logDaemon(`identity capture failed: ${errorText(err)}`);
+        }
+        if (waiting.loginAccount) {
+          try {
+            const urls = [finalUrl, waiting.loginUrl, waiting.lastLoginPageUrl].filter((item): item is string => Boolean(item));
+            this.host.noteLoginAccount?.(waiting.loginAccount, urls);
+          } catch (err) {
+            logDaemon(`login account capture failed: ${errorText(err)}`);
+          }
         }
       }
       const elapsed = Date.now() - waiting.startedAt;
@@ -287,6 +305,15 @@ async function passwordPresence(page: Page): Promise<PasswordPresence> {
     ]);
   } catch {
     return 'unknown';
+  }
+}
+
+async function readLoginAccount(page: Page): Promise<string> {
+  try {
+    const value = await Promise.race([page.evaluate(loginAccountEvaluator()), delay(1_000).then(() => '')]);
+    return typeof value === 'string' ? value.trim() : '';
+  } catch {
+    return '';
   }
 }
 

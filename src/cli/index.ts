@@ -5,6 +5,7 @@ import { tailAudit, verifyAudit } from '../audit/log.js';
 import { errorText, packageVersion, readTextFile } from '../config/paths.js';
 import { normalizeActArgs } from './act-args.js';
 import { issuesText, type PageBody } from '../protocol.js';
+import { formatDeidentified } from '../privacy/redactor.js';
 import { formatRunReport, formatSkillList, formatTrace } from '../skills/format.js';
 import { CheckSchema, type CheckInput } from '../skills/schema.js';
 import { z } from 'zod';
@@ -30,6 +31,12 @@ import {
   rollbackSkill,
   runSkill,
   saveIdentity,
+  privacyAdd,
+  privacyCheck,
+  privacyConfirm,
+  privacyList,
+  privacyMode,
+  privacyReject,
   saveSkill,
   showSkill,
   skillHistory,
@@ -827,7 +834,8 @@ Examples:
       ...(overwrite ? { overwrite: true } : {}),
     });
     const warningText = saved.warnings.length === 0 ? 'warnings: 0' : `warnings:\n${saved.warnings.map((warning) => `- ${warning}`).join('\n')}`;
-    emit(command, `saved: ${saved.name} v${saved.version}\npath: ${saved.path}\n${warningText}\n\n${saved.yaml}`, saved);
+    const removed = formatDeidentified(saved.deidentified);
+    emit(command, `saved: ${saved.name} v${saved.version}\npath: ${saved.path}\n${removed}\n${warningText}\n\n${saved.yaml}`, saved);
   });
 });
 
@@ -866,6 +874,150 @@ Examples:
     if (current.state !== 'done') process.exitCode = 20;
   });
 });
+
+const privacy = program.command('privacy').description('Self values and optional model redaction');
+addJson(privacy);
+
+addJson(
+  privacy
+    .command('mode')
+    .description('Turn model-facing redaction on or off. Default is off.')
+    .argument('<state>', 'on or off')
+    .option('--identity <domain>', 'set the override for one site instead of the global default')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright privacy mode on
+  relaywright privacy mode off
+  relaywright privacy mode on --identity school.edu.cn
+`,
+    ),
+).action(function (this: Command, state: string) {
+  const command = this;
+  return guard(command, async () => {
+    const on = parsePrivacyState(state);
+    const identity = command.getOptionValue('identity') as string | undefined;
+    const result = await privacyMode(on, identity);
+    const where = result.scope === 'identity' ? result.identity : 'global';
+    emit(command, `model redaction ${result.model_redaction ? 'on' : 'off'} (${where})`, result);
+  });
+});
+
+addJson(
+  privacy
+    .command('add')
+    .description('Remember one of your own values for the current site')
+    .argument('<kind>', 'name, account, phone, email, or idcard')
+    .argument('[value]', 'value, or omit to read it from stdin')
+    .option('--identity <domain>', 'site to store the value on')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright privacy add name 张三
+  relaywright privacy add account --identity school.edu.cn
+  echo 13800138000 | relaywright privacy add phone
+`,
+    ),
+).action(function (this: Command, kind: string, value: string | undefined) {
+  const command = this;
+  return guard(command, async () => {
+    const secret = value ?? (await readStdinValue());
+    const identity = command.getOptionValue('identity') as string | undefined;
+    const result = await privacyAdd(parsePrivacyKind(kind), secret, identity);
+    emit(command, `added ${result.token}`, result);
+  });
+});
+
+addJson(
+  privacy
+    .command('confirm')
+    .description('Turn a candidate token into a self value')
+    .argument('<token>', 'candidate token such as ‹候选1›')
+    .option('--as <kind>', 'name, account, phone, email, or idcard', 'name')
+    .option('--identity <domain>', 'site the candidate belongs to')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright privacy confirm ‹候选1› --as name
+`,
+    ),
+).action(function (this: Command, token: string) {
+  const command = this;
+  return guard(command, async () => {
+    const identity = command.getOptionValue('identity') as string | undefined;
+    const result = await privacyConfirm(token, parsePrivacyKind(String(command.getOptionValue('as'))), identity);
+    emit(command, `confirmed ${result.token}`, result);
+  });
+});
+
+addJson(
+  privacy
+    .command('reject')
+    .description('Stop treating a candidate as your own information')
+    .argument('<token>', 'candidate token such as ‹候选1›')
+    .option('--identity <domain>', 'site the candidate belongs to')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright privacy reject ‹候选1›
+`,
+    ),
+).action(function (this: Command, token: string) {
+  const command = this;
+  return guard(command, async () => {
+    const identity = command.getOptionValue('identity') as string | undefined;
+    const result = await privacyReject(token, identity);
+    emit(command, `rejected ${result.token}`, result);
+  });
+});
+
+addJson(
+  privacy
+    .command('list')
+    .description('List your own values, masked except the last two characters')
+    .option('--identity <domain>', 'site to list')
+    .addHelpText(
+      'after',
+      `
+Examples:
+  relaywright privacy list
+  relaywright privacy list --identity school.edu.cn
+`,
+    ),
+).action(function (this: Command) {
+  const command = this;
+  return guard(command, async () => {
+    const identity = command.getOptionValue('identity') as string | undefined;
+    const result = await privacyList(identity);
+    const text = result.self.length === 0 ? 'no self values' : result.self.map((item) => `${item.token}  ${item.kind}  ${item.masked}`).join('\n');
+    emit(command, text, result);
+  });
+});
+
+privacy
+  .command('check')
+  .description('Print detected values for the current page. Local CLI only; not available to MCP.')
+  .addHelpText(
+    'after',
+    `
+Examples:
+  relaywright privacy check
+`,
+  )
+  .action(function (this: Command) {
+    const command = this;
+    return guard(command, async () => {
+      const result = await privacyCheck();
+      const counts = `self ${result.counts.self}  others ${result.counts.others}  candidates ${result.counts.candidates}`;
+      const text = result.lines.length === 0 ? `nothing to report\n${counts}` : `${result.lines.join('\n')}\n${counts}`;
+      process.stdout.write(`${text}\n`);
+      void command;
+    });
+  });
 
 const identity = program.command('identity').description('Login identities stored by Chrome');
 addJson(identity);
@@ -998,6 +1150,27 @@ Examples:
     process.exitCode = 1;
   });
 });
+
+function parsePrivacyState(state: string): boolean {
+  const normalized = state.trim().toLowerCase();
+  if (normalized === 'on') return true;
+  if (normalized === 'off') return false;
+  throw new Error('Expected on or off');
+}
+
+function parsePrivacyKind(kind: string): 'name' | 'account' | 'phone' | 'email' | 'idcard' {
+  if (kind === 'name' || kind === 'account' || kind === 'phone' || kind === 'email' || kind === 'idcard') return kind;
+  throw new Error('Kind must be name, account, phone, email, or idcard');
+}
+
+async function readStdinValue(): Promise<string> {
+  if (process.stdin.isTTY) throw new Error('Pass the value as an argument, or pipe it on stdin');
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  const value = Buffer.concat(chunks).toString('utf8').replace(/\r?\n$/, '');
+  if (!value) throw new Error('Stdin was empty');
+  return value;
+}
 
 function collect(value: string, previous: string[] = []): string[] {
   return [...previous, value];

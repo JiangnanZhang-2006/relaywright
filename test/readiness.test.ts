@@ -43,6 +43,17 @@ function control(partial: Partial<BrowserControl> & Pick<BrowserControl, 'browse
     listIdentities: () => [],
     saveIdentity: fail,
     revokeIdentity: fail,
+    redactOutbound: <T>(value: T) => value,
+    privacyMode: () => ({ model_redaction: false, scope: 'global' as const }),
+    privacyAdd: () => {
+      throw new RelayError('bad_request', 'not used');
+    },
+    privacyConfirm: () => {
+      throw new RelayError('bad_request', 'not used');
+    },
+    privacyList: () => ({ identity: null, self: [] }),
+    privacyCheck: () => ({ identity: null, lines: [], counts: { self: 0, others: 0, candidates: 0 } }),
+    privacyMark: fail,
     tabs: async () => ({ tabs: [], text: '' }),
     ...partial,
   };

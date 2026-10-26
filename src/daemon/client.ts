@@ -392,6 +392,78 @@ export async function revokeIdentity(name: string): Promise<{ name: string }> {
   );
 }
 
+const PrivacyKindSchema = z.enum(['name', 'account', 'phone', 'email', 'idcard']);
+
+const PrivacyModeResultSchema = z.object({
+  model_redaction: z.boolean(),
+  scope: z.enum(['global', 'identity']),
+  identity: z.string().optional(),
+});
+
+const PrivacyTokenResultSchema = z.object({
+  token: z.string(),
+  as: PrivacyKindSchema.optional(),
+  rejected: z.literal(true).optional(),
+});
+
+const PrivacyListSchema = z.object({
+  identity: z.string().nullable(),
+  self: z.array(z.object({ token: z.string(), kind: PrivacyKindSchema, masked: z.string() })),
+});
+
+const PrivacyCheckSchema = z.object({
+  identity: z.string().nullable(),
+  lines: z.array(z.string()),
+  counts: z.object({ self: z.number(), others: z.number(), candidates: z.number() }),
+});
+
+export type PrivacyKindName = z.infer<typeof PrivacyKindSchema>;
+
+export async function privacyMode(on: boolean, identity?: string): Promise<z.infer<typeof PrivacyModeResultSchema>> {
+  const info = await ensureDaemon();
+  return PrivacyModeResultSchema.parse(await authorized(info, '/privacy/mode', { method: 'POST', body: { on, ...(identity ? { identity } : {}) } }));
+}
+
+export async function privacyAdd(kind: PrivacyKindName, value: string, identity?: string): Promise<{ token: string; as: PrivacyKindName }> {
+  const info = await ensureDaemon();
+  return PrivacyTokenResultSchema.parse(
+    await authorized(info, '/privacy/add', { method: 'POST', body: { kind, value, ...(identity ? { identity } : {}) } }),
+  ) as { token: string; as: PrivacyKindName };
+}
+
+export async function privacyConfirm(token: string, as?: PrivacyKindName, identity?: string): Promise<z.infer<typeof PrivacyTokenResultSchema>> {
+  const info = await ensureDaemon();
+  return PrivacyTokenResultSchema.parse(
+    await authorized(info, '/privacy/confirm', { method: 'POST', body: { token, ...(as ? { as } : {}), ...(identity ? { identity } : {}) } }),
+  );
+}
+
+export async function privacyReject(token: string, identity?: string): Promise<z.infer<typeof PrivacyTokenResultSchema>> {
+  const info = await ensureDaemon();
+  return PrivacyTokenResultSchema.parse(
+    await authorized(info, '/privacy/reject', { method: 'POST', body: { token, ...(identity ? { identity } : {}) } }),
+  );
+}
+
+export async function privacyList(identity?: string): Promise<z.infer<typeof PrivacyListSchema>> {
+  const info = await ensureDaemon();
+  const query = identity ? `?identity=${encodeURIComponent(identity)}` : '';
+  return PrivacyListSchema.parse(await authorized(info, `/privacy/list${query}`));
+}
+
+export async function privacyCheck(): Promise<z.infer<typeof PrivacyCheckSchema>> {
+  const info = await ensureDaemon();
+  return PrivacyCheckSchema.parse(await authorized(info, '/privacy/check'));
+}
+
+export async function privacyMark(input: { ref?: string; value?: string; as: PrivacyKindName }): Promise<{ token: string; as: PrivacyKindName }> {
+  const info = await ensureDaemon();
+  return PrivacyTokenResultSchema.parse(await authorized(info, '/privacy/mark', { method: 'POST', body: input })) as {
+    token: string;
+    as: PrivacyKindName;
+  };
+}
+
 export async function waitForBrowserReady(info: DaemonInfo): Promise<void> {
   const started = Date.now();
   let sawDownload = false;

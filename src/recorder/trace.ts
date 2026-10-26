@@ -57,7 +57,7 @@ export class TraceLog {
     return this.view();
   }
 
-  append(input: TraceAppend): TraceStep {
+  append(input: TraceAppend, persist: (step: TraceStep) => TraceStep = (step) => step): TraceStep {
     const step: TraceStep = {
       n: this.steps.length + 1,
       at: new Date().toISOString(),
@@ -76,7 +76,8 @@ export class TraceLog {
     if (input.landscape !== undefined) step.landscape = input.landscape;
     this.steps.push(step);
     mkdirSync(this.dir, { recursive: true });
-    appendFileSync(join(this.dir, `${this.id}.jsonl`), `${JSON.stringify(step)}\n`, 'utf8');
+    const stored = persist(step);
+    appendFileSync(join(this.dir, `${this.id}.jsonl`), `${JSON.stringify(stored)}\n`, 'utf8');
     return step;
   }
 }

@@ -5,21 +5,24 @@ import { recordAudit } from '../audit/log.js';
 import { resolveBrowserForLaunch, type ResolvedBrowser } from '../browser/resolve.js';
 import { defaultProfileDir, downloadsDir, ensureHomeLayout, errorText, logDaemon } from '../config/paths.js';
 import { browserDownloadingMessage, RelayError, staleTabRefMessage } from '../errors.js';
+import type { SelfKind } from '../privacy/detect.js';
+import { PrivacyGap, Redactor, type PrivacyCheck, type PrivacyList } from '../privacy/redactor.js';
 import type { HandoffView, IdentityMeta } from '../protocol.js';
 import { ensureTabHeader, pageHeader, switchBanner } from '../perception/snapshot.js';
 import type { ActInput, DaemonStatus, DownloadInfo, DownloadInput, PageBody, PdfInput, PdfResult, TabsCommand, TabsList, WaitInput } from '../protocol.js';
 import { observedLines, TraceLog } from '../recorder/trace.js';
 import { valueForTrace } from '../recorder/redact.js';
-import type { DescribedTarget, TraceView } from '../recorder/types.js';
+import type { DescribedTarget, TraceStep, TraceView } from '../recorder/types.js';
 import { buildSkill } from '../skills/save.js';
 import type { MatrixResult, RunSkillInput, SaveSkillInput, SaveSkillResult, SkillDocument, SkillHistory, SkillSummary } from '../skills/schema.js';
-import { runMatrix } from '../skills/run.js';
+import { runMatrix, runOutputDir } from '../skills/run.js';
 import {
   listSkills as listStoredSkills,
   readSkill as readStoredSkill,
   rollbackSkill as rollbackStoredSkill,
   skillHistory as storedSkillHistory,
   writeSkill as writeStoredSkill,
+  writeSkillChecks,
 } from '../skills/store.js';
 import {
   assertSaveAs,
@@ -81,6 +84,13 @@ export interface BrowserControl {
   listIdentities(): IdentityMeta[];
   saveIdentity(input: { name?: string; domains?: string[] }): Promise<IdentityMeta>;
   revokeIdentity(name: string): Promise<{ name: string }>;
+  redactOutbound<T>(value: T): T;
+  privacyMode(on: boolean, identity?: string): { model_redaction: boolean; scope: 'global' | 'identity'; identity?: string };
+  privacyAdd(kind: SelfKind, value: string, identity?: string): { token: string; as: SelfKind };
+  privacyConfirm(input: { token: string; as?: SelfKind; reject?: boolean; identity?: string }): { token: string; as?: SelfKind; rejected?: true };
+  privacyList(identity?: string): PrivacyList;
+  privacyCheck(): PrivacyCheck;
+  privacyMark(input: { ref?: string; value?: string; as: SelfKind }): Promise<{ token: string; as: SelfKind }>;
 }
 
 export type LaunchBrowser = (request: LaunchBrowserRequest) => Promise<Browser>;
@@ -108,6 +118,9 @@ export class BrowserSession implements BrowserControl {
   private releasing = false;
   private persistTimer: ReturnType<typeof setInterval> | null = null;
   private readonly traceLog = new TraceLog();
+  private readonly privacy = new Redactor();
+  private pageUrl = '';
+  private lastRawSnapshot = '';
   private readonly identities: IdentityStore;
   private readonly handoff: HandoffManager;
   private readonly resolveExecutable: NonNullable<BrowserSessionOptions['resolveExecutable']>;
@@ -121,6 +134,11 @@ export class BrowserSession implements BrowserControl {
       getBrowser: () => this.browser,
       getTabs: () => this.tabSet,
       identities: this.identities,
+      noteLoginAccount: (account, urls) => {
+        const cleaned = account.replace(/\s+/g, ' ').trim();
+        if (!cleaned || [...cleaned].length > 80) return;
+        this.privacy.addSelf('account', cleaned, { urls });
+      },
     });
   }
 
@@ -161,15 +179,16 @@ export class BrowserSession implements BrowserControl {
     this.assertModel();
     const controller = await this.prepareController();
     const urlBefore = controller.currentUrl();
+    const target = this.privacy.reveal(url, 'navigate', urlBefore || url);
     const actionPage = controller.pageHandle();
-    const page = await controller.navigate(url, this.tabset().tabHint());
+    const page = await controller.navigate(target, this.tabset().tabHint());
     const shown = this.finishPage(page);
     this.identities.touch(shown.url);
     return this.record(shown, {
       action: 'goto',
       urlBefore,
       urlAfter: shown.url,
-      value: url,
+      value: target,
       observed: observedLines(shown.snapshot),
       tabUrl: this.noteTab(actionPage, urlBefore),
     });
@@ -194,11 +213,12 @@ export class BrowserSession implements BrowserControl {
       recordAudit('password_blocked', { action: input.action });
       throw new RelayError('human_required', 'Passwords are typed by a human. Call request_human.');
     }
+    const revealed = this.revealAct(input, urlBefore);
     const since = this.tabset().generation();
     const mark = this.downloader().mark();
     const printBefore = await controller.printCount();
     try {
-      await controller.performInput(input);
+      await controller.performInput(revealed);
       const switched = await this.tabset().waitForPopup(since, actionPage, input.action === 'click' ? POPUP_GRACE_MS : 0);
       // target=_blank (a PDF form, for example) can emit the download after the click returns.
       if (input.action === 'click' && this.tabset().generation() !== since) {
@@ -212,13 +232,13 @@ export class BrowserSession implements BrowserControl {
       const shown = this.finishPage(body, { downloads: caught.files, lines });
       const produced = input.action === 'click' && caught.files.length > 0;
       return this.record(shown, {
-        action: produced ? 'download' : input.action,
+        action: produced ? 'download' : revealed.action,
         urlBefore,
         urlAfter: shown.url,
         target: described?.target,
-        value: produced ? caught.requested : valueForTrace(input.action, input.value, described ? { ...described.target, sensitive: described.sensitive } : undefined),
+        value: produced ? caught.requested : valueForTrace(revealed.action, revealed.value, described ? { ...described.target, sensitive: described.sensitive } : undefined),
         suggested: produced ? caught.suggested : undefined,
-        key: input.key,
+        key: revealed.key,
         observed: observedLines(shown.snapshot),
         tabUrl: this.noteTab(actionPage, urlBefore),
       });
@@ -229,7 +249,8 @@ export class BrowserSession implements BrowserControl {
 
   async download(input: DownloadInput): Promise<PageBody> {
     this.assertModel();
-    if (input.save_as) assertSaveAs(input.save_as);
+    const saveAs = input.save_as ? this.privacy.reveal(input.save_as, 'download', this.pageUrl) : undefined;
+    if (saveAs) assertSaveAs(saveAs);
     const controller = await this.prepareController();
     const urlBefore = controller.currentUrl();
     const actionPage = controller.pageHandle();
@@ -257,7 +278,7 @@ export class BrowserSession implements BrowserControl {
       } else {
         const published = await this.downloader().finalize(done, {
           dir: downloadsDir(),
-          fileName: input.save_as ?? done.suggestedFilename,
+          fileName: saveAs ?? done.suggestedFilename,
           dedupe: true,
         });
         files.push(published.info);
@@ -275,7 +296,7 @@ export class BrowserSession implements BrowserControl {
         urlBefore,
         urlAfter: shown.url,
         target: described.target,
-        value: input.save_as ?? requested,
+        value: saveAs ?? requested,
         suggested: done.suggestedFilename,
         timeout_ms: timeout,
         observed: observedLines(shown.snapshot),
@@ -288,12 +309,13 @@ export class BrowserSession implements BrowserControl {
 
   async pdf(input: PdfInput): Promise<PdfResult> {
     this.assertModel();
-    if (input.save_as) assertSaveAs(input.save_as);
+    const saveAs = input.save_as ? this.privacy.reveal(input.save_as, 'pdf', this.pageUrl) : undefined;
+    if (saveAs) assertSaveAs(saveAs);
     const controller = await this.prepareController();
     const url = controller.currentUrl();
     const title = await bounded(controller.pageHandle().title(), TITLE_TIMEOUT_MS, 'title').catch(() => '');
     const bytes = await controller.printToPdf({ landscape: input.landscape });
-    const fileName = input.save_as ?? `${sanitizeTitle(title)}.pdf`;
+    const fileName = saveAs ?? `${sanitizeTitle(title)}.pdf`;
     const sourcePath = await stageBytes(bytes);
     try {
       const published = await publishDownload({
@@ -311,7 +333,7 @@ export class BrowserSession implements BrowserControl {
           action: 'pdf',
           urlBefore: url,
           urlAfter: url,
-          value: input.save_as ?? published.requested,
+          value: saveAs ?? published.requested,
           ...(input.landscape !== undefined ? { landscape: input.landscape } : {}),
           observed: [],
         },
@@ -328,8 +350,13 @@ export class BrowserSession implements BrowserControl {
     const urlBefore = controller.currentUrl();
     const actionPage = controller.pageHandle();
     const described = input.ref ? await this.describe(controller, input.ref) : undefined;
+    const revealed = {
+      ...input,
+      ...(input.text !== undefined ? { text: this.privacy.reveal(input.text, 'wait', urlBefore) } : {}),
+      ...(input.url !== undefined ? { url: this.privacy.reveal(input.url, 'wait', urlBefore) } : {}),
+    };
     const since = this.tabset().generation();
-    let result = await controller.waitFor(input);
+    let result = await controller.waitFor(revealed);
     const switched = await this.tabset().waitForPopup(since, actionPage, 0);
     if (switched) {
       const current = await this.tabset().current();
@@ -344,8 +371,8 @@ export class BrowserSession implements BrowserControl {
       urlBefore,
       urlAfter: shown.url,
       target: described?.target,
-      value: input.text,
-      url: input.url,
+      value: revealed.text,
+      url: revealed.url,
       timeout_ms: input.timeoutMs,
       observed: observedLines(shown.snapshot),
       tabUrl: this.noteTab(actionPage, urlBefore),
@@ -370,7 +397,8 @@ export class BrowserSession implements BrowserControl {
     if (input.action === 'new') {
       const controller = await tabs.openBlank();
       if (input.url) {
-        const body = await controller.navigate(parseHttpUrl(input.url), tabs.tabHint());
+        const opened = this.privacy.reveal(input.url, 'tabs', this.pageUrl || input.url);
+        const body = await controller.navigate(parseHttpUrl(opened), tabs.tabHint());
         return this.finishPage(body);
       }
       return this.finishPage(await controller.snapshot('full', undefined, tabs.tabHint()));
@@ -401,13 +429,35 @@ export class BrowserSession implements BrowserControl {
     const steps = this.traceLog.view().steps;
     const identity = this.identities.matchUrls(steps.flatMap((step) => [step.urlBefore, step.urlAfter]));
     const built = buildSkill(steps, identity ? { ...input, identity } : input);
-    const stored = writeStoredSkill(built.skill, input.overwrite === true);
+    const url = steps.at(-1)?.urlAfter || steps[0]?.urlBefore || this.pageUrl;
+    const corpus = [
+      this.lastRawSnapshot,
+      ...steps.flatMap((step) => [
+        step.url,
+        step.urlBefore,
+        step.urlAfter,
+        step.value,
+        step.suggested,
+        step.target?.name,
+        step.target?.text,
+        step.target?.label,
+        step.target?.css,
+        ...(step.observed ?? []),
+      ]),
+    ]
+      .filter((item): item is string => typeof item === 'string' && item.length > 0)
+      .join('\n');
+    this.privacy.absorb(corpus, url);
+    const cleaned = this.privacy.deidentify(built.skill, url);
+    const stored = writeStoredSkill(cleaned.skill, input.overwrite === true);
+    writeSkillChecks(cleaned.skill, stored.path);
     return {
-      name: built.skill.name,
+      name: cleaned.skill.name,
       version: stored.version,
       path: stored.path,
       yaml: stored.yaml,
       warnings: built.warnings,
+      deidentified: cleaned.report,
     };
   }
 
@@ -429,12 +479,22 @@ export class BrowserSession implements BrowserControl {
 
   async runSkill(name: string, input: RunSkillInput): Promise<MatrixResult> {
     this.assertModel();
+    const stored = readStoredSkill(name).skill;
+    let skill = stored;
+    let runInput = input;
+    try {
+      const prepared = this.privacy.prepareRun(stored, input);
+      skill = prepared.skill;
+      runInput = prepared.input;
+    } catch (err) {
+      if (err instanceof PrivacyGap) return missingSelfResult(name, input, err.message);
+      throw err;
+    }
     await this.ensureReady();
-    const skill = readStoredSkill(name).skill;
     this.replayDepth += 1;
     try {
-      return await runMatrix(this.replayPage(), skill, input, {
-        waitForHuman: input.wait_human ? (reason) => this.waitOutHandoff(reason) : undefined,
+      return await runMatrix(this.replayPage(), skill, runInput, {
+        waitForHuman: runInput.wait_human ? (reason) => this.waitOutHandoff(reason) : undefined,
       });
     } finally {
       this.replayDepth -= 1;
@@ -444,7 +504,8 @@ export class BrowserSession implements BrowserControl {
 
   async requestHandoff(reason: string, url?: string): Promise<HandoffView> {
     await this.ensureReady();
-    const target = url === undefined ? undefined : parseHttpUrl(url);
+    const revealed = url === undefined ? undefined : this.privacy.reveal(url, 'handoff', this.pageUrl || url);
+    const target = revealed === undefined ? undefined : parseHttpUrl(revealed);
     return this.handoff.start(reason, target);
   }
 
@@ -472,6 +533,56 @@ export class BrowserSession implements BrowserControl {
     await this.ensureReady();
     await this.identities.revoke(name);
     return { name };
+  }
+
+  redactOutbound<T>(value: T): T {
+    if (!this.privacy.modelRedaction(this.pageUrl)) return value;
+    return this.privacy.maskValue(value, this.pageUrl);
+  }
+
+  privacyMode(on: boolean, identity?: string): { model_redaction: boolean; scope: 'global' | 'identity'; identity?: string } {
+    if (identity) {
+      this.privacy.setIdentityMode(identity, on);
+      return { model_redaction: on, scope: 'identity', identity };
+    }
+    this.privacy.setGlobalMode(on);
+    return { model_redaction: on, scope: 'global' };
+  }
+
+  privacyAdd(kind: SelfKind, value: string, identity?: string): { token: string; as: SelfKind } {
+    if (!identity && !this.pageUrl) throw new RelayError('bad_request', 'Open the site first, or pass an identity');
+    const token = this.privacy.addSelf(kind, value, identity ? { identity } : { url: this.pageUrl });
+    return { token, as: kind };
+  }
+
+  privacyConfirm(input: { token: string; as?: SelfKind; reject?: boolean; identity?: string }): { token: string; as?: SelfKind; rejected?: true } {
+    const url = input.identity ? undefined : this.pageUrl;
+    if (input.reject) return this.privacy.reject(input.token, url, input.identity);
+    return this.privacy.confirm(input.token, input.as, url, input.identity);
+  }
+
+  privacyList(identity?: string): PrivacyList {
+    if (!identity && !this.pageUrl) return { identity: null, self: [] };
+    return this.privacy.list(identity ? undefined : this.pageUrl, identity);
+  }
+
+  privacyCheck(): PrivacyCheck {
+    if (!this.lastRawSnapshot) throw new RelayError('bad_request', 'Take a snapshot first');
+    return this.privacy.check(this.lastRawSnapshot, this.pageUrl);
+  }
+
+  async privacyMark(input: { ref?: string; value?: string; as: SelfKind }): Promise<{ token: string; as: SelfKind }> {
+    let value = input.value;
+    if (input.ref) {
+      const controller = await this.prepareController();
+      const described = await this.describe(controller, input.ref);
+      this.pageUrl = controller.currentUrl();
+      value = described.target.text || described.target.name || described.target.label || '';
+    }
+    if (!value) throw new RelayError('bad_request', 'privacy_mark needs a ref or a value');
+    const revealed = this.privacy.reveal(value, 'privacy_mark', this.pageUrl);
+    const token = this.privacy.addSelf(input.as, revealed, { url: this.pageUrl });
+    return { token, as: input.as };
   }
 
   async close(options?: { keepBrowser?: boolean }): Promise<void> {
@@ -603,8 +714,11 @@ export class BrowserSession implements BrowserControl {
     let snapshot = body.snapshot;
     if (lines.length > 0) snapshot = `${snapshot}\n${lines.join('\n')}`;
     const presented = this.present({ ...body, snapshot });
-    if (downloads.length === 0) return presented;
-    return { ...presented, downloads };
+    const page = downloads.length === 0 ? presented : { ...presented, downloads };
+    this.pageUrl = page.url;
+    this.lastRawSnapshot = page.snapshot;
+    this.privacy.absorb(page.snapshot, page.url);
+    return page;
   }
 
   private async finishDownloads(mark: number): Promise<{ files: DownloadInfo[]; lines: string[]; suggested?: string; requested?: string }> {
@@ -662,8 +776,19 @@ export class BrowserSession implements BrowserControl {
 
   private record<T extends { url?: string; step?: number }>(page: T, input: Parameters<TraceLog['append']>[0]): T {
     if (this.replayDepth > 0) return page;
-    const step = this.traceLog.append(input);
+    const step = this.traceLog.append(input, (raw) => this.traceForDisk(raw));
     return { ...page, step: step.n };
+  }
+
+  private traceForDisk(step: TraceStep): TraceStep {
+    const url = step.urlAfter || step.urlBefore;
+    if (!this.privacy.modelRedaction(url)) return step;
+    return this.privacy.maskValue(step, url);
+  }
+
+  private revealAct(input: ActInput, url: string): ActInput {
+    if (input.value === undefined) return input;
+    return { ...input, value: this.privacy.reveal(input.value, input.action, url) };
   }
 
   private tabset(): TabSet {
@@ -866,6 +991,23 @@ export class BrowserSession implements BrowserControl {
       this.releasing = false;
     }
   }
+}
+
+function missingSelfResult(name: string, input: RunSkillInput, message: string): MatrixResult {
+  return {
+    results: [
+      {
+        outcome: 'broken',
+        message,
+        params: input.params ?? {},
+        steps: [],
+        duration_ms: 0,
+        broken: { step_id: 'privacy', reason: message, excerpt: '' },
+      },
+    ],
+    exit_code: 30,
+    out_dir: input.out_dir ?? runOutputDir(name),
+  };
 }
 
 function parseHttpUrl(value: string): string {

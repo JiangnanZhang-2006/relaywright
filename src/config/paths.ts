@@ -65,6 +65,18 @@ export function auditDir(): string {
   return join(relaywrightHome(), 'audit');
 }
 
+export function configPath(root = relaywrightHome()): string {
+  return join(root, 'config.json');
+}
+
+export function privacyDir(root = relaywrightHome()): string {
+  return join(root, 'privacy');
+}
+
+export function privacyPath(identity: string, root = relaywrightHome()): string {
+  return join(privacyDir(root), `${identity}.json`);
+}
+
 export function ensureHomeLayout(): void {
   mkdirSync(logsDir(), { recursive: true });
   mkdirSync(defaultProfileDir(), { recursive: true });
@@ -74,6 +86,7 @@ export function ensureHomeLayout(): void {
   mkdirSync(downloadsStagingDir(), { recursive: true });
   mkdirSync(identitiesDir(), { recursive: true });
   mkdirSync(auditDir(), { recursive: true });
+  mkdirSync(privacyDir(), { recursive: true });
 }
 
 let cachedVersion: string | undefined;
