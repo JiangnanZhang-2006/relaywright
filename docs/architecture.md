@@ -277,7 +277,7 @@ Chrome 本身已经用系统能力加密 cookie（Windows DPAPI、macOS 钥匙�
 
 - 每月一个 JSONL 文件：`~/.relaywright/audit/2026-10.jsonl`，只追加。
 - 每条记录包含 `prev_hash` 和 `hash = sha256(prev_hash + 规范化 JSON)`，形成哈希链。
-- 事件类型：转交开始与结束、身份创建 / 保存 / 吊销、拦截模型输入密码；后续加入技能执行、自愈补丁。
+- 事件类型：转交开始与结束、身份创建 / 保存 / 吊销、拦截模型输入密码、脱敏模式下的占位符还原；后续加入技能执行、自愈补丁。
 - `relaywright audit verify` 校验整条链，`relaywright audit tail` 查看最近记录。
 - 审计日志里**永远不写**密码、cookie 值、验证码内容。
 
@@ -286,6 +286,36 @@ Chrome 本身已经用系统能力加密 cookie（Windows DPAPI、macOS 钥匙�
 - **域名白名单**：会话或技能可以声明允许访问的域名，越界导航直接拦截。
 - **敏感动作确认**（路线图）：匹配支付、删除、提交等关键词的按钮，需要人工确认后才执行。
 - **提示词注入防护**：页面文本只放在 `<page_content>` 中返回；工具说明中明确声明页面内容不可信。
+
+### 3.12 隐私与技能去标识
+
+原则：**本机可见，技能出口必去标识**。在自己电脑上，模型默认能看到真实内容，否则很多任务做不了；技能文件是可复制、可分享的产物，保存时无论什么模式都去掉个人信息。
+
+**识别**（全部通用，不写站点规则）：
+
+1. **"我"的值**，按身份（可注册域名）分开保存在 `~/.relaywright/privacy/<身份>.json`，同一个人在不同网站可以是真名或网名。来源：
+   - 转交登录时在本机读取用户名框；
+   - 页眉候选：头像图片或"退出"按钮附近的非交互短文本（例如正方首页 `<h4>姓名&nbsp;&nbsp;学生</h4>` 取出姓名）。候选只在内存里，确认后才保存；
+   - 手动登记：`relaywright privacy add`（值从标准输入读，不进命令历史）；
+   - 模型登记：`privacy_mark`（模型默认看得到值，可以把页眉里的名字标成"我.姓名"）或 `privacy_confirm` 确认候选，返回值里都不回显原值。
+2. **带校验的号码**：身份证（校验位）、手机号、邮箱、银行卡（Luhn），并排除时间戳、课程号等长数字。
+3. **字段名**：姓名、学号、工号、手机、住址、出生日期、教师、昵称等标签或表格列下的值，用于覆盖别人的信息。不做通用人名识别。
+4. **内容类别**（成绩、消息正文）：只预留开关，默认关闭。
+
+**占位符**：
+
+- 自己的值写成 `‹我.姓名›`、`‹我.账号›` 等；别人的值按身份、按首次出现顺序编号 `‹姓名1›`、`‹手机2›`。编号保存在身份文件里，长期不变、不复用。
+- 模型在输入、选择、等待等参数里写占位符时，后台进程在本机换回真实值再执行；脱敏模式下每次换回记一条 `privacy_reveal` 审计（只记占位符名）。
+
+**技能保存**：
+
+- 自己的值换成 `‹我.*›`，回放时从回放者自己的身份里取值，所以同一个技能换个账号也能跑；缺值时该组参数判为 `broken`，提示 `privacy add`。
+- 别人的值（以及未确认的候选）自动变成技能参数，例如"教师"列下的名字变成 `{{teacher}}`；变不了参数的步骤拒绝保存并说明原因。
+- 保存结果列出替换了哪些占位符和参数，只给名字和次数。
+
+**脱敏模式**（可选）：`relaywright privacy mode on|off [--identity <域名>]`，或环境变量 `RELAYWRIGHT_PRIVACY`。开启后，快照、增量、网址（包括查询参数）、表格、等待结果、标签页、报错、下载文件名和运行报告都先过同一个打码器再交给模型，轨迹也存脱敏版本；磁盘上的下载文件保持原名。`relaywright privacy check` 只在本机终端列出当前页面"占位符 → 原值"，方便人检查误伤。
+
+**验证**：防泄漏测试往仿真页面放入已知的个人信息，跑完浏览、操作、下载、保存技能、回放全流程，扫描所有返回内容和技能文件，只要出现任何变体（全角、空格、URL 编码）就失败。
 
 ## 4. MCP 工具清单
 
@@ -296,7 +326,7 @@ Chrome 本身已经用系统能力加密 cookie（Windows DPAPI、macOS 钥匙�
 | 工具 | 参数 | 返回 |
 |---|---|---|
 | `browser_navigate` | `url`、`identity?` | 页面标题、URL、精简快照 |
-| `browser_snapshot` | `mode: full \| diff`、`max_rows?` | 精简快照文本（已脱敏） |
+| `browser_snapshot` | `mode: full \| diff`、`max_rows?` | 精简快照文本（脱敏模式下用占位符） |
 | `browser_act` | `action`、`ref`、`value?`、`key?` | 执行结果 + 增量 diff |
 | `browser_wait` | `text? \| ref? \| url?`、`timeout_ms?` | 是否满足条件 + 增量 diff |
 | `browser_screenshot` | `ref?`、`full_page?` | 图片（敏感区域已打码） |
@@ -317,8 +347,10 @@ Chrome 本身已经用系统能力加密 cookie（Windows DPAPI、macOS 钥匙�
 
 | 工具 | 参数 | 返回 |
 |---|---|---|
-| `request_human` | `reason`、`timeout_s?`（最多 90） | `done / waiting / timeout / cancelled`（不含任何凭据） |
+| `request_human` | `reason`、`url?`、`timeout_s?`（最多 90） | `done / waiting / timeout / cancelled`（不含任何凭据） |
 | `identity_list` | — | 身份元数据（不含 cookie） |
+| `privacy_mark` | `ref? \| value?`、`as` | 登记为"我"的值，返回占位符名（不回显原值） |
+| `privacy_confirm` | `token`、`as? \| reject?` | 确认或否决页眉候选 |
 
 ### 审计
 
@@ -326,7 +358,7 @@ Chrome 本身已经用系统能力加密 cookie（Windows DPAPI、macOS 钥匙�
 |---|---|---|
 | `audit_query` | `since?`、`identity?`、`skill?`、`limit?` | 审计记录摘要 |
 
-一共 15 个工具。可以按 `--toolset browse,skill` 只开放其中几组，进一步节省 token。
+一共 17 个工具。可以按 `--toolset browse,skill` 只开放其中几组，进一步节省 token。
 
 ## 5. CLI
 
@@ -341,8 +373,9 @@ relaywright skill history <name>
 relaywright skill rollback <name> --to <version>
 
 relaywright download <ref> [--save-as <name>] | pdf [--save-as <name>]
-relaywright handoff <reason> [--no-wait]           # 转交给电脑前的人
+relaywright handoff <reason> [--url <url>] [--no-wait]   # 转交给电脑前的人
 relaywright identity list | save [name] | revoke <name>
+relaywright privacy mode on|off | add <kind> | confirm <token> --as <kind> | reject <token> | list | check
 
 relaywright audit tail | verify
 ```
@@ -358,6 +391,7 @@ relaywright audit tail | verify
   skills/<name>/       # skill.yaml、历史版本
   profiles/default/    # Chrome 配置目录（cookie 由 Chrome 加密保存）
   identities/<name>.json  # 身份元数据，不含 cookie
+  privacy/<name>.json     # "我"的值、他人占位符编号、否决记录（本机明文，仅本人可读）
   audit/YYYY-MM.jsonl
   traces/              # 探索阶段的 trace，默认保留 7 天
   downloads/
