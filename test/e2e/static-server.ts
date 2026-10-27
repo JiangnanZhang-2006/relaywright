@@ -4,6 +4,7 @@ import { extname, join, resolve, sep } from 'node:path';
 
 export async function startStatic(root: string): Promise<{ port: number; close: () => Promise<void> }> {
   const base = resolve(root);
+  const exportBodies: string[] = [];
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -22,8 +23,13 @@ export async function startStatic(root: string): Promise<{ port: number; close: 
         res.end(JSON.stringify(payload));
         return;
       }
+      if (req.method === 'GET' && url.pathname === '/zf-mock/export-bodies') {
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+        res.end(JSON.stringify(exportBodies));
+        return;
+      }
       if (req.method === 'POST' && url.pathname === '/zf-mock/export.pdf') {
-        await drain(req);
+        exportBodies.push(await readBody(req));
         const pdf = await readFile(join(base, 'sample.pdf'));
         res.writeHead(200, {
           'content-type': 'application/pdf',
@@ -108,13 +114,6 @@ export async function startStatic(root: string): Promise<{ port: number; close: 
     port,
     close: () => closeServer(server),
   };
-}
-
-async function drain(req: IncomingMessage): Promise<void> {
-  if (req.readableEnded) return;
-  for await (const chunk of req) {
-    void chunk;
-  }
 }
 
 function readBody(req: IncomingMessage): Promise<string> {

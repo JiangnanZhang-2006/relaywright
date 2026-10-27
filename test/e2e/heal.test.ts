@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -35,12 +35,17 @@ interface RunBody {
     params: Record<string, string>;
     halt_matrix?: boolean;
     broken?: { step_id?: string; reason?: string; heal?: { step_id?: string; heal_token?: string; snapshot?: string; intent?: string } };
+    steps?: { id: string; status: string; locator?: string }[];
+    artifacts?: { path: string }[];
   }[];
 }
 
 interface PatchBody {
   accepted: boolean;
   reason?: string;
+  failed_step?: string;
+  cause?: string;
+  outcome?: string;
   from_version?: number;
   to_version?: number;
   retryable?: boolean;
@@ -97,6 +102,14 @@ describe.skipIf(!resolved.path)('skill self-heal', () => {
     });
     const text = await response.text();
     return { status: response.status, json: text ? (JSON.parse(text) as unknown) : {} };
+  }
+
+  async function exportBodies(): Promise<string[]> {
+    const port = server?.port;
+    if (!port) throw new Error('static server did not start');
+    const response = await fetch(`http://127.0.0.1:${port}/zf-mock/export-bodies`);
+    if (!response.ok) throw new Error(`export log ${response.status}`);
+    return (await response.json()) as string[];
   }
 
   it('stops the matrix and returns a heal token when v3 hides the query button', async () => {
@@ -169,7 +182,13 @@ describe.skipIf(!resolved.path)('skill self-heal', () => {
     expect(second.status).toBe(200);
     expect(third.status).toBe(200);
     expect(first.json as PatchBody).toMatchObject({ accepted: false, retryable: true });
-    expect((first.json as PatchBody).reason).not.toBe('heal_budget');
+    const rejected = first.json as PatchBody;
+    expect(rejected.reason).toMatch(/^rerun_failed: /);
+    expect(rejected.failed_step).toBeTruthy();
+    expect(rejected.cause).toBeTruthy();
+    expect(rejected.reason).toContain(rejected.failed_step ?? '');
+    expect(rejected.reason).toContain(rejected.cause ?? '');
+    expect(rejected.reason).not.toBe('heal_budget');
     expect(second.json as PatchBody).toMatchObject({ accepted: false });
     expect((second.json as PatchBody).reason).not.toBe('heal_budget');
     expect(third.json as PatchBody).toMatchObject({ accepted: false, reason: 'heal_budget' });
@@ -244,6 +263,103 @@ describe.skipIf(!resolved.path)('skill self-heal', () => {
     expect(readSkill('zf-expect').version).toBe(1);
   });
 
+  it('heals only the renamed query step and downloads the redesigned v3 PDF', async () => {
+    const browser = live();
+    browser.clearTrace();
+    const opened = await browser.navigate(v1);
+    const year = refFor(opened.snapshot, /\[(e\d+)\] combobox "学年"/);
+    const term = refFor(opened.snapshot, /\[(e\d+)\] combobox "学期"/);
+    const search = refFor(opened.snapshot, /\[(e\d+)\] button "查询"/);
+    const pdf = refFor(opened.snapshot, /\[(e\d+)\] button "输出PDF"/);
+    await browser.act({ action: 'select', ref: year, value: '2025-2026' });
+    await browser.act({ action: 'select', ref: term, value: '1' });
+    await browser.act({ action: 'click', ref: search });
+    await browser.act({ action: 'click', ref: pdf });
+    const revealed = await browser.snapshot({ mode: 'full' });
+    const ok = refFor(revealed.snapshot, /\[(e\d+)\] button "确定"/);
+    const downloaded = await browser.download({ ref: ok, save_as: '2025-2026-1.pdf', timeout_ms: 30_000 });
+    if (!downloaded.downloads?.[0]) throw new Error(`确定 produced no download\n${downloaded.snapshot}`);
+
+    browser.saveSkill({
+      name: 'zf-pdf-heal',
+      description: '按学年学期导出课表 PDF',
+      params: { year: '2025-2026', term: '1' },
+    });
+    const stored = readSkill('zf-pdf-heal');
+    expect(stored.skill.start_url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/zf-mock\/v1\/$/);
+    expect(stored.skill.steps.map((step) => step.id)).toEqual([
+      's1-select-学年',
+      's2-select-学期',
+      's3-click-查询',
+      's4-click-输出PDF',
+      's5-download-确定',
+    ]);
+    expect(stored.yaml).toContain('{{year}}-{{term}}.pdf');
+    expect(stored.yaml).toContain('#search_go');
+    expect(stored.yaml).toContain('#shcPDF');
+    expect(stored.yaml).toContain('#pdf-ok');
+    const beforeSteps = readSkill('zf-pdf-heal').skill.steps;
+
+    const failed = await call('POST', '/skills/zf-pdf-heal/run', {
+      matrix: { year: ['2025-2026', '2026-2027'], term: ['1'] },
+      startUrl: v3,
+    });
+    expect(failed.status).toBe(200);
+    const broken = failed.json as RunBody;
+    expect(broken.exit_code).toBe(30);
+    expect(broken.results[0]?.broken?.step_id).toContain('查询');
+    expect(broken.results[0]?.broken?.reason).toBe('target_not_found');
+    expect(broken.results[0]?.broken?.heal?.heal_token).toMatch(/^[a-f0-9]{32}$/);
+    expect(broken.results[1]?.outcome).toBe('skipped');
+
+    const heal = broken.results[0]?.broken?.heal;
+    const ref = refFor(heal?.snapshot ?? '', /\[(e\d+)\][^\n]*检索/);
+    const patched = await call('POST', '/skills/zf-pdf-heal/patch', {
+      step_id: heal?.step_id,
+      ref,
+      heal_token: heal?.heal_token,
+      healer: 'manual',
+    });
+    expect(patched.status).toBe(200);
+    const patch = patched.json as PatchBody;
+    expect(patch).toMatchObject({ accepted: true, from_version: 1, to_version: 2, outcome: 'ok' });
+    const after = readSkill('zf-pdf-heal');
+    const changed = after.skill.steps.filter((step, index) => JSON.stringify(step) !== JSON.stringify(beforeSteps[index]));
+    expect(changed.map((step) => step.id)).toEqual(['s3-click-查询']);
+    expect(changed[0]?.click?.target.name).toBe('检索');
+    expect(changed[0]?.click?.target.css).toBe('#btn-retrieve');
+    expect(after.skill.steps[3]?.click?.target).toMatchObject({ name: '输出PDF', css: '#shcPDF' });
+    expect(after.skill.steps[4]?.download?.click.target).toMatchObject({ name: '确定', css: '#pdf-ok' });
+
+    const beforeExports = await exportBodies();
+    const out = mkdtempSync(join(tmpdir(), 'relaywright-v3-pdf-'));
+    const again = await call('POST', '/skills/zf-pdf-heal/run', {
+      matrix: { year: ['2025-2026', '2026-2027'], term: ['1'] },
+      startUrl: v3,
+      out_dir: out,
+    });
+    const replay = again.json as RunBody;
+    expect(replay.exit_code).toBe(0);
+    expect(replay.results.map((result) => result.outcome)).toEqual(['ok', 'ok']);
+    expect(replay.results.every((result) => result.broken?.heal?.heal_token === undefined)).toBe(true);
+    expect(readSkill('zf-pdf-heal').version).toBe(2);
+    for (const result of replay.results) {
+      expect(result.steps?.find((step) => step.id.includes('输出PDF'))).toMatchObject({ status: 'done', locator: 'role_name' });
+      expect(result.steps?.find((step) => step.id.includes('确定'))).toMatchObject({ status: 'done', locator: 'role_name' });
+    }
+    const names = replay.results.flatMap((result) => (result.artifacts ?? []).map((artifact) => basename(artifact.path)));
+    expect(names).toEqual(['2025-2026-1.pdf', '2026-2027-1.pdf']);
+    for (const artifact of replay.results.flatMap((result) => result.artifacts ?? [])) {
+      expect(artifact.path.startsWith(out)).toBe(true);
+      expect(readFileSync(artifact.path).subarray(0, 4).toString('utf8')).toBe('%PDF');
+    }
+    const posted = (await exportBodies()).slice(beforeExports.length);
+    expect(posted.map(exportFields)).toEqual([
+      { year: '2025-2026', term: '1', layout: 'portrait' },
+      { year: '2026-2027', term: '1', layout: 'portrait' },
+    ]);
+  });
+
   it('heals from the CLI mock model and stays broken when the key is missing', async () => {
     await session?.close();
     session = undefined;
@@ -292,6 +408,10 @@ describe.skipIf(!resolved.path)('skill self-heal', () => {
     expect(broken.results[0]?.broken?.heal?.heal_token).toMatch(/^[a-f0-9]{32}$/);
   }, 240_000);
 });
+
+function exportFields(body: string): Record<string, string> {
+  return Object.fromEntries(new URLSearchParams(body));
+}
 
 async function cli(args: string[], extra: Record<string, string | undefined>): Promise<{ code: number; stdout: string; stderr: string }> {
   const tsx = join(repoRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');

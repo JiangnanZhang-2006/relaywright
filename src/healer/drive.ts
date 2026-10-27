@@ -51,6 +51,7 @@ export async function runSkillWithHeal(name: string, input: RunSkillInput, optio
       });
       if (!patched.accepted) {
         if (patched.retryable && attempt < 2) continue;
+        // patched.reason names a later step when the tail re-run failed (rerun_failed: …).
         report = replaceAt(report, index, failHeal(current, patched.reason ?? 'heal_failed'));
         break;
       }

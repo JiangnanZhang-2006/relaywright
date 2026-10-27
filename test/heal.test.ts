@@ -10,7 +10,7 @@ import { maskTail } from '../src/privacy/detect.js';
 import { loginAccountWatchSource, readBindingPayload } from '../src/privacy/login-account.js';
 import { PrivacyStore } from '../src/privacy/store.js';
 import { formatRunReport } from '../src/skills/format.js';
-import { buildHealContext, HEAL_TOKEN_MS, HealLedger } from '../src/skills/heal.js';
+import { buildHealContext, HEAL_TOKEN_MS, HealLedger, rerunFailedReason } from '../src/skills/heal.js';
 import { runMatrix, stopsMatrix, summaryExitCode } from '../src/skills/run.js';
 import type { HealContext, Skill, SkillRunResult, SkillStep } from '../src/skills/schema.js';
 import type { ModelItem } from '../src/perception/snapshot.js';
@@ -309,6 +309,22 @@ describe('heal report', () => {
     expect(text).toContain('llm_tokens go: prompt=11 completion=7');
     expect(text).toContain('llm_tokens: 18');
   });
+
+  it('prints the later step when a patch tail fails', () => {
+    const reason = rerunFailedReason('s5-download-确定', 'target_not_found');
+    expect(reason).toBe('rerun_failed: s5-download-确定 target_not_found');
+    const text = formatRunReport([
+      {
+        outcome: 'broken',
+        message: reason,
+        params: { year: '2025-2026' },
+        steps: [{ id: 's3-click-查询', status: 'failed', ms: 1 }],
+        duration_ms: 1,
+        broken: { step_id: 's3-click-查询', reason: 'heal_failed', excerpt: '' },
+      },
+    ]);
+    expect(text).toContain('s3-click-查询 heal_failed rerun_failed: s5-download-确定 target_not_found');
+  });
 });
 
 describe('heal model call', () => {
@@ -442,7 +458,13 @@ describe('v3 fixture and mock healer', () => {
     expect(html).toContain('id="btn-retrieve"');
     expect(html).toContain('检索');
     expect(html).toContain('输出PDF');
+    expect(html).toContain('id="pdf-go"');
+    expect(html).toContain('id="export-dialog"');
+    expect(html).toContain('id="export-confirm"');
+    expect(html).toContain('action="/zf-mock/export.pdf"');
     expect(html).not.toContain('search_go');
+    expect(html).not.toContain('pdf-ok');
+    expect(html).not.toContain('shcPDF');
     expect(html).not.toContain('id="xnm"');
     expect(html).not.toContain('id="xqm"');
     expect(html).not.toContain('>查询<');

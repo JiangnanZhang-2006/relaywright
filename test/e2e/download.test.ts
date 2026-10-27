@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { whichBrowser } from '../../src/browser/resolve.js';
 import { downloadsDir } from '../../src/config/paths.js';
 import { BrowserSession } from '../../src/session/browser.js';
+import { parseSkill } from '../../src/skills/schema.js';
 import { startStatic } from './static-server.js';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -110,6 +111,7 @@ describe.skipIf(!resolved.path)('downloads and pdf', () => {
       code: 'no_download',
       message: expect.stringContaining('another click'),
     });
+    expect(browser.trace().steps.at(-1)).toMatchObject({ action: 'click', target: expect.objectContaining({ name: '无操作' }) });
   });
 
   it('records the undeduped name when a download already exists', async () => {
@@ -231,5 +233,65 @@ describe.skipIf(!resolved.path)('downloads and pdf', () => {
         expect(artifact.sha256).toMatch(/^[a-f0-9]{64}$/);
       }
     }
+  });
+
+  it('keeps the 输出PDF click after no_download and replays the saved skill', async () => {
+    const browser = live();
+    browser.clearTrace();
+    const opened = await browser.navigate(v1);
+    const traced = browser.trace().steps.length;
+    await expect(browser.download({ ref: 'e999', timeout_ms: 500 })).rejects.toMatchObject({ code: 'stale_ref' });
+    expect(browser.trace().steps.length).toBe(traced);
+
+    const year = refFor(opened.snapshot, /\[(e\d+)\] combobox "学年"/);
+    const term = refFor(opened.snapshot, /\[(e\d+)\] combobox "学期"/);
+    const search = refFor(opened.snapshot, /\[(e\d+)\] button "查询"/);
+    const pdf = refFor(opened.snapshot, /\[(e\d+)\] button "输出PDF"/);
+    await browser.act({ action: 'select', ref: year, value: '2025-2026' });
+    await browser.act({ action: 'select', ref: term, value: '1' });
+    await browser.act({ action: 'click', ref: search });
+    await expect(browser.download({ ref: pdf, timeout_ms: 1_500 })).rejects.toMatchObject({ code: 'no_download' });
+    expect(browser.trace().steps.at(-1)).toMatchObject({
+      action: 'click',
+      target: expect.objectContaining({ name: '输出PDF' }),
+    });
+
+    const revealed = await browser.snapshot({ mode: 'full' });
+    const ok = refFor(revealed.snapshot, /\[(e\d+)\] button "确定"/);
+    const downloaded = await browser.download({ ref: ok, save_as: '2025-2026-1.pdf', timeout_ms: 30_000 });
+    if (!downloaded.downloads?.[0]) throw new Error(`确定 produced no download\n${downloaded.snapshot}`);
+    expect(browser.trace().steps.at(-1)?.action).toBe('download');
+
+    const saved = browser.saveSkill({
+      name: 'zf-demo',
+      description: '按学年学期导出课表 PDF',
+      params: { year: '2025-2026', term: '1' },
+      from_step: 2,
+    });
+    const skill = parseSkill(saved.yaml);
+    expect(skill.start_url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/zf-mock\/v1\/$/);
+    expect(skill.steps.map((step) => step.select?.target.name ?? step.click?.target.name ?? step.download?.click.target.name)).toEqual([
+      '学年',
+      '学期',
+      '查询',
+      '输出PDF',
+      '确定',
+    ]);
+    expect(skill.steps[0]?.select?.value).toBe('{{year}}');
+    expect(skill.steps[1]?.select?.value).toBe('{{term}}');
+    expect(skill.steps[4]?.download?.save_as).toBe('{{year}}-{{term}}.pdf');
+    expect(saved.warnings.some((warning) => warning.includes('term') && warning.includes('start_url host'))).toBe(true);
+    expect(saved.warnings.some((warning) => warning.includes('term') && warning.includes('start_url path'))).toBe(true);
+    expect(saved.warnings.some((warning) => warning.includes('save_as'))).toBe(false);
+
+    const out = mkdtempSync(join(tmpdir(), 'relaywright-zf-demo-'));
+    const report = await browser.runSkill('zf-demo', { params: { year: '2025-2026', term: '1' }, out_dir: out });
+    expect(report.exit_code).toBe(0);
+    expect(report.results[0]?.outcome).toBe('ok');
+    const names = report.results.flatMap((result) => (result.artifacts ?? []).map((artifact) => basename(artifact.path)));
+    expect(names).toEqual(['2025-2026-1.pdf']);
+    const file = report.results[0]?.artifacts?.[0];
+    if (!file) throw new Error('replay produced no pdf');
+    expect(startsWithPdf(file.path)).toBe(true);
   });
 });

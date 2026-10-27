@@ -3,7 +3,7 @@ import { issuesText } from '../protocol.js';
 import type { TargetDescriptor, TraceStep } from '../recorder/types.js';
 import { fileExtension } from '../session/downloads.js';
 import { SkillSchema, type CheckInput, type Skill, type SkillStep, type SkillTarget } from './schema.js';
-import { templatize, type ExampleParam } from './template.js';
+import { templatize, type ExampleParam, type TemplateMiss, type TemplatePlace } from './template.js';
 
 export interface BuiltSkill {
   skill: Skill;
@@ -46,16 +46,18 @@ export function buildSkill(steps: readonly TraceStep[], input: {
   }
 
   const used = new Set<string>();
-  const apply = (value: string): string => {
-    const result = templatize(value, examples);
+  const apply = (value: string, place: TemplatePlace): { text: string; missed: TemplateMiss[] } => {
+    const result = templatize(value, examples, place);
     for (const name of result.used) used.add(name);
-    return result.text;
+    return { text: result.text, missed: result.missed };
   };
 
   const leading = selected[0]?.action === 'goto' ? selected[0] : undefined;
   const body = leading ? selected.slice(1) : selected;
-  const startUrl = leading ? apply(leading.value || leading.urlAfter) : apply(body[0]?.urlBefore ?? '');
+  const started = apply(leading ? leading.value || leading.urlAfter : (body[0]?.urlBefore ?? ''), 'url');
+  const startUrl = started.text;
   if (!startUrl) throw new RelayError('bad_params', 'The selected trace has no start URL');
+  const startWarnings = started.missed.map((miss) => unsubstitutedWarning(miss.name, 'start_url', miss.part));
 
   const drafts: Draft[] = [];
   if (leading) {
@@ -77,7 +79,7 @@ export function buildSkill(steps: readonly TraceStep[], input: {
   if (unused.length === 1) throw new RelayError('param_unused', `Unused param ${unused[0]}`);
   if (unused.length > 1) throw new RelayError('param_unused', `Unused params ${unused.join(', ')}`);
 
-  const warnings: string[] = [];
+  const warnings: string[] = [...startWarnings];
   const skillSteps: SkillStep[] = drafts.map((draft, index) => {
     const id = makeStepId(index + 1, draft.action, draft.targetName);
     if (draft.css && !(draft.css.unique && draft.css.value)) {
@@ -91,6 +93,9 @@ export function buildSkill(steps: readonly TraceStep[], input: {
     }
     if (JSON.stringify(draft.step).includes('{{secret}}')) {
       warnings.push(`${id} types a secret; replay is refused until the vault exists (drop it with --from/--to)`);
+    }
+    for (const hit of draft.unsubstituted ?? []) {
+      warnings.push(unsubstitutedWarning(hit.name, `${id} ${hit.field}`, hit.part));
     }
     return { id, ...draft.step } as SkillStep;
   });
@@ -117,6 +122,13 @@ interface Draft {
   drifted?: boolean;
   tabUrl?: string;
   rewritten?: string;
+  unsubstituted?: UnsubstitutedHit[];
+}
+
+interface UnsubstitutedHit {
+  name: string;
+  field: string;
+  part?: TemplateMiss['part'];
 }
 
 function exampleParams(params: Record<string, string>): ExampleParam[] {
@@ -161,17 +173,24 @@ function expectDraft(check: CheckInput): Draft {
 
 function actionDraft(
   step: TraceStep,
-  apply: (value: string) => string,
+  apply: (value: string, place: TemplatePlace) => { text: string; missed: TemplateMiss[] },
   drifted: boolean,
   examples: readonly ExampleParam[],
   used: Set<string>,
 ): Draft {
   const target = step.target ? toSkillTarget(step.target) : undefined;
   const css = step.target ? { value: step.target.css, unique: step.target.cssUnique } : undefined;
-  const base = { targetName: target?.name, css, drifted, tabUrl: step.tabUrl };
+  const hits: UnsubstitutedHit[] = [];
+  const text = (value: string, place: TemplatePlace, field: string): string => {
+    const result = apply(value, place);
+    for (const miss of result.missed) hits.push({ name: miss.name, field, part: miss.part });
+    return result.text;
+  };
+  const base = { targetName: target?.name, css, drifted, tabUrl: step.tabUrl, unsubstituted: hits };
+  hits.push(...locatorMisses(step.target, examples));
   switch (step.action) {
     case 'goto':
-      return { action: 'goto', ...base, step: { goto: { url: apply(step.value || step.urlAfter) } } };
+      return { action: 'goto', ...base, step: { goto: { url: text(step.value || step.urlAfter, 'url', 'url') } } };
     case 'click':
       return { action: 'click', ...base, step: { click: { target: requiredTarget(step, target) } } };
     case 'type':
@@ -181,7 +200,7 @@ function actionDraft(
         step: {
           type: {
             target: requiredTarget(step, target),
-            value: apply(step.value ?? ''),
+            value: text(step.value ?? '', 'value', 'value'),
             ...(step.key ? { key: step.key } : {}),
           },
         },
@@ -190,7 +209,7 @@ function actionDraft(
       return {
         action: 'select',
         ...base,
-        step: { select: { target: requiredTarget(step, target), value: apply(step.value ?? '') } },
+        step: { select: { target: requiredTarget(step, target), value: text(step.value ?? '', 'value', 'value') } },
       };
     case 'press':
       if (!step.key) throw new RelayError('bad_params', `Trace step ${step.n} is a press without a key`);
@@ -212,6 +231,7 @@ function actionDraft(
       };
     case 'download': {
       const saved = saveAsForTrace(step.value || step.suggested || 'download.pdf', apply, examples, used);
+      for (const miss of saved.missed) hits.push({ name: miss.name, field: 'save_as', part: miss.part });
       return {
         action: 'download',
         ...base,
@@ -227,6 +247,7 @@ function actionDraft(
     }
     case 'pdf': {
       const saved = saveAsForTrace(step.value || 'page.pdf', apply, examples, used);
+      for (const miss of saved.missed) hits.push({ name: miss.name, field: 'save_as', part: miss.part });
       return {
         action: 'pdf',
         ...base,
@@ -240,14 +261,14 @@ function actionDraft(
       };
     }
     case 'wait': {
-      const text = step.value ? apply(step.value) : undefined;
-      const url = step.url ? apply(step.url) : undefined;
+      const waited = step.value ? text(step.value, 'text', 'text') : undefined;
+      const url = step.url ? text(step.url, 'url', 'url') : undefined;
       return {
         action: 'wait',
         ...base,
         step: {
           wait: {
-            ...(text ? { text } : {}),
+            ...(waited ? { text: waited } : {}),
             ...(url ? { url } : {}),
             ...(target ? { target } : {}),
             ...(step.timeout_ms ? { timeout_ms: step.timeout_ms } : {}),
@@ -262,16 +283,46 @@ function actionDraft(
 
 function saveAsForTrace(
   raw: string,
-  apply: (value: string) => string,
+  apply: (value: string, place: TemplatePlace) => { text: string; missed: TemplateMiss[] },
   examples: readonly ExampleParam[],
   used: Set<string>,
-): { saveAs: string; rewritten?: string } {
-  const templated = apply(raw);
-  if (examples.length === 0 || templated.includes('{{')) return { saveAs: templated };
+): { saveAs: string; rewritten?: string; missed: TemplateMiss[] } {
+  const templated = apply(raw, 'file');
+  if (examples.length === 0 || templated.text.includes('{{')) return { saveAs: templated.text, missed: templated.missed };
   const ext = fileExtension(raw) || '.pdf';
   const rewritten = `${examples.map((param) => `{{${param.name}}}`).join('-')}${ext}`;
   for (const param of examples) used.add(param.name);
-  return { saveAs: rewritten, rewritten };
+  return { saveAs: rewritten, rewritten, missed: templated.missed };
+}
+
+function locatorMisses(target: TraceStep['target'], examples: readonly ExampleParam[]): UnsubstitutedHit[] {
+  if (!target) return [];
+  const fields: Array<[string, string | undefined]> = [
+    ['target css', target.css],
+    ['target id', target.id],
+    ['target name', target.name],
+    ['target label', target.label],
+    ['target text', target.text],
+    ['target frame', target.frame?.url || target.frame?.name],
+  ];
+  const hits: UnsubstitutedHit[] = [];
+  const seen = new Set<string>();
+  for (const [field, value] of fields) {
+    if (!value) continue;
+    for (const param of examples) {
+      if (!param.example || !value.includes(param.example)) continue;
+      const key = `${param.name}\0${field}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      hits.push({ name: param.name, field });
+    }
+  }
+  return hits;
+}
+
+function unsubstitutedWarning(name: string, place: string, part?: string): string {
+  const where = part ? `${place} ${part}` : place;
+  return `param ${name} occurs in ${where} and was not substituted`;
 }
 
 function requiredTarget(step: TraceStep, target: SkillTarget | undefined): SkillTarget {

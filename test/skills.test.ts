@@ -105,13 +105,15 @@ describe('skill save', () => {
     expect(built.skill.start_url).toBe(PAGE);
     expect(built.skill.steps[0]?.select?.value).toBe('{{year}}');
     expect(built.skill.steps[1]?.select?.value).toBe('{{term}}');
-    expect(built.warnings).toEqual([]);
-    const rewritten = templatize('http://127.0.0.1:8765/zf-mock/v1/ 2025-2026', [
+    expect(built.warnings).toEqual(['param term occurs in start_url host and was not substituted']);
+    const params = [
       { name: 'year', example: '2025-2026' },
       { name: 'term', example: '2' },
-    ]);
+    ];
+    const rewritten = templatize('http://127.0.0.1:8765/zf-mock/v1/ 2025-2026', params, 'text');
     expect(rewritten.text).toBe('http://127.0.0.1:8765/zf-mock/v1/ {{year}}');
-    expect(templatize('{{secret}}', [{ name: 'year', example: '2025-2026' }]).text).toBe('{{secret}}');
+    expect(templatize(PAGE, params, 'url').text).toBe(PAGE);
+    expect(templatize('{{secret}}', [{ name: 'year', example: '2025-2026' }], 'text').text).toBe('{{secret}}');
   });
 
   it('rejects a param that matched nothing', () => {
@@ -177,6 +179,203 @@ describe('skill save', () => {
     expect(built.warnings.some((warning) => warning.includes('s3-click-查询') && warning.includes('relies only on name'))).toBe(true);
     expect(built.warnings.some((warning) => warning.startsWith('s4-click-输出PDF') && warning.includes('navigation'))).toBe(true);
     expect(built.skill.steps[2]?.click?.target.css).toBeUndefined();
+  });
+});
+
+describe('parameter substitution', () => {
+  const year = { name: 'year', example: '2025-2026' };
+  const term = { name: 'term', example: '1' };
+  const params = [year, term];
+  const liveUrl = 'http://127.0.0.1:63840/zf-mock/v1/';
+
+  it('keeps a short example out of the host, port, and partial path segments', () => {
+    const url = templatize(liveUrl, params, 'url');
+    expect(url.text).toBe(liveUrl);
+    expect(url.used).toEqual(new Set());
+    expect(url.missed).toEqual([
+      { name: 'term', part: 'host' },
+      { name: 'term', part: 'path' },
+    ]);
+    expect(templatize('http://127.0.0.1:63840/zf-mock/v1/', [{ name: 'port', example: '63840' }], 'url')).toMatchObject({
+      text: 'http://127.0.0.1:63840/zf-mock/v1/',
+      missed: [{ name: 'port', part: 'port' }],
+    });
+    expect(templatize('http://files.example/a', [{ name: 'host', example: 'files.example' }], 'url').text).toBe('http://files.example/a');
+    expect(templatize('http://127.0.0.1/zf-mock/v1/', [{ name: 'part', example: 'mock' }], 'url')).toMatchObject({
+      text: 'http://127.0.0.1/zf-mock/v1/',
+      missed: [{ name: 'part', part: 'path' }],
+    });
+    expect(templatize('http://127.0.0.1/1/page', [term], 'url')).toMatchObject({
+      text: 'http://127.0.0.1/1/page',
+      missed: [
+        { name: 'term', part: 'host' },
+        { name: 'term', part: 'path' },
+      ],
+    });
+    const queried = templatize('http://127.0.0.1:63840/2025-2026/1?year=2025-2026&term=1#1', params, 'url');
+    expect(queried.text).toBe('http://127.0.0.1:63840/{{year}}/1?year={{year}}&term={{term}}#1');
+    expect(queried.missed).toEqual([
+      { name: 'term', part: 'host' },
+      { name: 'term', part: 'path' },
+      { name: 'term', part: 'hash' },
+    ]);
+    expect(templatize('http://127.0.0.1/list?term=01', [term], 'url').text).toBe('http://127.0.0.1/list?term=01');
+    expect(templatize('term=1', [term], 'url').text).toBe('term={{term}}');
+    expect(templatize('zf-mock/v1', [{ name: 'ver', example: 'v1' }], 'url').text).toBe('zf-mock/{{ver}}');
+  });
+
+  it('replaces whole step values and whole tokens, not a short token or a stuck digit', () => {
+    expect(templatize('1', [term], 'value')).toMatchObject({ text: '{{term}}', missed: [] });
+    expect(templatize('room 1', [term], 'value')).toMatchObject({ text: 'room 1', missed: [{ name: 'term' }] });
+    expect(templatize('2025-2026', params, 'value')).toMatchObject({ text: '{{year}}', missed: [] });
+    expect(templatize('2025-2026-1.pdf', params, 'text')).toMatchObject({
+      text: '{{year}}-1.pdf',
+      missed: [{ name: 'term' }],
+    });
+    expect(templatize('pre-2025-2026-post', [year], 'text').text).toBe('pre-{{year}}-post');
+    expect(templatize('v2025-2026', [year], 'text')).toMatchObject({ text: 'v2025-2026', missed: [{ name: 'year' }] });
+    expect(templatize('2025-2026v', [year], 'text').text).toBe('2025-2026v');
+    expect(templatize('第1学期', [term], 'text')).toMatchObject({ text: '第1学期', missed: [{ name: 'term' }] });
+  });
+
+  it('substitutes a one-character token in a file name and leaves free text alone', () => {
+    expect(templatize('2025-2026-1.pdf', params, 'file')).toMatchObject({ text: '{{year}}-{{term}}.pdf', missed: [] });
+    expect(templatize('2025-2026-1.pdf', params, 'text')).toMatchObject({
+      text: '{{year}}-1.pdf',
+      missed: [{ name: 'term' }],
+    });
+    expect(templatize('2025-2026-1a.pdf', params, 'file')).toMatchObject({
+      text: '{{year}}-1a.pdf',
+      missed: [{ name: 'term' }],
+    });
+    expect(templatize('v1.pdf', [term], 'file')).toMatchObject({ text: 'v1.pdf', missed: [{ name: 'term' }] });
+    expect(templatize('1.pdf', [term], 'file').text).toBe('{{term}}.pdf');
+  });
+
+  it('saves the live zf-mock trace without planting term inside the url', () => {
+    const built = buildSkill(
+      [
+        traceStep({ n: 1, action: 'goto', value: liveUrl, urlBefore: 'about:blank', urlAfter: liveUrl }),
+        traceStep({
+          n: 2,
+          action: 'select',
+          value: '2025-2026',
+          urlBefore: liveUrl,
+          urlAfter: liveUrl,
+          target: target({ role: 'combobox', name: '学年', tag: 'select', id: 'xnm', css: '#xnm', cssUnique: true }),
+        }),
+        traceStep({
+          n: 3,
+          action: 'select',
+          value: '1',
+          urlBefore: liveUrl,
+          urlAfter: liveUrl,
+          target: target({ role: 'combobox', name: '学期', tag: 'select', id: 'xqm', css: '#xqm', cssUnique: true }),
+        }),
+        traceStep({
+          n: 4,
+          action: 'click',
+          urlBefore: liveUrl,
+          urlAfter: liveUrl,
+          target: target({ role: 'button', name: '查询', tag: 'button', id: 'search_go', css: '#search_go', cssUnique: true, text: '查询' }),
+        }),
+        traceStep({
+          n: 5,
+          action: 'click',
+          urlBefore: liveUrl,
+          urlAfter: liveUrl,
+          target: target({ role: 'button', name: '输出PDF', tag: 'button', id: 'shcPDF', css: '#shcPDF', cssUnique: true, text: '输出PDF' }),
+        }),
+        traceStep({
+          n: 6,
+          action: 'download',
+          value: '2025-2026-1.pdf',
+          urlBefore: liveUrl,
+          urlAfter: liveUrl,
+          target: target({ role: 'button', name: '确定', tag: 'button', id: 'pdf-ok', css: '#pdf-ok', cssUnique: true, text: '确定' }),
+        }),
+      ],
+      {
+        name: 'zf-demo',
+        description: '按学年学期导出课表 PDF',
+        params: { year: '2025-2026', term: '1' },
+        from_step: 2,
+      },
+    );
+    expect(built.skill.start_url).toBe(liveUrl);
+    expect(built.skill.steps[0]?.select?.value).toBe('{{year}}');
+    expect(built.skill.steps[1]?.select?.value).toBe('{{term}}');
+    expect(built.skill.steps[3]?.click?.target.name).toBe('输出PDF');
+    expect(built.skill.steps[4]?.download?.save_as).toBe('{{year}}-{{term}}.pdf');
+    expect(built.skill.steps[4]?.download?.click.target.css).toBe('#pdf-ok');
+    expect(built.warnings).toEqual([
+      'param term occurs in start_url host and was not substituted',
+      'param term occurs in start_url path and was not substituted',
+    ]);
+  });
+
+  it('warns when an example sits in locator css or an id and leaves both unchanged', () => {
+    const built = buildSkill(
+      [
+        traceStep({
+          n: 1,
+          action: 'goto',
+          value: 'http://example.test/start',
+          urlBefore: 'about:blank',
+          urlAfter: 'http://example.test/start',
+        }),
+        traceStep({
+          n: 2,
+          action: 'select',
+          value: '1',
+          target: target({ role: 'combobox', name: '学期', tag: 'select', id: 'xqm', css: '#xqm', cssUnique: true }),
+        }),
+        traceStep({
+          n: 3,
+          action: 'click',
+          target: target({
+            role: 'button',
+            name: 'go',
+            tag: 'button',
+            id: 'item1',
+            css: '#item1',
+            cssUnique: true,
+            frame: { name: 'notice', url: 'http://127.0.0.1/notice' },
+          }),
+        }),
+      ],
+      { name: 'zf-locator', description: '定位', params: { term: '1' } },
+    );
+    expect(built.skill.steps[1]?.click?.target.css).toBe('#item1');
+    expect(built.skill.steps[1]?.click?.target.frame?.url).toBe('http://127.0.0.1/notice');
+    expect(built.warnings).toEqual([
+      'param term occurs in s2-click-go target css and was not substituted',
+      'param term occurs in s2-click-go target id and was not substituted',
+      'param term occurs in s2-click-go target frame and was not substituted',
+    ]);
+  });
+
+  it('templatizes wait text by token and wait urls by query value or path segment', () => {
+    const built = buildSkill(
+      [
+        traceStep({
+          n: 1,
+          action: 'goto',
+          value: 'http://example.test/start',
+          urlBefore: 'about:blank',
+          urlAfter: 'http://example.test/start',
+        }),
+        traceStep({ n: 2, action: 'wait', value: '第1学期 2025-2026', url: 'http://127.0.0.1/2025-2026?term=1#1' }),
+      ],
+      { name: 'zf-wait', description: '等待课表', params: { year: '2025-2026', term: '1' } },
+    );
+    expect(built.skill.steps[0]?.wait?.text).toBe('第1学期 {{year}}');
+    expect(built.skill.steps[0]?.wait?.url).toBe('http://127.0.0.1/{{year}}?term={{term}}#1');
+    expect(built.warnings).toEqual([
+      'param term occurs in s1-wait text and was not substituted',
+      'param term occurs in s1-wait url host and was not substituted',
+      'param term occurs in s1-wait url hash and was not substituted',
+    ]);
   });
 });
 
@@ -347,6 +546,7 @@ describe('download and pdf skills', () => {
     });
     expect(built.skill.steps[1]?.pdf).toEqual({ save_as: '{{year}}-{{term}}.pdf', landscape: true });
     expect(built.warnings).toEqual([
+      'param term occurs in start_url host and was not substituted',
       's1-download-确定 save_as had no parameters; rewrote it to {{year}}-{{term}}.pdf so matrix runs do not collide',
       's2-pdf save_as had no parameters; rewrote it to {{year}}-{{term}}.pdf so matrix runs do not collide',
     ]);
@@ -357,7 +557,13 @@ describe('download and pdf skills', () => {
     const built = buildSkill(
       [
         traceStep({ n: 1, action: 'goto', value: PAGE, urlBefore: 'about:blank', urlAfter: PAGE }),
-        traceStep({ n: 2, action: 'download', value: '2025-2026-2.pdf', suggested: 'kb.pdf', target: confirm }),
+        traceStep({
+          n: 2,
+          action: 'select',
+          value: '2',
+          target: target({ role: 'combobox', name: '学期', tag: 'select', id: 'xqm', css: '#xqm', cssUnique: true }),
+        }),
+        traceStep({ n: 3, action: 'download', value: '2025-2026-2.pdf', suggested: 'kb.pdf', target: confirm }),
       ],
       {
         name: 'zf-export',
@@ -365,8 +571,8 @@ describe('download and pdf skills', () => {
         params: { year: '2025-2026', term: '2' },
       },
     );
-    expect(built.skill.steps[0]?.download?.save_as).toBe('{{year}}-{{term}}.pdf');
-    expect(built.warnings.filter((warning) => warning.includes('rewrote'))).toEqual([]);
+    expect(built.skill.steps[1]?.download?.save_as).toBe('{{year}}-{{term}}.pdf');
+    expect(built.warnings.filter((warning) => warning.includes('rewrote') || warning.includes('save_as'))).toEqual([]);
   });
 
   it('runs a download step, breaks on no_download, and skips it after an empty outcome', async () => {

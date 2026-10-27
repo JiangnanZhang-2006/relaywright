@@ -21,6 +21,8 @@
     .query-nest { margin: 12px 0; }
     .query-nest-inner { display: inline-block; }
     #pdf-slot { margin-top: 8px; padding: 8px; background: #fafafa; }
+    #export-dialog { margin-top: 8px; padding: 8px; border: 1px solid #9ab; background: #fff; }
+    #export-dialog label { margin-right: 12px; }
     iframe { display: block; width: 480px; height: 140px; margin-top: 16px; border: 1px solid #ddd; }
     #login-box { margin-top: 24px; }
     table { border-collapse: collapse; margin-top: 12px; }
@@ -52,7 +54,18 @@
   </div>
   <aside id="pdf-slot">
     <button type="button" id="pdf-go">输出PDF</button>
+    <div id="export-dialog" role="dialog" aria-label="导出设置" hidden>
+      <p>选择版式</p>
+      <label class="layout-choice"><input type="radio" name="export-layout" value="portrait" checked> 纵向</label>
+      <label class="layout-choice"><input type="radio" name="export-layout" value="landscape"> 横向</label>
+      <button type="button" id="export-confirm" class="confirm-export">确定</button>
+    </div>
   </aside>
+  <form id="export-form" method="post" action="/zf-mock/export.pdf" target="_blank">
+    <input type="hidden" name="year" id="export-year">
+    <input type="hidden" name="term" id="export-term">
+    <input type="hidden" name="layout" id="export-layout-value">
+  </form>
   <div role="tablist">
     <button type="button" role="tab" aria-selected="true">表格</button>
     <button type="button" role="tab">列表</button>
@@ -150,6 +163,20 @@
         }).join('');
         return '<table id="kbgrid_table_0" aria-label="个人课表"><thead>' + head + '</thead><tbody>' + body + '</tbody></table>';
       }
+
+      document.getElementById('pdf-go').addEventListener('click', function () {
+        document.getElementById('export-dialog').hidden = false;
+      });
+
+      document.getElementById('export-confirm').addEventListener('click', function () {
+        var yearOption = yearPick.options[yearPick.selectedIndex];
+        var termOption = termPick.options[termPick.selectedIndex];
+        document.getElementById('export-year').value = yearOption ? yearOption.textContent.trim() : '';
+        document.getElementById('export-term').value = termOption ? termOption.textContent.trim() : '';
+        var layout = document.querySelector('input[name="export-layout"]:checked');
+        document.getElementById('export-layout-value').value = layout ? layout.value : 'portrait';
+        document.getElementById('export-form').submit();
+      });
 
       document.getElementById('btn-retrieve').addEventListener('click', function () {
         var empty = document.getElementById('empty');

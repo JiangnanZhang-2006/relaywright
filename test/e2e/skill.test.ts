@@ -71,7 +71,8 @@ describe.skipIf(!resolved.path)('skill replay on the timetable fixture', () => {
         },
       ],
     });
-    expect(saved.warnings).toEqual([]);
+    expect(saved.warnings.filter((warning) => !warning.includes('occurs in start_url'))).toEqual([]);
+    expect(saved.warnings.some((warning) => warning.includes('start_url host'))).toBe(true);
     expect(saved.yaml).toContain('#xnm');
     expect(saved.yaml).toContain('#xqm');
     expect(saved.yaml).toContain('#search_go');

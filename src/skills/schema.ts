@@ -317,6 +317,10 @@ export const SkillPatchResultSchema = z.object({
   step_id: z.string(),
   reason: z.string().optional(),
   message: z.string().optional(),
+  /** Step that failed while re-running the tail after a patch. */
+  failed_step: z.string().optional(),
+  /** Cause of that tail failure, such as target_not_found. */
+  cause: z.string().optional(),
   from_version: z.number().int().positive().optional(),
   to_version: z.number().int().positive().optional(),
   outcome: z.enum(['ok', 'empty']).optional(),

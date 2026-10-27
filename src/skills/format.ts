@@ -21,7 +21,7 @@ export function formatRunReport(results: readonly SkillRunResult[], usage?: LlmU
       lines.push(`${outcome}${params}  ${result.message ?? result.outcome}`.trimEnd());
     } else {
       const id = result.broken?.step_id ?? '';
-      const reason = result.broken?.reason ?? result.outcome;
+      const reason = healFailureText(result);
       lines.push(`${outcome}${params}  ${id} ${reason}`.trimEnd());
     }
     const heal = result.broken?.heal;
@@ -45,6 +45,14 @@ export function formatRunReport(results: readonly SkillRunResult[], usage?: LlmU
   }
   lines.push(`llm_tokens: ${usage?.total ?? 0}`);
   return lines.join('\n');
+}
+
+function healFailureText(result: SkillRunResult): string {
+  const code = result.broken?.reason ?? result.outcome;
+  const message = result.message?.trim();
+  if (code !== 'heal_failed' || !message) return code;
+  if (message === code || message.startsWith(`${code}:`) || message.startsWith(`${code} `)) return message;
+  return `${code} ${message}`;
 }
 
 export function formatTrace(trace: TraceView): string {

@@ -193,7 +193,8 @@ async function saveTimetable(browser: BrowserSession, timetable: string): Promis
       },
     ],
   });
-  if (saved.warnings.length > 0) throw new Error(saved.warnings.join('\n'));
+  const unexpected = saved.warnings.filter((warning) => !warning.includes('occurs in start_url'));
+  if (unexpected.length > 0) throw new Error(unexpected.join('\n'));
 }
 
 async function playHuman(browser: BrowserSession): Promise<void> {

@@ -18,8 +18,8 @@ import { ensureTabHeader, pageHeader, switchBanner } from '../perception/snapsho
 import type { ActInput, DaemonStatus, DownloadInfo, DownloadInput, PageBody, PdfInput, PdfResult, TabsCommand, TabsList, WaitInput } from '../protocol.js';
 import { observedLines, TraceLog } from '../recorder/trace.js';
 import { valueForTrace } from '../recorder/redact.js';
-import type { DescribedTarget, TraceStep, TraceView } from '../recorder/types.js';
-import { buildHealContext, HEAL_TOKEN_MS, HealLedger, MAX_PATCH_ATTEMPTS, type HealTicket } from '../skills/heal.js';
+import type { DescribedTarget, TargetDescriptor, TraceStep, TraceView } from '../recorder/types.js';
+import { buildHealContext, HEAL_TOKEN_MS, HealLedger, MAX_PATCH_ATTEMPTS, rerunFailedReason, type HealTicket } from '../skills/heal.js';
 import { bindSkill, replaceStepTarget, resumeFromStep, runMatrix, runOutputDir } from '../skills/run.js';
 import { buildSkill, toSkillTarget } from '../skills/save.js';
 import type {
@@ -361,6 +361,8 @@ export class BrowserSession implements BrowserControl {
       await this.tabset().waitForPopup(since, actionPage, POPUP_GRACE_MS);
       const started = await this.downloader().waitForBegin(mark, timeout);
       if (!started) {
+        // The click already ran and may have opened a dialog. Keep that target as a click.
+        await this.keepPerformedClick(urlBefore, actionPage, described.target);
         throw new RelayError(
           'no_download',
           'No download began after the click. The click may have opened a dialog that needs another click.',
@@ -674,7 +676,12 @@ export class BrowserSession implements BrowserControl {
       const bound = bindSkill(prepared.skill, ticket.params);
       const replay = await resumeFromStep(page, bound, ticket.params, input.step_id, rawTarget, ticket.priorOutcome, ticket.outDir);
       if (replay.outcome !== 'ok' && replay.outcome !== 'empty') {
-        return await this.rejectPatch(input.name, input.step_id, replay.broken?.reason ?? replay.outcome, ticket, replay.message);
+        const failedStep = replay.broken?.step_id ?? input.step_id;
+        const cause = replay.broken?.reason ?? replay.outcome;
+        return await this.rejectPatch(input.name, input.step_id, rerunFailedReason(failedStep, cause), ticket, replay.message, {
+          failed_step: failedStep,
+          cause,
+        });
       }
       const written = writeStoredSkill(cleaned.skill, true);
       writeSkillChecks(cleaned.skill, written.path);
@@ -703,7 +710,14 @@ export class BrowserSession implements BrowserControl {
     }
   }
 
-  private async rejectPatch(name: string, stepId: string, reason: string, ticket: HealTicket, message?: string): Promise<SkillPatchResult> {
+  private async rejectPatch(
+    name: string,
+    stepId: string,
+    reason: string,
+    ticket: HealTicket,
+    message?: string,
+    failure?: { failed_step: string; cause: string },
+  ): Promise<SkillPatchResult> {
     let retryable = false;
     let drop = true;
     try {
@@ -718,7 +732,15 @@ export class BrowserSession implements BrowserControl {
       drop = true;
     }
     if (drop) this.heals.dropTicket();
-    return { accepted: false, name, step_id: stepId, reason, retryable, ...(message ? { message } : {}) };
+    return {
+      accepted: false,
+      name,
+      step_id: stepId,
+      reason,
+      retryable,
+      ...(message ? { message } : {}),
+      ...(failure ? { failed_step: failure.failed_step, cause: failure.cause } : {}),
+    };
   }
 
   async requestHandoff(reason: string, url?: string): Promise<HandoffView> {
@@ -1019,6 +1041,32 @@ export class BrowserSession implements BrowserControl {
     const downloads = this.downloads;
     if (!downloads) throw new Error('Browser is not connected');
     return downloads;
+  }
+
+  /** The click already ran; a no_download after that still belongs in the trace, as a click. */
+  private async keepPerformedClick(urlBefore: string, actionPage: Page, target: TargetDescriptor | undefined): Promise<void> {
+    const append = (urlAfter: string, observed: string[]): void => {
+      this.record(
+        { url: urlAfter },
+        {
+          action: 'click',
+          urlBefore,
+          urlAfter,
+          ...(target ? { target } : {}),
+          observed,
+          tabUrl: this.noteTab(actionPage, urlBefore),
+        },
+      );
+    };
+    try {
+      const kind = this.tabset().peekSwitch();
+      const body = await this.readSnapshot(kind ? 'full' : 'diff');
+      const shown = await this.finishLive(body);
+      append(shown.url, observedLines(shown.snapshot));
+    } catch (err) {
+      logDaemon(`click kept after no_download: ${errorText(err)}`);
+      append(urlBefore, []);
+    }
   }
 
   private record<T extends { url?: string; step?: number }>(page: T, input: Parameters<TraceLog['append']>[0]): T {

@@ -137,6 +137,11 @@ export function buildHealContext(input: {
   return { ...context, heal_token: ticket.token };
 }
 
+/** Tail re-run failed after the patched step. Names the later step and its cause. */
+export function rerunFailedReason(stepId: string, cause: string): string {
+  return `rerun_failed: ${stepId} ${cause}`;
+}
+
 /** Recorded steps have no intent field. The healer still needs one sentence for the failed action. */
 function fallbackIntent(step: SkillStep): string | undefined {
   const kind = stepKind(step);
