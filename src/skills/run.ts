@@ -72,6 +72,12 @@ export interface FailureSite {
   /** True when every locator missed, including a download whose click target was missing. */
   healable: boolean;
   missingTarget: boolean;
+  /** Steps that already finished before this failure. */
+  completed?: StepResult[];
+  artifacts?: SkillArtifact[];
+  warnings?: string[];
+  /** Combinations the matrix has not started. */
+  remaining?: Record<string, string>[];
 }
 
 export interface RunHooks {
@@ -93,12 +99,18 @@ export async function runMatrix(page: ReplayPage, skill: Skill, input: RunSkillI
   const results: SkillRunResult[] = [];
   const waitForHuman = input.wait_human ? hooks?.waitForHuman : undefined;
   let halt = false;
-  for (const params of combos) {
+  for (let index = 0; index < combos.length; index += 1) {
+    const params = combos[index];
+    if (!params) continue;
     if (halt) {
       results.push(skippedCombo(skill, params));
       continue;
     }
-    const result = await runSkill(page, skill, params, { startUrl: input.startUrl, outDir, waitForHuman }, hooks);
+    const remaining = combos.slice(index + 1);
+    const comboHooks: RunHooks | undefined = hooks?.onFailure
+      ? { ...hooks, onFailure: (site) => hooks.onFailure!({ ...site, remaining }) }
+      : hooks;
+    const result = await runSkill(page, skill, params, { startUrl: input.startUrl, outDir, waitForHuman }, comboHooks);
     results.push(result);
     if (result.halt_matrix) halt = true;
   }
@@ -158,6 +170,26 @@ export async function resumeFromStep(
     ...(played.broken ? { broken: played.broken } : {}),
     ...(played.artifacts.length > 0 ? { artifacts: played.artifacts } : {}),
     ...(played.warnings.length > 0 ? { warnings: played.warnings } : {}),
+  };
+}
+
+/** Prefix steps already ran. The resumed tail is the verification replay, so the combination is not started over. */
+export function mergeResumedRun(
+  prefix: { steps: readonly StepResult[]; artifacts?: readonly SkillArtifact[]; warnings?: readonly string[] },
+  replay: SkillRunResult,
+): SkillRunResult {
+  const artifacts = [...(prefix.artifacts ?? []), ...(replay.artifacts ?? [])];
+  const warnings = [...(prefix.warnings ?? []), ...(replay.warnings ?? [])];
+  return {
+    outcome: replay.outcome,
+    ...(replay.message !== undefined ? { message: replay.message } : {}),
+    params: replay.params,
+    steps: [...prefix.steps, ...replay.steps],
+    duration_ms: prefix.steps.reduce((sum, step) => sum + step.ms, 0) + replay.duration_ms,
+    ...(replay.broken ? { broken: replay.broken } : {}),
+    ...(artifacts.length > 0 ? { artifacts } : {}),
+    ...(warnings.length > 0 ? { warnings } : {}),
+    ...(replay.halt_matrix ? { halt_matrix: true } : {}),
   };
 }
 
@@ -272,6 +304,9 @@ async function driveSteps(
           outDir,
           healable,
           missingTarget,
+          completed: done.slice(0, -1),
+          artifacts: [...artifacts],
+          warnings: [...warnings],
         });
         if (heal) next = { ...next, heal };
       }

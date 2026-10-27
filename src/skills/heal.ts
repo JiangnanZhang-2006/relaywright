@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import type { FailureSite } from './run.js';
-import { stepKind, stepTarget, type HealContext, type SkillOutcome, type SkillStep } from './schema.js';
+import { stepKind, stepTarget, type HealContext, type SkillArtifact, type SkillOutcome, type SkillStep, type StepResult } from './schema.js';
 
 export const HEAL_TOKEN_MS = 10 * 60 * 1000;
 export const MAX_PATCH_ATTEMPTS = 2;
@@ -21,6 +21,10 @@ export interface HealTicket {
   priorOutcome: PriorOutcome;
   outDir: string;
   snapshot: string;
+  completed: StepResult[];
+  artifacts: SkillArtifact[];
+  warnings: string[];
+  remaining: Record<string, string>[];
 }
 
 export class HealLedger {
@@ -45,7 +49,15 @@ export class HealLedger {
     return this.ticket;
   }
 
-  issue(input: Omit<HealTicket, 'token' | 'createdAt' | 'attempts'> & { now?: number }): HealTicket {
+  issue(
+    input: Omit<HealTicket, 'token' | 'createdAt' | 'attempts' | 'completed' | 'artifacts' | 'warnings' | 'remaining'> & {
+      now?: number;
+      completed?: readonly StepResult[];
+      artifacts?: readonly SkillArtifact[];
+      warnings?: readonly string[];
+      remaining?: readonly Record<string, string>[];
+    },
+  ): HealTicket {
     const ticket: HealTicket = {
       name: input.name,
       version: input.version,
@@ -56,6 +68,10 @@ export class HealLedger {
       priorOutcome: input.priorOutcome,
       outDir: input.outDir,
       snapshot: input.snapshot,
+      completed: [...(input.completed ?? [])],
+      artifacts: [...(input.artifacts ?? [])],
+      warnings: [...(input.warnings ?? [])],
+      remaining: (input.remaining ?? []).map((params) => ({ ...params })),
       token: randomBytes(16).toString('hex'),
       createdAt: input.now ?? Date.now(),
       attempts: 0,
@@ -132,6 +148,10 @@ export function buildHealContext(input: {
     priorOutcome: site.priorOutcome,
     outDir: input.outDir,
     snapshot: input.snapshot,
+    completed: site.completed,
+    artifacts: site.artifacts,
+    warnings: site.warnings,
+    remaining: site.remaining,
     now: input.now,
   });
   return { ...context, heal_token: ticket.token };

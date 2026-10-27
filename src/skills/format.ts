@@ -1,5 +1,5 @@
 import type { TraceView } from '../recorder/types.js';
-import type { LlmStepUsage, SkillRunResult } from './schema.js';
+import type { LlmStepUsage, SkillPatchResult, SkillRunResult } from './schema.js';
 
 export interface LlmUsage {
   total: number;
@@ -28,7 +28,7 @@ export function formatRunReport(results: readonly SkillRunResult[], usage?: LlmU
     if (heal?.heal_token) {
       lines.push(`heal ${heal.name} v${heal.version} step ${heal.step_id} (${heal.kind})${heal.intent ? ` ${heal.intent}` : ''}`);
       if (heal.target) lines.push(`old target: ${heal.target.role} ${JSON.stringify(heal.target.name)}`);
-      lines.push('Pick the ref that performs this intent, call skill_patch, then call skill_run again.');
+      lines.push('Pick the ref that performs this intent and call skill_patch. That finishes this combination; call skill_run only for combinations that were skipped.');
       lines.push(`heal_token: ${heal.heal_token}`);
     } else if (result.broken?.reason === 'expect_unmatched') {
       lines.push('expect matched no declared outcome; this step is not repaired automatically');
@@ -53,6 +53,34 @@ function healFailureText(result: SkillRunResult): string {
   if (code !== 'heal_failed' || !message) return code;
   if (message === code || message.startsWith(`${code}:`) || message.startsWith(`${code} `)) return message;
   return `${code} ${message}`;
+}
+
+export function formatPatchResult(patch: SkillPatchResult): string {
+  if (!patch.accepted) {
+    const reason = patch.reason ?? 'rejected';
+    return `rejected: ${reason}${patch.message ? `\n${patch.message}` : ''}`;
+  }
+  const finished = patch.result;
+  const params = finished ? Object.entries(finished.params).map(([key, value]) => `${key}=${value}`).join(' ') : '';
+  const done = finished ? finished.steps.filter((step) => step.status === 'done').length : 0;
+  const total = finished?.steps.length ?? 0;
+  const lines = [
+    `patched: ${patch.name} v${patch.to_version}`,
+    `finished: ${params}`.trimEnd(),
+    `outcome: ${finished?.outcome ?? patch.outcome ?? 'ok'}`,
+    `steps: ${done}/${total}`,
+  ];
+  for (const artifact of finished?.artifacts ?? []) lines.push(`  ${artifact.step_id}  ${artifact.path}`);
+  const remaining = patch.remaining_params ?? [];
+  if (remaining.length === 0) {
+    lines.push('This combination is finished. No combinations remain.');
+  } else {
+    lines.push('This combination is finished. Do not run it again.');
+    lines.push('remaining:');
+    for (const combo of remaining) lines.push(`  ${Object.entries(combo).map(([key, value]) => `${key}=${value}`).join(' ')}`);
+    lines.push('Call skill_run only for the remaining combinations, with the same out_dir.');
+  }
+  return lines.join('\n');
 }
 
 export function formatTrace(trace: TraceView): string {

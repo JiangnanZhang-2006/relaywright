@@ -20,7 +20,7 @@ import { observedLines, TraceLog } from '../recorder/trace.js';
 import { valueForTrace } from '../recorder/redact.js';
 import type { DescribedTarget, TargetDescriptor, TraceStep, TraceView } from '../recorder/types.js';
 import { buildHealContext, HEAL_TOKEN_MS, HealLedger, MAX_PATCH_ATTEMPTS, rerunFailedReason, type HealTicket } from '../skills/heal.js';
-import { bindSkill, replaceStepTarget, resumeFromStep, runMatrix, runOutputDir } from '../skills/run.js';
+import { bindSkill, mergeResumedRun, replaceStepTarget, resumeFromStep, runMatrix, runOutputDir } from '../skills/run.js';
 import { buildSkill, toSkillTarget } from '../skills/save.js';
 import type {
   Healer,
@@ -694,6 +694,11 @@ export class BrowserSession implements BrowserControl {
         ...(input.llm_tokens !== undefined ? { llm_tokens: input.llm_tokens } : {}),
       });
       await flushAudit();
+      const result = mergeResumedRun(
+        { steps: ticket.completed, artifacts: ticket.artifacts, warnings: ticket.warnings },
+        replay,
+      );
+      const remaining = ticket.remaining.map((params) => ({ ...params }));
       this.heals.noteHealed();
       return {
         accepted: true,
@@ -702,6 +707,8 @@ export class BrowserSession implements BrowserControl {
         from_version: ticket.version,
         to_version: written.version,
         outcome: replay.outcome,
+        result,
+        remaining_params: remaining,
         ...(replay.message ? { message: replay.message } : {}),
       };
     } finally {

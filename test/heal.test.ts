@@ -9,9 +9,9 @@ import { completeHeal, parseHealContent } from '../src/healer/complete.js';
 import { maskTail } from '../src/privacy/detect.js';
 import { loginAccountWatchSource, readBindingPayload } from '../src/privacy/login-account.js';
 import { PrivacyStore } from '../src/privacy/store.js';
-import { formatRunReport } from '../src/skills/format.js';
+import { formatPatchResult, formatRunReport } from '../src/skills/format.js';
 import { buildHealContext, HEAL_TOKEN_MS, HealLedger, rerunFailedReason } from '../src/skills/heal.js';
-import { runMatrix, stopsMatrix, summaryExitCode } from '../src/skills/run.js';
+import { mergeResumedRun, runMatrix, stopsMatrix, summaryExitCode } from '../src/skills/run.js';
 import type { HealContext, Skill, SkillRunResult, SkillStep } from '../src/skills/schema.js';
 import type { ModelItem } from '../src/perception/snapshot.js';
 import type { PageBody, WaitInput } from '../src/protocol.js';
@@ -217,6 +217,9 @@ describe('replay matrix', () => {
       onFailure: async (site) => {
         failures += 1;
         expect(site.healable).toBe(true);
+        expect(site.completed?.map((step) => step.id)).toEqual(['year']);
+        expect(site.completed?.[0]?.status).toBe('done');
+        expect(site.remaining).toEqual([{ year: '2026-2027' }]);
         return {
           name: 'demo-skill',
           version: 1,
@@ -324,6 +327,56 @@ describe('heal report', () => {
       },
     ]);
     expect(text).toContain('s3-click-查询 heal_failed rerun_failed: s5-download-确定 target_not_found');
+  });
+
+  it('reports the healed combination as finished and names what is left', () => {
+    const merged = mergeResumedRun(
+      {
+        steps: [
+          { id: 's1-select-学年', status: 'done', locator: 'role_name', ms: 2 },
+          { id: 's2-select-学期', status: 'done', locator: 'role_name', ms: 3 },
+        ],
+      },
+      {
+        outcome: 'ok',
+        params: { year: '2025-2026', term: '1' },
+        steps: [
+          { id: 's3-click-查询', status: 'done', locator: 'role_name', ms: 4 },
+          { id: 's4-click-输出PDF', status: 'done', locator: 'role_name', ms: 5 },
+          { id: 's5-download-确定', status: 'done', locator: 'role_name', ms: 6 },
+        ],
+        duration_ms: 20,
+        artifacts: [{ step_id: 's5-download-确定', path: 'out/2025-2026-1.pdf', bytes: 8, sha256: 'ab' }],
+      },
+    );
+    expect(merged.steps.map((step) => step.status)).toEqual(['done', 'done', 'done', 'done', 'done']);
+    expect(merged.duration_ms).toBe(25);
+    expect(merged.artifacts?.map((artifact) => artifact.path)).toEqual(['out/2025-2026-1.pdf']);
+    const text = formatPatchResult({
+      accepted: true,
+      name: 'zf-pdf-heal',
+      step_id: 's3-click-查询',
+      to_version: 2,
+      outcome: 'ok',
+      result: merged,
+      remaining_params: [{ year: '2026-2027', term: '1' }],
+    });
+    expect(text).toContain('steps: 5/5');
+    expect(text).toContain('finished: year=2025-2026 term=1');
+    expect(text).toContain('Do not run it again');
+    expect(text).toContain('year=2026-2027 term=1');
+    expect(text).toContain('out/2025-2026-1.pdf');
+    expect(
+      formatPatchResult({
+        accepted: true,
+        name: 'zf-pdf-heal',
+        step_id: 's3-click-查询',
+        to_version: 2,
+        outcome: 'ok',
+        result: merged,
+        remaining_params: [],
+      }),
+    ).toContain('No combinations remain');
   });
 });
 

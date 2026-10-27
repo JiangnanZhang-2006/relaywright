@@ -325,6 +325,10 @@ export const SkillPatchResultSchema = z.object({
   to_version: z.number().int().positive().optional(),
   outcome: z.enum(['ok', 'empty']).optional(),
   retryable: z.boolean().optional(),
+  /** Verification replay of the healed combination, including steps that finished before the break. */
+  result: SkillRunResultSchema.optional(),
+  /** Combinations still skipped. skill_run should be called only for these. */
+  remaining_params: z.array(z.record(z.string(), z.string())).optional(),
 });
 
 export type SkillPatchResult = z.infer<typeof SkillPatchResultSchema>;

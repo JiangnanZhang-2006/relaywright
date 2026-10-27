@@ -55,8 +55,12 @@ export async function runSkillWithHeal(name: string, input: RunSkillInput, optio
         report = replaceAt(report, index, failHeal(current, patched.reason ?? 'heal_failed'));
         break;
       }
+      if (!patched.result) {
+        report = replaceAt(report, index, failHeal(current, 'heal_failed'));
+        break;
+      }
       healed += 1;
-      report = await rerunTail(name, input, report, index);
+      report = await rerunTail(name, input, report, index, patched.result);
     }
   }
   const steps: LlmStepUsage[] = [...usage.entries()].map(([step_id, tokens]) => ({ step_id, prompt: tokens.prompt, completion: tokens.completion }));
@@ -68,12 +72,18 @@ export async function runSkillWithHeal(name: string, input: RunSkillInput, optio
   };
 }
 
-async function rerunTail(name: string, input: RunSkillInput, report: MatrixResult, index: number): Promise<MatrixResult> {
+async function rerunTail(
+  name: string,
+  input: RunSkillInput,
+  report: MatrixResult,
+  index: number,
+  healed: SkillRunResult,
+): Promise<MatrixResult> {
   const prefix = report.results.slice(0, index);
-  const tail = report.results.slice(index);
-  const results: SkillRunResult[] = [...prefix];
-  for (let cursor = 0; cursor < tail.length; cursor += 1) {
-    const combo = tail[cursor];
+  const pending = report.results.slice(index + 1);
+  const results: SkillRunResult[] = [...prefix, healed];
+  for (let cursor = 0; cursor < pending.length; cursor += 1) {
+    const combo = pending[cursor];
     if (!combo) continue;
     const one = await runSkill(name, {
       params: combo.params,
@@ -86,7 +96,7 @@ async function rerunTail(name: string, input: RunSkillInput, report: MatrixResul
     if (!result) throw new Error('Skill run returned no result');
     results.push(result);
     if (stopsMatrix(result)) {
-      for (const rest of tail.slice(cursor + 1)) results.push(asSkipped(rest));
+      for (const rest of pending.slice(cursor + 1)) results.push(asSkipped(rest));
       break;
     }
   }

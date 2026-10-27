@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -49,6 +49,13 @@ interface PatchBody {
   from_version?: number;
   to_version?: number;
   retryable?: boolean;
+  result?: {
+    outcome?: string;
+    steps?: { id: string; status: string; locator?: string }[];
+    artifacts?: { path: string }[];
+    warnings?: string[];
+  };
+  remaining_params?: Record<string, string>[];
 }
 
 describe.skipIf(!resolved.path)('skill self-heal', () => {
@@ -300,9 +307,11 @@ describe.skipIf(!resolved.path)('skill self-heal', () => {
     expect(stored.yaml).toContain('#pdf-ok');
     const beforeSteps = readSkill('zf-pdf-heal').skill.steps;
 
+    const out = mkdtempSync(join(tmpdir(), 'relaywright-v3-pdf-'));
     const failed = await call('POST', '/skills/zf-pdf-heal/run', {
       matrix: { year: ['2025-2026', '2026-2027'], term: ['1'] },
       startUrl: v3,
+      out_dir: out,
     });
     expect(failed.status).toBe(200);
     const broken = failed.json as RunBody;
@@ -314,6 +323,7 @@ describe.skipIf(!resolved.path)('skill self-heal', () => {
 
     const heal = broken.results[0]?.broken?.heal;
     const ref = refFor(heal?.snapshot ?? '', /\[(e\d+)\][^\n]*检索/);
+    const beforePatch = await exportBodies();
     const patched = await call('POST', '/skills/zf-pdf-heal/patch', {
       step_id: heal?.step_id,
       ref,
@@ -330,34 +340,38 @@ describe.skipIf(!resolved.path)('skill self-heal', () => {
     expect(changed[0]?.click?.target.css).toBe('#btn-retrieve');
     expect(after.skill.steps[3]?.click?.target).toMatchObject({ name: '输出PDF', css: '#shcPDF' });
     expect(after.skill.steps[4]?.download?.click.target).toMatchObject({ name: '确定', css: '#pdf-ok' });
+    expect(patch.result?.steps?.map((step) => step.status)).toEqual(['done', 'done', 'done', 'done', 'done']);
+    expect(patch.result?.steps?.find((step) => step.id.includes('输出PDF'))).toMatchObject({ locator: 'role_name' });
+    expect(patch.result?.steps?.find((step) => step.id.includes('确定'))).toMatchObject({ locator: 'role_name' });
+    expect(patch.remaining_params).toEqual([{ year: '2026-2027', term: '1' }]);
+    expect(pdfNames(out)).toEqual(['2025-2026-1.pdf']);
+    expect((await exportBodies()).slice(beforePatch.length).map(exportFields)).toEqual([
+      { year: '2025-2026', term: '1', layout: 'portrait' },
+    ]);
+    expect((patch.result?.warnings ?? []).some((warning) => warning.includes('already existed'))).toBe(false);
 
     const beforeExports = await exportBodies();
-    const out = mkdtempSync(join(tmpdir(), 'relaywright-v3-pdf-'));
     const again = await call('POST', '/skills/zf-pdf-heal/run', {
-      matrix: { year: ['2025-2026', '2026-2027'], term: ['1'] },
+      params: patch.remaining_params?.[0],
       startUrl: v3,
       out_dir: out,
     });
     const replay = again.json as RunBody;
     expect(replay.exit_code).toBe(0);
-    expect(replay.results.map((result) => result.outcome)).toEqual(['ok', 'ok']);
+    expect(replay.results.map((result) => result.outcome)).toEqual(['ok']);
     expect(replay.results.every((result) => result.broken?.heal?.heal_token === undefined)).toBe(true);
     expect(readSkill('zf-pdf-heal').version).toBe(2);
-    for (const result of replay.results) {
-      expect(result.steps?.find((step) => step.id.includes('输出PDF'))).toMatchObject({ status: 'done', locator: 'role_name' });
-      expect(result.steps?.find((step) => step.id.includes('确定'))).toMatchObject({ status: 'done', locator: 'role_name' });
-    }
-    const names = replay.results.flatMap((result) => (result.artifacts ?? []).map((artifact) => basename(artifact.path)));
-    expect(names).toEqual(['2025-2026-1.pdf', '2026-2027-1.pdf']);
-    for (const artifact of replay.results.flatMap((result) => result.artifacts ?? [])) {
+    const result = replay.results[0];
+    expect(result?.steps?.filter((step) => step.status === 'done')).toHaveLength(5);
+    expect(result?.steps?.find((step) => step.id.includes('输出PDF'))).toMatchObject({ status: 'done', locator: 'role_name' });
+    expect(result?.steps?.find((step) => step.id.includes('确定'))).toMatchObject({ status: 'done', locator: 'role_name' });
+    expect(pdfNames(out)).toEqual(['2025-2026-1.pdf', '2026-2027-1.pdf']);
+    for (const artifact of [...(patch.result?.artifacts ?? []), ...(result?.artifacts ?? [])]) {
       expect(artifact.path.startsWith(out)).toBe(true);
       expect(readFileSync(artifact.path).subarray(0, 4).toString('utf8')).toBe('%PDF');
     }
     const posted = (await exportBodies()).slice(beforeExports.length);
-    expect(posted.map(exportFields)).toEqual([
-      { year: '2025-2026', term: '1', layout: 'portrait' },
-      { year: '2026-2027', term: '1', layout: 'portrait' },
-    ]);
+    expect(posted.map(exportFields)).toEqual([{ year: '2026-2027', term: '1', layout: 'portrait' }]);
   });
 
   it('heals from the CLI mock model and stays broken when the key is missing', async () => {
@@ -395,6 +409,26 @@ describe.skipIf(!resolved.path)('skill self-heal', () => {
     expect(second.code, second.stderr).toBe(0);
     expect((JSON.parse(second.stdout) as { llm_tokens?: number }).llm_tokens).toBe(0);
 
+    const rolledPdf = await cli(['skill', 'rollback', 'zf-pdf-heal', '--to', '1', '--json'], { RELAYWRIGHT_HEAL_TEST_KEY: 'local-test-key' });
+    expect(rolledPdf.code, rolledPdf.stderr).toBe(0);
+    const pdfOut = mkdtempSync(join(tmpdir(), 'relaywright-v3-cli-'));
+    const healedPdf = await cli(
+      ['skill', 'run', 'zf-pdf-heal', '--start-url', v3, '--matrix', 'year=2025-2026,2026-2027', '--matrix', 'term=1', '--out', pdfOut, '--json'],
+      { RELAYWRIGHT_HEAL_TEST_KEY: 'local-test-key' },
+    );
+    expect(healedPdf.code, `${healedPdf.stderr.slice(0, 800)}\n${healedPdf.stdout.slice(0, 800)}`).toBe(0);
+    const pdfReport = JSON.parse(healedPdf.stdout) as {
+      exit_code: number;
+      llm_tokens?: number;
+      results: { outcome: string; warnings?: string[]; steps?: { status: string }[] }[];
+    };
+    expect(pdfReport.exit_code).toBe(0);
+    expect(pdfReport.llm_tokens).toBe(18);
+    expect(pdfReport.results.map((result) => result.outcome)).toEqual(['ok', 'ok']);
+    expect(pdfReport.results[0]?.steps?.filter((step) => step.status === 'done')).toHaveLength(5);
+    expect(pdfReport.results.some((result) => (result.warnings ?? []).some((warning) => warning.includes('already existed')))).toBe(false);
+    expect(pdfNames(pdfOut)).toEqual(['2025-2026-1.pdf', '2026-2027-1.pdf']);
+
     const rolled = await cli(['skill', 'rollback', 'zf-heal', '--to', '1', '--json'], { RELAYWRIGHT_HEAL_TEST_KEY: 'local-test-key' });
     expect(rolled.code, rolled.stderr).toBe(0);
     expect(readSkill('zf-heal').yaml).toContain('#search_go');
@@ -406,11 +440,17 @@ describe.skipIf(!resolved.path)('skill self-heal', () => {
     const broken = JSON.parse(missing.stdout) as RunBody;
     expect(broken.llm_tokens).toBe(0);
     expect(broken.results[0]?.broken?.heal?.heal_token).toMatch(/^[a-f0-9]{32}$/);
-  }, 240_000);
+  }, 360_000);
 });
 
 function exportFields(body: string): Record<string, string> {
   return Object.fromEntries(new URLSearchParams(body));
+}
+
+function pdfNames(dir: string): string[] {
+  return readdirSync(dir)
+    .filter((name) => name.endsWith('.pdf'))
+    .sort();
 }
 
 async function cli(args: string[], extra: Record<string, string | undefined>): Promise<{ code: number; stdout: string; stderr: string }> {
