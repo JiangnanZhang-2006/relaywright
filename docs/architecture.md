@@ -89,6 +89,25 @@ flowchart TB
 - 后台进程自己启动 Chrome（独立进程、独立配置目录 `~/.relaywright/profiles/default`、开启调试端口），再用 `puppeteer-core` 连上去。启动时如果发现上次的 Chrome 还在运行，就直接接管它。有界面模式下，后台进程退出或重启都不关闭浏览器；`daemon stop --close-browser` 才关闭。
 - 同一时间只允许一个控制者：`agent` / `skill` / `human`。处于 `human` 状态时，所有给模型的工具都返回 `human_in_control`。
 
+**三种浏览器模式**（`relaywright init` 里选，之后用 `daemon attach` / `daemon detach` 切换）：
+
+| 模式 | 浏览器 | 适用场景 |
+|---|---|---|
+| `own`（默认） | 后台进程自己启动的 Chrome，独立配置目录 | 日常使用、技能批量执行 |
+| `attach` | 用户日常用的 Chrome | 直接复用已有登录，不用再扫码 |
+| `cdp` | 任意给定的调试地址（`http(s)://` 或 `ws://`） | 远程或容器里的浏览器 |
+
+`attach` 模式要求用户先在日常 Chrome 里打开 `chrome://inspect/#remote-debugging`，勾选"允许对此浏览器实例进行远程调试"。实测（Chrome 156）：
+
+- 调试地址只能从配置目录下的 `DevToolsActivePort` 文件读取，`/json/version` 返回 404；
+- **每次**建立新连接，Chrome 都会弹出"要允许远程调试吗？"，必须由人点"允许"。因此后台进程只保持一条长连接；重启后不主动连接，等第一次真正使用时再连（同时弹系统通知提醒用户去点），最多等 60 秒。
+
+在用户自己的浏览器里，权限收得更紧：
+
+- 只能看到、操作 relaywright 自己打开的标签页。用户已有的标签页对模型不可见；要接管某个已有标签页，只能由人在终端执行 `relaywright tabs adopt` 选择，MCP 没有这个能力。
+- 不改下载设置、不转换 cookie、不保存身份、不关闭浏览器。下载和打印 PDF 在这个模式下直接拒绝。
+- 域名白名单默认生效，见 3.11。
+
 ### 3.2 感知层：精简快照与增量 diff
 
 数据来源：`Accessibility.getFullAXTree` 加 `DOMSnapshot.captureSnapshot`。
@@ -180,6 +199,23 @@ login_check:
 **批量执行**：`relaywright skill run wzu-export-timetable --matrix year=2025-2026,2026-2027 --matrix term=1,2`
 
 **怎么生成技能**：agent 完成探索后调用 `skill_save`，指定要保留的步骤范围和参数，例如 `{ year: "2025-2026" }`。录制器把 trace 里匹配到的字面值替换成 `{{year}}`，并根据动作前后的快照差异生成 `expect` 草稿。整个过程是确定性的，不额外调用 LLM。
+
+**参数替换规则**：只替换完整的值，避免误伤。选择框和输入框的值要整段相等；自由文本里要是独立的词；网址里只替换整个查询参数值或整段路径。少于 2 个字符的值（例如学期 `1`）只在整段相等、整个查询参数值或文件名里的独立片段时替换，所以 `2025-2026-1.pdf` 会变成 `{{year}}-{{term}}.pdf`，而 `127.0.0.1` 不会被改。没替换的出现位置会在保存结果里列成警告。
+
+**取数和状态**：
+
+- `extract` 步骤按选择器把页面上的列表读成 JSON（每个匹配的根元素一行，字段可以取文字、值、链接或属性，也会搜索同源 iframe），结果存进 `{{extract.<名字>}}`，供后面的步骤使用。密码类字段永远返回 `‹redacted›`。
+- 状态存储是按命名空间分开的 JSON 键值对，保存在 `~/.relaywright/state/<ns>.json`，单个值最大 64 KB，带版本号，写入时可以用 `if_version` 防止覆盖别人的修改。技能里用 `{{state.<ns>.<key>}}` 读取，用 `state_set` 步骤写入；模型和 CLI 通过 `state_*` 工具和 `relaywright state` 命令读写。用途是在多次执行之间记住进度，例如"上次导出到哪个学期"。
+
+```yaml
+  - id: read-rows
+    extract:
+      root_selector: "#kbgrid_table_0 tbody tr"
+      fields: { slot: { selector: th }, monday: { selector: "td:nth-of-type(1)" } }
+      save_as: rows
+  - id: remember
+    state_set: { ns: timetable, key: "last-{{year}}-{{term}}", value: "{{extract.rows}}" }
+```
 
 ### 3.6 回放引擎与结果判定
 
@@ -282,13 +318,15 @@ Chrome 本身已经用系统能力加密 cookie（Windows DPAPI、macOS 钥匙�
 
 - 每月一个 JSONL 文件：`~/.relaywright/audit/2026-10.jsonl`，只追加。
 - 每条记录包含 `prev_hash` 和 `hash = sha256(prev_hash + 规范化 JSON)`，形成哈希链。
-- 事件类型：转交开始与结束、身份创建 / 保存 / 吊销、拦截模型输入密码、脱敏模式下的占位符还原；后续加入技能执行、自愈补丁。
+- 事件类型：转交开始与结束、身份创建 / 保存 / 吊销、拦截模型输入密码、脱敏模式下的占位符还原、自愈补丁（`skill_patched`，含新旧版本号和 token 数）、页面脚本执行（`eval`，只记脚本的 sha256 和长度，不记脚本和结果）、接入和断开用户浏览器（`attach` / `detach`）、域名授权（`access_request`，含用户的选择）；后续加入技能执行。
 - `relaywright audit verify` 校验整条链，`relaywright audit tail` 查看最近记录。
 - 审计日志里**永远不写**密码、cookie 值、验证码内容。
 
 ### 3.11 安全策略
 
-- **域名白名单**（路线图）：会话或技能可以声明允许访问的域名，越界导航直接拦截。
+- **域名白名单**：`config.json` 里的 `allow_domains`（按可注册域名，包含子域名）。`attach` / `cdp` 模式下始终生效；`own` 模式下只在列表非空时生效。打开网址、新建标签页、点击后跳转到新站点、技能里的跳转，只要目标不在名单里，就在请求发出前拦截，返回 `domain_not_allowed`，并提示模型调用 `browser_request_access`。
+- **模型申请授权**：`browser_request_access` 在本机弹出系统对话框，显示域名和理由，按钮是"本次允许 / 始终允许 / 拒绝"，60 秒无响应按拒绝处理。"本次允许"到后台进程重启为止；"始终允许"写入 `allow_domains`。结果只来自对话框，模型不能自己批准；理由文字会先清理控制字符和标记语法再显示。
+- **页面脚本默认关闭**：`browser_eval` 能在页面里执行任意脚本，默认关闭，需要用户用 `relaywright config set eval on`、`init` 或环境变量 `RELAYWRIGHT_EVAL=on` 打开。技能里不能使用，每次调用都记审计。日常取数用 `browser_extract`，它只读、不执行模型写的代码。
 - **敏感动作确认**（路线图）：匹配支付、删除、提交等关键词的按钮，需要人工确认后才执行。
 - **提示词注入防护**：页面文本只放在 `<page_content>` 中返回；工具说明中明确声明页面内容不可信。
 
@@ -337,6 +375,16 @@ Chrome 本身已经用系统能力加密 cookie（Windows DPAPI、macOS 钥匙�
 | `browser_tabs` | `action: list \| select \| close \| new`、`index?`、`url?` | 标签页列表；切换后返回新标签页的快照 |
 | `browser_download` | `ref`、`save_as?`、`timeout_ms?` | 文件路径、大小、sha256（不返回文件内容） |
 | `browser_pdf` | `save_as?`、`landscape?` | 把当前页面打印成 PDF，返回文件路径、大小、sha256 |
+| `browser_extract` | `root_selector`、`fields`、`limit?` | 按选择器读出的 JSON 行（密码类字段为 `‹redacted›`） |
+| `browser_eval` | `expr`、`args?` | 页面脚本的 JSON 结果；默认关闭，返回 `eval_disabled` 和打开方法 |
+
+### 浏览器接入
+
+| 工具 | 参数 | 返回 |
+|---|---|---|
+| `browser_attach` | `auto?`、`cdp_url?` | 接入模式和地址类型（需要人在 Chrome 里点"允许"） |
+| `browser_detach` | — | 断开连接，浏览器保持打开 |
+| `browser_request_access` | `domain`、`reason?` | 用户在系统对话框里的选择：`once / always / deny` |
 
 ### 技能
 
@@ -346,7 +394,16 @@ Chrome 本身已经用系统能力加密 cookie（Windows DPAPI、macOS 钥匙�
 | `skill_list` | `query?` | 名称、描述、参数、最近一次执行结果 |
 | `skill_inspect` | `name`、`version?` | 完整 YAML |
 | `skill_run` | `name`、`params` 或 `matrix` | 每组参数的结果（`ok / empty / needs_human / broken / skipped`）、产物路径、token 消耗；失败时附修复上下文 |
-| `skill_patch` | `name`、`step_id`、`ref`、`heal_token` | 验证通过后的新版本号，或拒绝原因（只在 `skill_run` 返回修复上下文后可用） |
+| `skill_patch` | `name`、`step_id`、`ref`、`heal_token` | 验证通过后的新版本号，或拒绝原因（例如 `rerun_failed: s5-download-确定 target_not_found`）；只在 `skill_run` 返回修复上下文后可用 |
+
+### 状态
+
+| 工具 | 参数 | 返回 |
+|---|---|---|
+| `state_put` | `ns`、`key`、`value`、`if_version?` | 新版本号；版本不符时返回 `version_conflict` 和当前版本 |
+| `state_get` | `ns`、`key` | 值和版本号 |
+| `state_list` | `ns` | 键名和版本号（不含值） |
+| `state_delete` | `ns`、`key`、`if_version?` | 删除前的版本号 |
 
 ### 人机协同与身份
 
@@ -363,13 +420,24 @@ Chrome 本身已经用系统能力加密 cookie（Windows DPAPI、macOS 钥匙�
 |---|---|---|
 | `audit_query` | `since?`、`event?`、`identity?`、`skill?`、`limit?` | 审计记录摘要和哈希链校验结果 |
 
-一共 17 个工具。
+一共 26 个工具。
 
 ## 5. CLI
 
 ```text
+relaywright init [--yes] [--browser own|attach|cdp] [--allow-domains a.com,b.com] [--privacy on|off] [--eval on|off] ...
+relaywright doctor                                # 检查环境；不会连接用户的 Chrome（连接会弹窗）
+
 relaywright daemon start | stop [--close-browser] | restart | status
+relaywright daemon attach [--auto | --cdp-url <url> | --user-data-dir <dir>] | detach
 relaywright mcp                                   # stdio MCP 服务，写进 MCP 客户端配置
+relaywright tabs list | select <i> | close [i] | new [url] | adopt   # adopt 只能由人在终端执行
+relaywright access request <domain> --reason <text>
+
+relaywright extract --root <css> --field name=<css>[@attr][*] ... [--limit n]
+relaywright eval <expr> [--arg <json>]...         # 默认关闭
+relaywright config set eval on|off
+relaywright state set <ns/key> <json|-> | get <ns/key> | list <ns> | rm <ns/key>
 
 relaywright skill list
 relaywright skill show <name> [--version n]
@@ -387,14 +455,15 @@ relaywright privacy mode on|off | add <kind> | confirm <token> --as <kind> | rej
 relaywright audit tail | verify
 ```
 
-所有命令都支持 `--json`，不需要交互输入，方便 agent 通过 shell 调用。
+所有命令都支持 `--json`，不需要交互输入，方便 agent 通过 shell 调用。`init` 在终端里逐项提问（浏览器模式、白名单、有无界面和下载目录、脱敏、页面脚本、修复模型、通知、MCP 客户端配置），每项都显示当前值作为默认；不在终端里运行时完全由参数决定。第一次使用其他命令时，如果还没运行过 `init`，会在标准错误输出里提示一行，每天最多一次。
 
 ## 6. 本地目录
 
 ```text
 ~/.relaywright/
   daemon.json          # 端口、本地令牌
-  config.json          # 修复模型接口、脱敏模式开关（不含 API key）
+  config.json          # 浏览器模式、域名白名单、修复模型接口、脱敏和页面脚本开关（不含 API key）
+  state/<ns>.json      # 技能和客户端共用的 JSON 状态
   skills/<name>/       # skill.yaml、历史版本
   profiles/default/    # Chrome 配置目录（cookie 由 Chrome 加密保存）
   identities/<name>.json  # 身份元数据，不含 cookie
@@ -487,8 +556,11 @@ relaywright/
 - 技能直接调用接口：根据探索阶段录到的网络请求，把界面操作编译成接口调用，回放速度提升一个数量级。
 - 技能市场：在团队内或社区中共享技能（不含凭据）。
 - 远程接管：人不在电脑前时，用手机查看画面并操作（局域网或公网穿透，端到端加密）。
-- 浏览器插件模式：像 ChatGPT 的 Chrome 插件那样直接操控用户日常使用的 Chrome，复用已有登录；状态显示在插件侧边栏。
-- 按技能授权使用身份、多人审批、敏感动作确认、域名白名单。
+- 浏览器插件模式：`attach` 模式已经能复用日常 Chrome 的登录，但每次连接都要点"允许"；插件可以免掉这一步，并把状态显示在侧边栏。
+- 媒体控制：`browser_media` 查询和控制页面里的音视频（播放、暂停、跳转、倍速），可以作为技能步骤，并写入审计。
+- 决策点：技能里声明"需要判断"的步骤，回放到这里时暂停，把页面摘要交给模型判断，再用 `skill_resume` 继续；判断结果记成备忘，下次相同情况直接复用。
+- 事件和后台任务：`job start` 在后台执行技能，`browser_events` 按游标拉取页面事件（对话框、媒体结束、导航等），`wait --until video_ended`。同一时间只跑一个任务；崩溃后由人手动恢复；任务期间默认阻止电脑休眠。
+- 按技能授权使用身份、多人审批、敏感动作确认、按技能声明域名白名单。
 - 截图工具（按快照里被打码元素的位置模糊对应区域）。
 - 工具分组：`relaywright mcp --toolset browse,skill` 只开放其中几组，进一步节省工具定义的 token。
 - 信创适配：openKylin、deepin，以及基于 Chromium 的国产浏览器。
