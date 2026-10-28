@@ -562,7 +562,25 @@ describe('download and pdf skills', () => {
     const trace = exportTrace('2025-2026-2.pdf').filter((step) => step.n !== 3);
     expect(() =>
       buildSkill(trace, { name: 'zf-export', description: '导出课表 PDF', params: { year: '2025-2026', term: '2' } }),
-    ).toThrow(/Param term \("2"\) only names saved files/);
+    ).toThrow(/Param term \("2"\) only names saved files.*Do not drop the param/);
+  });
+
+  it('refuses a range that exports before entering a param', () => {
+    const trace = [
+      traceStep({ n: 1, action: 'goto', value: PAGE, urlBefore: 'about:blank', urlAfter: PAGE }),
+      traceStep({ n: 2, action: 'select', value: '2025-2026', target: yearSelect }),
+      traceStep({ n: 3, action: 'download', value: '2025-2026-1.pdf', suggested: 'kb.pdf', target: confirm }),
+      traceStep({ n: 4, action: 'select', value: '2025-2026', target: yearSelect }),
+      traceStep({ n: 5, action: 'select', value: '2', target: termSelect }),
+      traceStep({ n: 6, action: 'download', value: '2025-2026-2.pdf', suggested: 'kb.pdf', target: confirm }),
+    ];
+    const input = { name: 'zf-export', description: '导出课表 PDF', params: { year: '2025-2026', term: '2' } };
+    expect(() => buildSkill(trace, input)).toThrow(/Step 3 saves a file before any step enters term \(entered at step 5\)/);
+    expect(buildSkill(trace, { ...input, from_step: 4 }).skill.steps.map((step) => step.id)).toEqual([
+      's1-select-学年',
+      's2-select-学期',
+      's3-download-确定',
+    ]);
   });
 
   it('templatizes a file name that already contains the examples', () => {

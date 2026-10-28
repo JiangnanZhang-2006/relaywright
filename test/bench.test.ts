@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { aggregate, median } from '../bench/report.js';
 import { mentionsEmptyTerm, parseExportBody, scoreRun } from '../bench/score.js';
 import { redactSecrets } from '../bench/redact.js';
-import { withoutLoginBox } from '../bench/server.js';
+import { timetablePdf, withoutLoginBox } from '../bench/server.js';
 import { readFileSync } from 'node:fs';
 
 const portrait = (year: string, term: string) => ({ year, term, layout: 'portrait' });
@@ -18,12 +18,12 @@ describe('bench scoring', () => {
     expect(score).toMatchObject({ success: true, missing: [], extra: [], emptyReported: true, emptyExported: false });
   });
 
-  it('allows duplicates but reports them', () => {
+  it('fails on duplicates and reports them', () => {
     const score = scoreRun(
       [portrait('2025-2026', '1'), portrait('2025-2026', '1'), portrait('2025-2026', '2'), portrait('2026-2027', '1')],
       ANSWER,
     );
-    expect(score.success).toBe(true);
+    expect(score.success).toBe(false);
     expect(score.duplicates).toEqual([{ year: '2025-2026', term: '1', layout: 'portrait', count: 2 }]);
   });
 
@@ -50,6 +50,19 @@ describe('bench server', () => {
       expect(served).not.toContain('type="password"');
       expect(served).toContain('输出PDF');
     }
+  });
+});
+
+describe('bench pdf', () => {
+  it('differs per term and has a valid xref offset', () => {
+    const one = timetablePdf(portrait('2025-2026', '1'));
+    const two = timetablePdf(portrait('2025-2026', '2'));
+    expect(one.equals(two)).toBe(false);
+    const text = one.toString('latin1');
+    expect(text.startsWith('%PDF-1.4')).toBe(true);
+    const start = Number(/startxref\n(\d+)/.exec(text)?.[1]);
+    expect(text.slice(start, start + 4)).toBe('xref');
+    expect(text).toContain('Timetable 2025-2026 term 1 portrait');
   });
 });
 

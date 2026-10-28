@@ -117,6 +117,7 @@ export class PageController {
   private loaderId = '';
   private epoch = 0;
   private readonly pending = new Map<HTTPRequest, number>();
+  private lastNetwork = 0;
   private disposed = false;
   private model: { items: ModelItem[]; tables: TableFact[] } = { items: [], tables: [] };
 
@@ -140,12 +141,15 @@ export class PageController {
     });
     page.on('request', (request) => {
       controller.pending.set(request, Date.now());
+      controller.lastNetwork = Date.now();
     });
     page.on('requestfinished', (request) => {
       controller.pending.delete(request);
+      controller.lastNetwork = Date.now();
     });
     page.on('requestfailed', (request) => {
       controller.pending.delete(request);
+      controller.lastNetwork = Date.now();
     });
     return controller;
   }
@@ -164,6 +168,11 @@ export class PageController {
 
   pageHandle(): Page {
     return this.page;
+  }
+
+  /** Milliseconds since the page last started or finished a request; 0 while one is open. */
+  networkQuietMs(): number {
+    return this.pending.size > 0 ? 0 : Date.now() - this.lastNetwork;
   }
 
   hasRef(ref: string): boolean {

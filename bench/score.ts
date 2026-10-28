@@ -31,7 +31,7 @@ function isExpected(post: Pick<ExportPost, 'year' | 'term'>): boolean {
   return EXPECTED.some((item) => item.year === post.year && item.term === post.term);
 }
 
-/** Portrait posts of the three scheduled terms count. Duplicates of those are allowed. */
+/** Exactly one portrait post per scheduled term; anything else leaves the user sorting files. */
 export function scoreRun(exports: readonly ExportPost[], answer: string): RunScore {
   const counts = new Map<string, number>();
   const extra: ExportPost[] = [];
@@ -57,6 +57,6 @@ export function scoreRun(exports: readonly ExportPost[], answer: string): RunSco
     count: counts.get(keyOf(item)) ?? 0,
   }));
   const emptyReported = mentionsEmptyTerm(answer);
-  const success = missing.length === 0 && extra.length === 0 && !emptyExported && emptyReported;
+  const success = missing.length === 0 && duplicates.length === 0 && extra.length === 0 && !emptyExported && emptyReported;
   return { success, duplicates, extra, missing, emptyReported, emptyExported };
 }

@@ -83,7 +83,7 @@ export function renderSummary(input: ReportInput): string {
     '- Same model, same system and user prompt, same Chrome binary, headless, temperature 0.',
     '- Each run is a new MCP client and a new conversation. Each server\'s own MCP instructions are added to the system prompt, as MCP clients do.',
     '- relaywright keeps its skill store across runs; Playwright MCP starts an isolated browser per run (it has no memory between runs).',
-    '- Success is judged from the export requests the page server received, plus whether the final answer names the empty term. The model\'s own claims are not trusted.',
+    '- Success is judged from the export requests the page server received, plus whether the final answer names the empty term. A run succeeds only with exactly one portrait export for each of the three terms that have data, none for the empty term, and the empty term named in the answer. The model\'s own claims are not trusted.',
     '- The zf-mock pages carry a login form used by the password-redaction tests. The task starts after login, so the bench server removes that form for both tools.',
     '',
   ];

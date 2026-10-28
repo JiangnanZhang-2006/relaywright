@@ -46,12 +46,13 @@ export function buildSkill(steps: readonly TraceStep[], input: {
   }
 
   const used = new Set<string>();
-  const entered = new Set<string>();
+  const entered = new Map<string, number>();
+  let current = 0;
   const apply = (value: string, place: TemplatePlace): { text: string; missed: TemplateMiss[] } => {
     const result = templatize(value, examples, place);
     for (const name of result.used) {
       used.add(name);
-      if (place !== 'file') entered.add(name);
+      if (place !== 'file' && !entered.has(name)) entered.set(name, current);
     }
     return { text: result.text, missed: result.missed };
   };
@@ -71,6 +72,7 @@ export function buildSkill(steps: readonly TraceStep[], input: {
   }
   let drifted = false;
   for (const step of body) {
+    current = step.n;
     drafts.push(actionDraft(step, apply, drifted, examples, used));
     if (step.action === 'goto' || step.urlAfter !== step.urlBefore) drifted = true;
     for (const check of (input.checks ?? []).filter((check) => check.after_step === step.n)) {
@@ -87,7 +89,18 @@ export function buildSkill(steps: readonly TraceStep[], input: {
     const list = fileOnly.map((param) => `${param.name} (${JSON.stringify(param.example)})`).join(', ');
     throw new RelayError(
       'param_unused',
-      `Param ${list} only names saved files; no step enters it into the page, so every replay would use whatever the page shows. If the page already had this value, select or type it anyway so the trace records it, then save again.`,
+      `Param ${list} only names saved files; no step enters it into the page, so every replay would use whatever the page shows. Do not drop the param: if the page already had this value, select or type it anyway (select the same option again), then save again with the same params and a step range that includes that action.`,
+    );
+  }
+  const early = body.find((step) => isExport(step) && examples.some((param) => (entered.get(param.name) ?? 0) > step.n));
+  if (early) {
+    const late = examples
+      .filter((param) => (entered.get(param.name) ?? 0) > early.n)
+      .map((param) => `${param.name} (entered at step ${entered.get(param.name)})`)
+      .join(', ');
+    throw new RelayError(
+      'bad_params',
+      `Step ${early.n} saves a file before any step enters ${late}, so every replay would first export with whatever the page shows. Save one complete pass that enters every param before it exports: set from_step to where the last pass starts and keep the same params. If that pass skipped a param because the page already showed it, run the pass again entering every param, then save that range.`,
     );
   }
 
@@ -153,6 +166,10 @@ function exampleParams(params: Record<string, string>): ExampleParam[] {
     examples.push({ name, example });
   }
   return examples;
+}
+
+function isExport(step: TraceStep): boolean {
+  return step.action === 'download' || step.action === 'pdf';
 }
 
 function bounds(steps: readonly TraceStep[], from: number | undefined, to: number | undefined): { from: number; to: number } {

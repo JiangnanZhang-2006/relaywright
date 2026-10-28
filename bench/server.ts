@@ -24,9 +24,9 @@ export async function startBenchServer(root: string): Promise<BenchServer> {
         return;
       }
       if (req.method === 'POST' && url.pathname === '/zf-mock/export.pdf') {
-        const body = await readBody(req);
-        posts.push(parseExportBody(body));
-        const pdf = await readFile(join(base, 'sample.pdf'));
+        const post = parseExportBody(await readBody(req));
+        posts.push(post);
+        const pdf = timetablePdf(post);
         res.writeHead(200, {
           'content-type': 'application/pdf',
           'content-disposition': 'inline; filename="kb.pdf"',
@@ -78,6 +78,31 @@ export async function startBenchServer(root: string): Promise<BenchServer> {
  */
 export function withoutLoginBox(html: string): string {
   return html.replace(/<form id="login-box">[\s\S]*?<\/form>\s*/g, '');
+}
+
+/** A one-page PDF naming the term, so exports of different terms differ like a real site's do. */
+export function timetablePdf(post: ExportPost): Buffer {
+  const label = `Timetable ${post.year} term ${post.term} ${post.layout}`.replace(/[^\x20-\x7e]/g, '?').replace(/[()\\]/g, '');
+  const [width, height] = post.layout === 'landscape' ? [842, 595] : [595, 842];
+  const stream = `BT /F1 18 Tf 72 ${height - 96} Td (${label}) Tj ET`;
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${width} ${height}] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>`,
+    `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+  ];
+  let out = '%PDF-1.4\n';
+  const offsets: number[] = [];
+  objects.forEach((body, index) => {
+    offsets.push(out.length);
+    out += `${index + 1} 0 obj\n${body}\nendobj\n`;
+  });
+  const xref = out.length;
+  out += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (const offset of offsets) out += `${String(offset).padStart(10, '0')} 00000 n \n`;
+  out += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(out, 'latin1');
 }
 
 function readBody(req: IncomingMessage): Promise<string> {

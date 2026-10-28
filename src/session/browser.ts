@@ -54,6 +54,7 @@ import {
   publishDownload,
   stageBytes,
   stripDownloadUrl,
+  type TrackedDownload,
 } from './downloads.js';
 import { HandoffManager } from './handoff.js';
 import { bounded } from './timeout.js';
@@ -79,6 +80,8 @@ import { PageController, type ReplayPage } from './page.js';
 import { formatTabList, POPUP_GRACE_MS, TabSet } from './tabs.js';
 
 export type { PageBody };
+
+const NO_DOWNLOAD_QUIET_MS = 3_000;
 
 export type BrowserPhase =
   | { state: 'idle' }
@@ -358,8 +361,12 @@ export class BrowserSession implements BrowserControl {
     const timeout = input.timeout_ms ?? 30_000;
     try {
       await controller.performInput({ action: 'click', ref: input.ref });
+      const clickedAt = Date.now();
       await this.tabset().waitForPopup(since, actionPage, POPUP_GRACE_MS);
-      const started = await this.downloader().waitForBegin(mark, timeout);
+      const started = await this.waitForDownloadBegin(mark, timeout, () => {
+        if (this.tabset().generation() !== since) return false;
+        return Date.now() - clickedAt >= NO_DOWNLOAD_QUIET_MS && controller.networkQuietMs() >= NO_DOWNLOAD_QUIET_MS;
+      });
       if (!started) {
         // The click already ran and may have opened a dialog. Keep that target as a click.
         await this.keepPerformedClick(urlBefore, actionPage, described.target);
@@ -1055,6 +1062,18 @@ export class BrowserSession implements BrowserControl {
     const downloads = this.downloads;
     if (!downloads) throw new Error('Browser is not connected');
     return downloads;
+  }
+
+  /** A download needs a request; once the page has been quiet for a while, stop waiting. */
+  private async waitForDownloadBegin(mark: number, timeoutMs: number, quiet: () => boolean): Promise<TrackedDownload | null> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const left = deadline - Date.now();
+      if (left <= 0) return null;
+      const begun = await this.downloader().waitForBegin(mark, Math.min(250, left));
+      if (begun) return begun;
+      if (quiet()) return null;
+    }
   }
 
   /** The click already ran; a no_download after that still belongs in the trace, as a click. */
