@@ -218,6 +218,8 @@ describe('headful window', () => {
     const headless = chromeLaunchArgs({ userDataDir: 'C:\\temp\\profile', headless: true });
     expect(headless).not.toContain('--start-maximized');
     expect(headless).toContain('--headless=new');
+    expect(headful.at(-1)).toBe('about:blank');
+    expect(headless.at(-1)).toBe('about:blank');
     expect(restoredWindowState('maximized')).toBe('maximized');
     expect(restoredWindowState('fullscreen')).toBe('fullscreen');
     expect(restoredWindowState('minimized')).toBe('normal');

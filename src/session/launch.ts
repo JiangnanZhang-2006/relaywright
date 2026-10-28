@@ -54,6 +54,8 @@ export function chromeLaunchArgs(input: { userDataDir: string; headless: boolean
   const args = [...STABILITY_ARGS, `--user-data-dir=${input.userDataDir}`, '--remote-debugging-port=0'];
   if (input.headless) args.push('--headless=new', '--hide-scrollbars', '--mute-audio', `--window-size=${HEADLESS_VIEWPORT.width},${HEADLESS_VIEWPORT.height}`);
   else args.push('--start-maximized');
+  // The new tab page fetches Google resources; navigating away mid-load leaves requests that never settle.
+  args.push('about:blank');
   return args;
 }
 

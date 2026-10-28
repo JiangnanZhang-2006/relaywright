@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url';
-import type { CDPSession, Page } from 'puppeteer-core';
+import type { CDPSession, HTTPRequest, Page } from 'puppeteer-core';
 import { RelayError } from '../errors.js';
 import { performAction, type ActInput } from '../actions/perform.js';
 import { loadDocument } from '../perception/capture.js';
@@ -116,7 +116,7 @@ export class PageController {
   private navigatedSinceBaseline = false;
   private loaderId = '';
   private epoch = 0;
-  private inflight = 0;
+  private readonly pending = new Map<HTTPRequest, number>();
   private disposed = false;
   private model: { items: ModelItem[]; tables: TableFact[] } = { items: [], tables: [] };
 
@@ -138,14 +138,14 @@ export class PageController {
       if (event.frame.parentId) return;
       controller.noteLoader(event.frame.loaderId);
     });
-    page.on('request', () => {
-      controller.inflight += 1;
+    page.on('request', (request) => {
+      controller.pending.set(request, Date.now());
     });
-    page.on('requestfinished', () => {
-      controller.inflight = Math.max(0, controller.inflight - 1);
+    page.on('requestfinished', (request) => {
+      controller.pending.delete(request);
     });
-    page.on('requestfailed', () => {
-      controller.inflight = Math.max(0, controller.inflight - 1);
+    page.on('requestfailed', (request) => {
+      controller.pending.delete(request);
     });
     return controller;
   }
@@ -417,6 +417,8 @@ export class PageController {
     if (!loaderId || loaderId === this.loaderId) return;
     const hadDocument = this.loaderId !== '';
     this.loaderId = loaderId;
+    // Subresources of the old document may never report finished or failed once it is gone.
+    this.pending.clear();
     if (!hadDocument) return;
     this.registry.reset();
     // A heal token's refs belong to this document. The next load makes them unusable.
@@ -464,7 +466,7 @@ export class PageController {
 
   private async settle(beforeLoader: string): Promise<void> {
     const start = Date.now();
-    let quietSince: number | null = this.inflight === 0 ? start : null;
+    let quietSince: number | null = this.pending.size === 0 ? start : null;
     const idleDeadline = start + IDLE_CAP_MS;
     while (Date.now() < idleDeadline) {
       const now = Date.now();
@@ -472,7 +474,7 @@ export class PageController {
         await this.waitForLoad(Math.max(0, start + LOAD_CAP_MS - now));
         return;
       }
-      if (this.inflight === 0) {
+      if (this.pending.size === 0) {
         if (quietSince === null) quietSince = now;
       } else {
         quietSince = null;
@@ -480,6 +482,8 @@ export class PageController {
       if (now - start >= NAV_DETECT_MS && quietSince !== null && now - quietSince >= IDLE_QUIET_MS) return;
       await delay(50);
     }
+    const open = [...this.pending.keys()].slice(0, 3).map((request) => `${request.resourceType()} ${request.url().slice(0, 120)}`);
+    logDaemon(`settle cap reached with ${this.pending.size} open request(s): ${open.join(', ')}`);
   }
 
   private async waitForLoad(timeoutMs: number): Promise<void> {
