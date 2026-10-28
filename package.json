@@ -16,7 +16,8 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit && tsc -p tsconfig.bench.json",
     "test": "vitest run",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
-    "bench": "tsx bench/run.ts"
+    "bench": "tsx bench/run.ts",
+    "licenses": "node scripts/check-licenses.mjs"
   },
   "files": [
     "dist",

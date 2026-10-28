@@ -11,6 +11,7 @@ export const TOOL_TIMEOUT_MS = 240_000;
 export interface ConversationResult {
   outcome: 'done' | 'limit' | 'error';
   error?: string;
+  servedModel?: string;
   answer: string;
   modelCalls: ModelCallRecord[];
   toolCalls: ToolCallRecord[];
@@ -66,11 +67,18 @@ export async function runConversation(options: {
     let answer = '';
     let outcome: ConversationResult['outcome'] = 'done';
     let error: string | undefined;
+    let servedModel: string | undefined;
     for (;;) {
       const elapsed = Date.now() - started;
       if (modelCalls.length >= MAX_MODEL_CALLS || elapsed >= MAX_RUN_MS || promptTokens + completionTokens >= MAX_TOKENS) {
         outcome = 'limit';
         break;
+      }
+      // DeepSeek thinking mode wants the reasoning of the latest tool-call turn only.
+      for (let index = 0; index < messages.length; index += 1) {
+        const message = messages[index];
+        if (!message?.reasoning_content) continue;
+        if (messages.slice(index + 1).some((later) => later.role === 'assistant')) delete message.reasoning_content;
       }
       const callStarted = Date.now();
       let turn;
@@ -89,13 +97,16 @@ export async function runConversation(options: {
       completionTokens += completion;
       cacheHitTokens += cacheHit;
       if (turn.toolCalls.length === 0) {
+        if (turn.servedModel) servedModel = turn.servedModel;
         answer = turn.content ?? '';
         outcome = 'done';
         break;
       }
+      if (turn.servedModel) servedModel = turn.servedModel;
       messages.push({
         role: 'assistant',
         content: turn.content,
+        ...(turn.reasoning ? { reasoning_content: turn.reasoning } : {}),
         tool_calls: turn.toolCalls.map((call) => ({
           id: call.id,
           type: 'function',
@@ -132,6 +143,7 @@ export async function runConversation(options: {
     return {
       outcome,
       ...(error ? { error } : {}),
+      ...(servedModel ? { servedModel } : {}),
       answer,
       modelCalls,
       toolCalls,

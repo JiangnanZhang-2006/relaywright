@@ -50,6 +50,8 @@ export interface ReportEnvironment {
   chromePath: string;
   chromeVersion: string;
   model: string;
+  servedModel: string;
+  thinking: boolean;
   baseUrl: string;
   apiKeyEnv: string;
   commit: string;
@@ -81,7 +83,7 @@ export function renderSummary(input: ReportInput): string {
     '',
     '## Setup',
     '',
-    '- Same model, same system and user prompt, same Chrome binary, headless, temperature 0.',
+    `- Same model, same system and user prompt, same Chrome binary, headless, ${input.environment.thinking ? 'thinking mode on (the reasoning of a turn is sent back while its tool calls run)' : 'temperature 0'}.`,
     '- Each run is a new MCP client and a new conversation. Each server\'s own MCP instructions are added to the system prompt, as MCP clients do.',
     '- relaywright keeps its skill store across runs; Playwright MCP starts an isolated browser per run (it has no memory between runs).',
     '- Success is judged from the export requests the page server received, plus whether the final answer names the empty term. Only exports submitted by the page (navigation requests) count; scripts that call the export endpoint directly are listed separately. A run succeeds only with exactly one portrait export for each of the three terms that have data, none for the empty term, and the empty term named in the answer. The model\'s own claims are not trusted.',
@@ -100,7 +102,8 @@ export function renderSummary(input: ReportInput): string {
     `- os: ${input.environment.os}`,
     `- chrome: ${input.environment.chromeVersion}`,
     `- chrome path: ${input.environment.chromePath}`,
-    `- model: ${input.environment.model}`,
+    `- model: ${input.environment.model}${input.environment.servedModel ? ` (served as ${input.environment.servedModel})` : ''}`,
+    `- thinking: ${input.environment.thinking ? 'on' : 'off'}`,
     `- base_url: ${input.environment.baseUrl}`,
     `- api_key_env: ${input.environment.apiKeyEnv}`,
     `- commit: ${input.environment.commit}`,
@@ -119,7 +122,7 @@ export function renderSummary(input: ReportInput): string {
   lines.push('', '## Aggregates', '', '| tool | first tokens | median repeat tokens | redesign tokens | total tokens | success rate |', '| --- | ---: | ---: | ---: | ---: | ---: |');
   for (const row of aggregates) {
     lines.push(
-      `| ${row.tool} | ${show(row.firstTokens)} | ${show(row.medianRepeatTokens)} | ${show(row.redesignTokens)} | ${row.totalTokens} | ${row.runs === 0 ? 'n/a' : `${row.successRate * 100}% (${Math.round(row.successRate * row.runs)}/${row.runs})`} |`,
+      `| ${row.tool} | ${show(row.firstTokens)} | ${show(row.medianRepeatTokens)} | ${show(row.redesignTokens)} | ${row.totalTokens} | ${row.runs === 0 ? 'n/a' : `${Math.round(row.successRate * 100)}% (${Math.round(row.successRate * row.runs)}/${row.runs})`} |`,
     );
   }
   lines.push(

@@ -159,6 +159,10 @@ export class BrowserSession implements BrowserControl {
   private browserVersion = '';
   private closed = false;
   private replayDepth = 0;
+  /** The combination that already ran outside skill_run; the next matrix run skips it. */
+  private savedPass: { session: string; name: string; version: number; params: Record<string, string>; why: string } | null = null;
+  /** Last trace step recorded before the latest skill run; a pass saved from steps up to here was already replayed. */
+  private replayedThrough = 0;
   private lastActionPage: Page | null = null;
   private keepBrowser = false;
   private releasing = false;
@@ -531,6 +535,8 @@ export class BrowserSession implements BrowserControl {
   clearTrace(): TraceView {
     this.assertModel();
     this.lastActionPage = null;
+    this.replayedThrough = 0;
+    this.savedPass = null;
     return this.traceLog.clear();
   }
 
@@ -561,6 +567,17 @@ export class BrowserSession implements BrowserControl {
     const cleaned = this.privacy.deidentify(built.skill, url);
     const stored = writeStoredSkill(cleaned.skill, input.overwrite === true);
     writeSkillChecks(cleaned.skill, stored.path);
+    const lastSaved = Math.min(input.to_step ?? Number.POSITIVE_INFINITY, steps.at(-1)?.n ?? 0);
+    this.savedPass =
+      input.session && lastSaved > this.replayedThrough
+        ? {
+            session: input.session,
+            name: cleaned.skill.name,
+            version: stored.version,
+            params: { ...(input.params ?? {}) },
+            why: 'done by hand in the pass this skill was saved from',
+          }
+        : null;
     return {
       name: cleaned.skill.name,
       version: stored.version,
@@ -590,6 +607,11 @@ export class BrowserSession implements BrowserControl {
   async runSkill(name: string, input: RunSkillInput): Promise<MatrixResult> {
     this.assertModel();
     const stored = readStoredSkill(name).skill;
+    const pass = this.savedPass;
+    this.savedPass = null;
+    this.replayedThrough = this.traceLog.view().steps.at(-1)?.n ?? 0;
+    const savedPass =
+      pass && input.session === pass.session && pass.name === stored.name && pass.version === stored.version ? pass : undefined;
     let skill = stored;
     let runInput = input;
     try {
@@ -620,7 +642,7 @@ export class BrowserSession implements BrowserControl {
             ledger: this.heals,
           });
         },
-      });
+      }, savedPass);
     } finally {
       this.replayDepth -= 1;
       this.tabSet?.consumeSwitch();
@@ -634,6 +656,7 @@ export class BrowserSession implements BrowserControl {
     heal_token?: string;
     healer?: Healer;
     llm_tokens?: number;
+    session?: string;
   }): Promise<SkillPatchResult> {
     this.assertModel();
     await this.ensureReady();
@@ -707,6 +730,9 @@ export class BrowserSession implements BrowserControl {
       );
       const remaining = ticket.remaining.map((params) => ({ ...params }));
       this.heals.noteHealed();
+      this.savedPass = input.session
+        ? { session: input.session, name: input.name, version: written.version, params: { ...ticket.params }, why: 'finished by skill_patch' }
+        : null;
       return {
         accepted: true,
         name: input.name,

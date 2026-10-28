@@ -5,6 +5,8 @@ export interface LiveModelConfig {
   baseUrl: string;
   model: string;
   apiKey: string;
+  /** DeepSeek thinking mode. The API ignores temperature in this mode, so none is sent. */
+  thinking: boolean;
 }
 
 /** Live chat completions. The key is sent only as an Authorization header. */
@@ -21,7 +23,7 @@ export function liveModel(config: LiveModelConfig): Model {
           },
           body: JSON.stringify({
             model: config.model,
-            temperature: 0,
+            ...(config.thinking ? { thinking: { type: 'enabled' } } : { temperature: 0 }),
             stream: false,
             messages: messages.map((message) => toApi(message)),
             tools,
@@ -53,6 +55,7 @@ function toApi(message: ChatMessage): Record<string, unknown> {
     return {
       role: 'assistant',
       content: message.content,
+      ...(message.reasoning_content ? { reasoning_content: message.reasoning_content } : {}),
       ...(message.tool_calls ? { tool_calls: message.tool_calls } : {}),
     };
   }
@@ -68,6 +71,8 @@ function parseCompletion(json: unknown, secret: string): ModelTurn {
   const content = typeof message.content === 'string' ? message.content : null;
   return {
     content,
+    ...(typeof message.reasoning_content === 'string' ? { reasoning: message.reasoning_content } : {}),
+    ...(typeof root.model === 'string' ? { servedModel: root.model } : {}),
     toolCalls,
     usage: {
       prompt_tokens: numberField(usage.prompt_tokens),

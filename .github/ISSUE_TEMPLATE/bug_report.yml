@@ -1,0 +1,36 @@
+name: 问题报告
+description: 报告一个 bug
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        安全问题请不要在这里提交，请按 SECURITY.md 私下报告。
+        贴日志和快照前，请删掉账号、姓名、学号、cookie 等个人信息。
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 实际结果和期望结果分别是什么。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 用到的命令或 MCP 工具调用；能用 fixtures 下的仿真页面复现最好。
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: 环境
+      description: 运行 `relaywright doctor` 的输出，以及操作系统、Node 版本、浏览器版本、MCP 客户端。
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志或报错
+      render: text

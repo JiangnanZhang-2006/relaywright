@@ -234,6 +234,8 @@ export const SaveSkillInputSchema = z.object({
   to_step: z.number().int().positive().optional(),
   checks: z.array(CheckSchema).optional(),
   overwrite: z.boolean().optional(),
+  /** MCP connection that saved the skill; its next skill_run skips the saved pass. */
+  session: z.string().min(1).max(100).optional(),
 });
 
 export type SaveSkillInput = z.infer<typeof SaveSkillInputSchema>;
@@ -295,6 +297,8 @@ export const RunSkillInputSchema = z.object({
   wait_human: z.boolean().optional(),
   /** Keep the per-run heal budget. The CLI sets this while replaying the rest of one matrix. */
   continue_heal: z.boolean().optional(),
+  /** MCP connection; skips the combination its last skill_save or skill_patch finished, which agents tend to rerun. */
+  session: z.string().min(1).max(100).optional(),
 });
 
 export const HealerSchema = z.enum(['mcp', 'cli', 'manual']);
@@ -307,6 +311,7 @@ export const SkillPatchInputSchema = z.object({
   heal_token: z.string().min(1).optional(),
   healer: HealerSchema.optional(),
   llm_tokens: z.number().int().nonnegative().optional(),
+  session: z.string().min(1).max(100).optional(),
 });
 
 export type SkillPatchInput = z.infer<typeof SkillPatchInputSchema>;

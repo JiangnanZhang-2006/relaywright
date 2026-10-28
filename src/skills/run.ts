@@ -91,7 +91,14 @@ export function stopsMatrix(result: { outcome: string; broken?: { reason?: strin
   return reason === 'target_not_found' || reason === 'no_download';
 }
 
-export async function runMatrix(page: ReplayPage, skill: Skill, input: RunSkillInput, hooks?: RunHooks): Promise<MatrixResult> {
+export async function runMatrix(
+  page: ReplayPage,
+  skill: Skill,
+  input: RunSkillInput,
+  hooks?: RunHooks,
+  /** A combination that already ran outside this matrix, e.g. the pass the skill was saved from. */
+  savedPass?: { params: Record<string, string>; why: string },
+): Promise<MatrixResult> {
   const combos = expandMatrix(input.matrix, input.params ?? {});
   for (const params of combos) bindSkill(skill, params);
   const outDir = input.out_dir ?? runOutputDir(skill.name);
@@ -104,6 +111,10 @@ export async function runMatrix(page: ReplayPage, skill: Skill, input: RunSkillI
     if (!params) continue;
     if (halt) {
       results.push(skippedCombo(skill, params));
+      continue;
+    }
+    if (combos.length > 1 && savedPass && sameParams(skill, params, savedPass.params)) {
+      results.push(skippedCombo(skill, params, `${savedPass.why}; not run again so nothing is exported twice`));
       continue;
     }
     const remaining = combos.slice(index + 1);
@@ -578,10 +589,15 @@ function asPrior(outcome: Running): PriorOutcome {
   return 'undecided';
 }
 
-function skippedCombo(skill: Skill, params: Record<string, string>): SkillRunResult {
+function sameParams(skill: Skill, params: Record<string, string>, other: Record<string, string>): boolean {
+  const names = Object.keys(skill.params ?? {});
+  return names.length > 0 && names.every((name) => params[name] !== undefined && params[name] === other[name]);
+}
+
+function skippedCombo(skill: Skill, params: Record<string, string>, message = 'skipped because an earlier combination is broken'): SkillRunResult {
   return {
     outcome: 'skipped',
-    message: 'skipped because an earlier combination is broken',
+    message,
     params,
     steps: skill.steps.map((step) => ({ id: step.id, status: 'skipped' as const, ms: 0 })),
     duration_ms: 0,

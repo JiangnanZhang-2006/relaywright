@@ -44,6 +44,7 @@ export interface BenchRun {
   url: string;
   success: boolean;
   outcome: RunOutcome;
+  servedModel?: string;
   answer: string;
   modelCalls: number;
   toolCalls: number;
@@ -87,6 +88,8 @@ export interface ToolAggregate {
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string | null;
+  /** Thinking-mode reasoning of an assistant turn; sent back while that turn's tool calls run. */
+  reasoning_content?: string;
   tool_call_id?: string;
   isError?: boolean;
   tool_calls?: Array<{
@@ -113,6 +116,9 @@ export interface ModelUsage {
 
 export interface ModelTurn {
   content: string | null;
+  reasoning?: string;
+  /** Model name the API reports serving, which can differ from the requested alias. */
+  servedModel?: string;
   toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>;
   usage: ModelUsage;
 }

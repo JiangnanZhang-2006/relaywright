@@ -42,8 +42,11 @@ async function main(): Promise<void> {
       'base-url': { type: 'string', default: process.env.BENCH_BASE_URL ?? 'https://api.deepseek.com' },
       model: { type: 'string', default: process.env.BENCH_MODEL ?? 'deepseek-chat' },
       'api-key-env': { type: 'string', default: 'DEEPSEEK_API_KEY' },
+      thinking: { type: 'string', default: 'on' },
     },
   });
+  if (values.thinking !== 'on' && values.thinking !== 'off') throw new Error('--thinking is on or off');
+  const thinking = values.thinking === 'on';
   const tools = (values.tools ?? '').split(',').map((item) => item.trim()).filter(Boolean) as BenchTool[];
   for (const tool of tools) {
     if (tool !== 'relaywright' && tool !== 'playwright') throw new Error(`unknown tool ${tool}`);
@@ -54,7 +57,7 @@ async function main(): Promise<void> {
   const apiKey = process.env[apiKeyEnv]?.trim() ?? '';
   if (!apiKey) throw new Error(`Set ${apiKeyEnv} to run the benchmark.`);
   if (!existsSync(CLI)) throw new Error('Run npm run build first.');
-  const model: Model = liveModel({ baseUrl: (values['base-url'] ?? '').replace(/\/+$/, ''), model: values.model ?? 'deepseek-chat', apiKey });
+  const model: Model = liveModel({ baseUrl: (values['base-url'] ?? '').replace(/\/+$/, ''), model: values.model ?? 'deepseek-chat', apiKey, thinking });
 
   const plans: Plan[] = [];
   if (kinds.has('first')) plans.push({ kind: 'first', repeatIndex: 0, version: 'v1' });
@@ -76,6 +79,8 @@ async function main(): Promise<void> {
       chromePath: browser.path,
       chromeVersion: browser.version,
       model: values.model ?? 'deepseek-chat',
+      servedModel: '',
+      thinking,
       baseUrl: values['base-url'] ?? '',
       apiKeyEnv,
       commit: git(['rev-parse', '--short', 'HEAD']),
@@ -87,6 +92,7 @@ async function main(): Promise<void> {
         for (const plan of plans) {
           const run = await runOnce(harness, plan, server, model, apiKey);
           runs.push(run);
+          publish();
           const total = runs.reduce((sum, item) => sum + item.promptTokens + item.completionTokens, 0);
           process.stdout.write(
             `${tool.padEnd(11)} ${runLabel(plan.kind, plan.repeatIndex).padEnd(9)} ${run.success ? 'ok  ' : 'FAIL'} ${run.outcome.padEnd(5)} calls=${run.modelCalls} tools=${run.toolCalls} tokens=${run.promptTokens + run.completionTokens} ${(run.wallMs / 1000).toFixed(1)}s  (all runs: ${total})${run.error ? `  error: ${run.error.split('\n')[0]}` : ''}\n`,
@@ -103,14 +109,19 @@ async function main(): Promise<void> {
   } finally {
     await server.close();
   }
-  writeReport(outDir, {
-    generatedAt: new Date().toISOString(),
-    dry: false,
-    environment: environment ?? emptyEnvironment(apiKeyEnv),
-    runs,
-    downloads,
-    ...(harnessError ? { error: harnessError } : {}),
-  });
+  publish();
+
+  function publish(): void {
+    if (environment) environment.servedModel = [...new Set(runs.flatMap((run) => (run.servedModel ? [run.servedModel] : [])))].join(', ');
+    writeReport(outDir, {
+      generatedAt: new Date().toISOString(),
+      dry: false,
+      environment: environment ?? emptyEnvironment(apiKeyEnv),
+      runs,
+      downloads,
+      ...(harnessError ? { error: harnessError } : {}),
+    });
+  }
   for (const row of aggregate(runs)) {
     process.stdout.write(
       `${row.tool}: first=${row.firstTokens ?? 'n/a'} median_repeat=${row.medianRepeatTokens ?? 'n/a'} redesign=${row.redesignTokens ?? 'n/a'} total=${row.totalTokens} success=${Math.round(row.successRate * row.runs)}/${row.runs}\n`,
@@ -169,6 +180,7 @@ async function runOnce(
     url,
     success: result.outcome === 'done' && score.success,
     outcome: result.outcome,
+    ...(result.servedModel ? { servedModel: result.servedModel } : {}),
     answer: result.answer,
     modelCalls: result.modelCalls.length,
     toolCalls: result.toolCalls.length,
@@ -293,7 +305,19 @@ function listFiles(dir: string): Array<{ path: string; bytes: number }> {
 }
 
 function emptyEnvironment(apiKeyEnv: string): ReportEnvironment {
-  return { node: process.version, os: `${os.type()} ${os.release()}`, chromePath: '', chromeVersion: '', model: '', baseUrl: '', apiKeyEnv, commit: '', playwrightMcp: '' };
+  return {
+    node: process.version,
+    os: `${os.type()} ${os.release()}`,
+    chromePath: '',
+    chromeVersion: '',
+    model: '',
+    servedModel: '',
+    thinking: false,
+    baseUrl: '',
+    apiKeyEnv,
+    commit: '',
+    playwrightMcp: '',
+  };
 }
 
 main().catch((err: unknown) => {

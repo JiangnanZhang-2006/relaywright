@@ -244,6 +244,25 @@ describe('replay matrix', () => {
     expect(summaryExitCode(report.results)).toBe(30);
   });
 
+  it('skips the combination the skill was just saved from', async () => {
+    const page = new FakePage();
+    page.includeButton = true;
+    page.text = 'nothing';
+    const done = { params: { year: '2025-2026' }, why: 'done by hand' };
+    const report = await runMatrix(page, demoSkill(), { matrix: { year: ['2025-2026', '2026-2027'] } }, undefined, done);
+    expect(page.navigations).toBe(1);
+    expect(report.results[0]).toMatchObject({ outcome: 'skipped', params: { year: '2025-2026' } });
+    expect(report.results[0]?.message).toContain('done by hand');
+    expect(report.results[1]?.params).toEqual({ year: '2026-2027' });
+    expect(report.results[1]?.outcome).not.toBe('skipped');
+
+    const single = new FakePage();
+    single.includeButton = true;
+    single.text = 'nothing';
+    await runMatrix(single, demoSkill(), { params: { year: '2025-2026' } }, undefined, done);
+    expect(single.navigations).toBe(1);
+  });
+
   it('does not stop the matrix or mint a token when expect matches nothing', async () => {
     const page = new FakePage();
     page.includeButton = true;
