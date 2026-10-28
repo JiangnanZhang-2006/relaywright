@@ -48,7 +48,7 @@ export async function startBenchServer(root: string): Promise<BenchServer> {
         res.end();
         return;
       }
-      const data = await readFile(file);
+      const data = extname(file) === '.html' ? withoutLoginBox(await readFile(file, 'utf8')) : await readFile(file);
       res.writeHead(200, { 'content-type': mime(extname(file)), 'cache-control': 'no-store' });
       res.end(req.method === 'HEAD' ? undefined : data);
     } catch {
@@ -70,6 +70,14 @@ export async function startBenchServer(root: string): Promise<BenchServer> {
     },
     close: () => closeServer(server),
   };
+}
+
+/**
+ * The zf-mock pages carry a login form for the password-redaction tests. The benchmark task
+ * starts after login, so the form is removed for every tool alike.
+ */
+export function withoutLoginBox(html: string): string {
+  return html.replace(/<form id="login-box">[\s\S]*?<\/form>\s*/g, '');
 }
 
 function readBody(req: IncomingMessage): Promise<string> {

@@ -524,11 +524,16 @@ describe('skill store', () => {
 describe('download and pdf skills', () => {
   const confirm = target({ role: 'button', name: '确定', tag: 'button', id: 'pdf-ok', css: '#pdf-ok', cssUnique: true, text: '确定' });
 
+  const yearSelect = target({ role: 'combobox', name: '学年', tag: 'select', id: 'xnm', css: '#xnm', cssUnique: true });
+  const termSelect = target({ role: 'combobox', name: '学期', tag: 'select', id: 'xqm', css: '#xqm', cssUnique: true });
+
   function exportTrace(fileName: string): TraceStep[] {
     return [
       traceStep({ n: 1, action: 'goto', value: PAGE, urlBefore: 'about:blank', urlAfter: PAGE }),
-      traceStep({ n: 2, action: 'download', value: fileName, suggested: 'kb.pdf', target: confirm, timeout_ms: 1500 }),
-      traceStep({ n: 3, action: 'pdf', value: 'page.pdf', landscape: true }),
+      traceStep({ n: 2, action: 'select', value: '2025-2026', target: yearSelect }),
+      traceStep({ n: 3, action: 'select', value: '2', target: termSelect }),
+      traceStep({ n: 4, action: 'download', value: fileName, suggested: 'kb.pdf', target: confirm, timeout_ms: 1500 }),
+      traceStep({ n: 5, action: 'pdf', value: 'page.pdf', landscape: true }),
     ];
   }
 
@@ -538,32 +543,35 @@ describe('download and pdf skills', () => {
       description: '导出课表 PDF',
       params: { year: '2025-2026', term: '2' },
     });
-    expect(built.skill.steps.map((step) => step.id)).toEqual(['s1-download-确定', 's2-pdf']);
-    expect(built.skill.steps[0]?.download).toEqual({
+    expect(built.skill.steps.map((step) => step.id)).toEqual(['s1-select-学年', 's2-select-学期', 's3-download-确定', 's4-pdf']);
+    expect(built.skill.steps[2]?.download).toEqual({
       click: { target: { role: 'button', name: '确定', css: '#pdf-ok', text: '确定' } },
       save_as: '{{year}}-{{term}}.pdf',
       timeout_ms: 1500,
     });
-    expect(built.skill.steps[1]?.pdf).toEqual({ save_as: '{{year}}-{{term}}.pdf', landscape: true });
+    expect(built.skill.steps[3]?.pdf).toEqual({ save_as: '{{year}}-{{term}}.pdf', landscape: true });
     expect(built.warnings).toEqual([
       'param term occurs in start_url host and was not substituted',
-      's1-download-确定 save_as had no parameters; rewrote it to {{year}}-{{term}}.pdf so matrix runs do not collide',
-      's2-pdf save_as had no parameters; rewrote it to {{year}}-{{term}}.pdf so matrix runs do not collide',
+      's3-download-确定 save_as had no parameters; rewrote it to {{year}}-{{term}}.pdf so matrix runs do not collide',
+      's4-pdf save_as had no parameters; rewrote it to {{year}}-{{term}}.pdf so matrix runs do not collide',
     ]);
     expect(parseSkill(stringifySkill(built.skill))).toEqual(built.skill);
+  });
+
+  it('refuses a param that only names saved files', () => {
+    const trace = exportTrace('2025-2026-2.pdf').filter((step) => step.n !== 3);
+    expect(() =>
+      buildSkill(trace, { name: 'zf-export', description: '导出课表 PDF', params: { year: '2025-2026', term: '2' } }),
+    ).toThrow(/Param term \("2"\) only names saved files/);
   });
 
   it('templatizes a file name that already contains the examples', () => {
     const built = buildSkill(
       [
         traceStep({ n: 1, action: 'goto', value: PAGE, urlBefore: 'about:blank', urlAfter: PAGE }),
-        traceStep({
-          n: 2,
-          action: 'select',
-          value: '2',
-          target: target({ role: 'combobox', name: '学期', tag: 'select', id: 'xqm', css: '#xqm', cssUnique: true }),
-        }),
-        traceStep({ n: 3, action: 'download', value: '2025-2026-2.pdf', suggested: 'kb.pdf', target: confirm }),
+        traceStep({ n: 2, action: 'select', value: '2025-2026', target: yearSelect }),
+        traceStep({ n: 3, action: 'select', value: '2', target: termSelect }),
+        traceStep({ n: 4, action: 'download', value: '2025-2026-2.pdf', suggested: 'kb.pdf', target: confirm }),
       ],
       {
         name: 'zf-export',
@@ -571,7 +579,7 @@ describe('download and pdf skills', () => {
         params: { year: '2025-2026', term: '2' },
       },
     );
-    expect(built.skill.steps[1]?.download?.save_as).toBe('{{year}}-{{term}}.pdf');
+    expect(built.skill.steps[2]?.download?.save_as).toBe('{{year}}-{{term}}.pdf');
     expect(built.warnings.filter((warning) => warning.includes('rewrote') || warning.includes('save_as'))).toEqual([]);
   });
 

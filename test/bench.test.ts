@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { aggregate, median } from '../bench/report.js';
 import { mentionsEmptyTerm, parseExportBody, scoreRun } from '../bench/score.js';
 import { redactSecrets } from '../bench/redact.js';
+import { withoutLoginBox } from '../bench/server.js';
+import { readFileSync } from 'node:fs';
 
 const portrait = (year: string, term: string) => ({ year, term, layout: 'portrait' });
 const ANSWER = '已导出三个学期。2026-2027 学年第2学期没有课表，未导出。';
@@ -37,6 +39,17 @@ describe('bench scoring', () => {
     expect(scoreRun(all, '全部导出完成。').success).toBe(false);
     expect(mentionsEmptyTerm('2026-2027 学年第二学期尚无课表')).toBe(true);
     expect(mentionsEmptyTerm('2026-2027 学年第1学期已导出')).toBe(false);
+  });
+});
+
+describe('bench server', () => {
+  it('removes the fixture login form from both page versions', () => {
+    for (const version of ['v1', 'v3']) {
+      const html = readFileSync(new URL(`../fixtures/zf-mock/${version}/index.html`, import.meta.url), 'utf8');
+      const served = withoutLoginBox(html);
+      expect(served).not.toContain('type="password"');
+      expect(served).toContain('输出PDF');
+    }
   });
 });
 

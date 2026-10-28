@@ -118,7 +118,14 @@ export async function runConversation(options: {
           text = publicError(err, options.secret);
           isError = true;
         }
-        toolCalls.push({ name: call.name, ms: Date.now() - toolStarted, resultChars: text.length, isError });
+        toolCalls.push({
+          name: call.name,
+          args: call.arguments,
+          ms: Date.now() - toolStarted,
+          resultChars: text.length,
+          isError,
+          preview: publicError(text, options.secret).slice(0, 1500),
+        });
         messages.push({ role: 'tool', tool_call_id: call.id, content: text, isError });
       }
     }

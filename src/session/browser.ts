@@ -59,7 +59,7 @@ import { HandoffManager } from './handoff.js';
 import { bounded } from './timeout.js';
 import { IdentityStore } from './identity.js';
 import { domainNotAllowed, navigationDecision, normalizeAllowDomain, readAllowDomains, type BrowserModeName } from './allowlist.js';
-import { askAccess, type AccessDecision } from './access-dialog.js';
+import { askAccess, testOverridesEnabled, type AccessDecision } from './access-dialog.js';
 import {
   ATTACH_ALLOW_HINT,
   ATTACH_TIMEOUT_MS,
@@ -752,6 +752,13 @@ export class BrowserSession implements BrowserControl {
 
   async requestHandoff(reason: string, url?: string): Promise<HandoffView> {
     await this.ensureReady();
+    // Tests play the human in a headless browser.
+    if (this.connection !== 'attached' && this.launchedHeadless && !testOverridesEnabled()) {
+      throw new RelayError(
+        'human_required',
+        'The browser is headless, so nobody can see it to log in. Report that a login is needed, or restart the daemon with a visible browser.',
+      );
+    }
     const revealed = url === undefined ? undefined : this.privacy.reveal(url, 'handoff', this.pageUrl || url);
     const target = revealed === undefined ? undefined : parseHttpUrl(revealed);
     if (target) this.assertNavigation(target);

@@ -30,9 +30,11 @@ export interface ModelCallRecord {
 
 export interface ToolCallRecord {
   name: string;
+  args: Record<string, unknown>;
   ms: number;
   resultChars: number;
   isError: boolean;
+  preview: string;
 }
 
 export interface BenchRun {

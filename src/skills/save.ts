@@ -46,9 +46,13 @@ export function buildSkill(steps: readonly TraceStep[], input: {
   }
 
   const used = new Set<string>();
+  const entered = new Set<string>();
   const apply = (value: string, place: TemplatePlace): { text: string; missed: TemplateMiss[] } => {
     const result = templatize(value, examples, place);
-    for (const name of result.used) used.add(name);
+    for (const name of result.used) {
+      used.add(name);
+      if (place !== 'file') entered.add(name);
+    }
     return { text: result.text, missed: result.missed };
   };
 
@@ -78,6 +82,14 @@ export function buildSkill(steps: readonly TraceStep[], input: {
   const unused = examples.filter((param) => !used.has(param.name)).map((param) => param.name);
   if (unused.length === 1) throw new RelayError('param_unused', `Unused param ${unused[0]}`);
   if (unused.length > 1) throw new RelayError('param_unused', `Unused params ${unused.join(', ')}`);
+  const fileOnly = examples.filter((param) => !entered.has(param.name));
+  if (fileOnly.length > 0) {
+    const list = fileOnly.map((param) => `${param.name} (${JSON.stringify(param.example)})`).join(', ');
+    throw new RelayError(
+      'param_unused',
+      `Param ${list} only names saved files; no step enters it into the page, so every replay would use whatever the page shows. If the page already had this value, select or type it anyway so the trace records it, then save again.`,
+    );
+  }
 
   const warnings: string[] = [...startWarnings];
   const skillSteps: SkillStep[] = drafts.map((draft, index) => {
