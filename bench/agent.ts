@@ -3,9 +3,9 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { publicError } from './redact.js';
 import type { ChatMessage, Model, ModelCallRecord, OpenAITool, ToolCallRecord } from './types.js';
 
-export const MAX_MODEL_CALLS = 40;
-export const MAX_TOKENS = 600_000;
-export const MAX_RUN_MS = 15 * 60 * 1000;
+export const MAX_MODEL_CALLS = 100;
+export const MAX_TOKENS = 2_000_000;
+export const MAX_RUN_MS = 20 * 60 * 1000;
 export const TOOL_TIMEOUT_MS = 240_000;
 
 export interface ConversationResult {

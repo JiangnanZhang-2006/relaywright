@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { MAX_MODEL_CALLS, MAX_RUN_MS, MAX_TOKENS } from './agent.js';
 import type { BenchRun, RunKind, TokenRun, ToolAggregate } from './types.js';
 
 export const REPRODUCE_COMMAND = 'npm run bench -- --tools relaywright,playwright --repeats 5 --out bench/results';
@@ -83,8 +84,10 @@ export function renderSummary(input: ReportInput): string {
     '- Same model, same system and user prompt, same Chrome binary, headless, temperature 0.',
     '- Each run is a new MCP client and a new conversation. Each server\'s own MCP instructions are added to the system prompt, as MCP clients do.',
     '- relaywright keeps its skill store across runs; Playwright MCP starts an isolated browser per run (it has no memory between runs).',
-    '- Success is judged from the export requests the page server received, plus whether the final answer names the empty term. A run succeeds only with exactly one portrait export for each of the three terms that have data, none for the empty term, and the empty term named in the answer. The model\'s own claims are not trusted.',
+    '- Success is judged from the export requests the page server received, plus whether the final answer names the empty term. Only exports submitted by the page (navigation requests) count; scripts that call the export endpoint directly are listed separately. A run succeeds only with exactly one portrait export for each of the three terms that have data, none for the empty term, and the empty term named in the answer. The model\'s own claims are not trusted.',
     '- The zf-mock pages carry a login form used by the password-redaction tests. The task starts after login, so the bench server removes that form for both tools.',
+    `- A run stops at ${MAX_MODEL_CALLS} model calls, ${MAX_TOKENS} tokens or ${MAX_RUN_MS / 60_000} minutes, and then counts as a failure.`,
+    '- Both servers run with their defaults apart from headless, the Chrome binary and (for Playwright MCP) no image responses. Playwright MCP writes the snapshot after an action to a file, so the model calls browser_snapshot to read it; that is its default behaviour.',
     '',
   ];
   if (input.dry) {
@@ -119,12 +122,19 @@ export function renderSummary(input: ReportInput): string {
       `| ${row.tool} | ${show(row.firstTokens)} | ${show(row.medianRepeatTokens)} | ${show(row.redesignTokens)} | ${row.totalTokens} | ${row.runs === 0 ? 'n/a' : `${row.successRate * 100}% (${Math.round(row.successRate * row.runs)}/${row.runs})`} |`,
     );
   }
-  lines.push('', '## Success detail', '', '| tool | kind | duplicates | extra | missing | empty exported |', '| --- | --- | --- | --- | --- | --- |');
+  lines.push(
+    '',
+    '## Success detail',
+    '',
+    '| tool | kind | duplicates | extra | missing | empty exported | direct endpoint calls |',
+    '| --- | --- | --- | --- | --- | --- | --- |',
+  );
   for (const run of input.runs) {
     const duplicates = run.duplicates.map((item) => `${item.year}/${item.term} x${item.count}`).join(', ') || '(none)';
     const extra = run.extra.map((item) => `${item.year}/${item.term}/${item.layout}`).join(', ') || '(none)';
     const missing = run.missing.map((item) => `${item.year}/${item.term}`).join(', ') || '(none)';
-    lines.push(`| ${run.tool} | ${runLabel(run.kind, run.repeatIndex)} | ${duplicates} | ${extra} | ${missing} | ${run.emptyExported ? 'yes' : 'no'} |`);
+    const direct = run.direct.map((item) => `${item.year}/${item.term}/${item.layout}`).join(', ') || '(none)';
+    lines.push(`| ${run.tool} | ${runLabel(run.kind, run.repeatIndex)} | ${duplicates} | ${extra} | ${missing} | ${run.emptyExported ? 'yes' : 'no'} | ${direct} |`);
   }
   lines.push('', '## Tokens', '', '![tokens per run](tokens.svg)', '', '## Wall time', '', '![wall time per run](time.svg)', '');
   if (input.downloads.length > 0) {

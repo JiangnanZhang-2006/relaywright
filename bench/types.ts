@@ -56,6 +56,7 @@ export interface BenchRun {
   cacheHitTokens: number;
   wallMs: number;
   exports: ExportPost[];
+  direct: ExportPost[];
   duplicates: DuplicateExport[];
   extra: ExportPost[];
   missing: Array<Pick<ExportPost, 'year' | 'term'>>;

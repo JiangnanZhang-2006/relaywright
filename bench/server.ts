@@ -7,6 +7,8 @@ import type { ExportPost } from './types.js';
 export interface BenchServer {
   port: number;
   exports: () => ExportPost[];
+  /** Export posts that did not come from a page navigation, e.g. a script calling the endpoint. */
+  direct: () => ExportPost[];
   reset: () => void;
   close: () => Promise<void>;
 }
@@ -14,18 +16,20 @@ export interface BenchServer {
 export async function startBenchServer(root: string): Promise<BenchServer> {
   const base = resolve(root);
   const posts: ExportPost[] = [];
+  const direct: ExportPost[] = [];
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
       if (req.method === 'POST' && url.pathname === '/__bench/reset') {
         posts.length = 0;
+        direct.length = 0;
         res.writeHead(204);
         res.end();
         return;
       }
       if (req.method === 'POST' && url.pathname === '/zf-mock/export.pdf') {
         const post = parseExportBody(await readBody(req));
-        posts.push(post);
+        (req.headers['sec-fetch-mode'] === 'navigate' ? posts : direct).push(post);
         const pdf = timetablePdf(post);
         res.writeHead(200, {
           'content-type': 'application/pdf',
@@ -65,8 +69,10 @@ export async function startBenchServer(root: string): Promise<BenchServer> {
   return {
     port,
     exports: () => posts.map((post) => ({ ...post })),
+    direct: () => direct.map((post) => ({ ...post })),
     reset: () => {
       posts.length = 0;
+      direct.length = 0;
     },
     close: () => closeServer(server),
   };

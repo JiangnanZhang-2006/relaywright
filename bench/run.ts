@@ -178,6 +178,7 @@ async function runOnce(
     cacheHitTokens: result.cacheHitTokens,
     wallMs: result.wallMs,
     exports,
+    direct: server.direct(),
     duplicates: score.duplicates,
     extra: score.extra,
     missing: score.missing,
