@@ -1,6 +1,6 @@
 {
   "name": "relaywright",
-  "version": "0.1.0",
+  "version": "0.1.0-rc.1",
   "description": "Chromium browser control for agents, with an MCP server and a CLI sharing one local daemon.",
   "license": "Apache-2.0",
   "type": "module",

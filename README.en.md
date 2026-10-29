@@ -6,7 +6,7 @@ An agent learns a browser task once, then repeats it on its own. Login and captc
 
 relaywright drives a local Chromium through the Chrome DevTools Protocol. One daemon serves both the MCP server and the CLI. A finished task can be saved as a skill and replayed with parameters, without calling a model. When a redesign breaks a step, only that step is pointed at a new control and saved as a new version.
 
-See [docs/architecture.md](docs/architecture.md) for the design. The project is at 0.1.0.
+See [docs/architecture.md](docs/architecture.md) for the design. The project is at 0.1.0-rc.1.
 
 ## Install
 

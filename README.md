@@ -6,7 +6,7 @@ AI 学一次浏览器任务，之后自己重复做。遇到登录和验证码�
 
 relaywright 用 Chrome DevTools Protocol 操控本机 Chromium，同一套后台进程同时给 MCP 客户端和命令行用。第一次把任务做成功后，可以存成技能；之后按参数回放，不再调用模型。页面改版时，只为失败的那一步挑选新的控件并保存新版本。
 
-设计说明见 [docs/architecture.md](docs/architecture.md)。项目处于 0.1.0。
+设计说明见 [docs/architecture.md](docs/architecture.md)。项目处于 0.1.0-rc.1。
 
 ## 安装
 

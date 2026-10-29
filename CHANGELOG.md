@@ -4,7 +4,9 @@
 
 ## [未发布]
 
-首个公开版本 0.1.0 的内容。
+## [0.1.0-rc.1] - 2026-10-29
+
+首个公开版本的预发布。
 
 ### 新增
 
@@ -20,6 +22,7 @@
 - `relaywright init`、`relaywright doctor`；状态存储 `state`。
 - 对比测试框架 `npm run bench`：同一模型分别驱动 Playwright MCP 和 relaywright。
 - 依赖许可证检查 `npm run licenses`，GitHub Actions CI。
+- 发布流程见 `RELEASING.md`。
 
 ### 修复
 
