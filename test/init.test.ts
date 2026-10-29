@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -29,7 +29,7 @@ describe('init and doctor', () => {
       'init',
       '--yes',
       '--browser',
-      'own',
+      'separate',
       '--privacy',
       'off',
       '--eval',
@@ -53,7 +53,7 @@ describe('init and doctor', () => {
 
     const saved = readConfig(home);
     expect(saved.custom).toEqual({ keep: true });
-    expect(saved.browser).toEqual({ mode: 'own' });
+    expect(saved.browser).toEqual({ mode: 'separate' });
     expect(saved.headless).toBe(true);
     expect(saved.downloads).toBe(downloads);
     expect(saved.eval).toBe(false);
@@ -76,7 +76,7 @@ describe('init and doctor', () => {
     expect(second.code, second.stderr).toBe(0);
     const again = readConfig(home);
     expect(again.custom).toEqual({ keep: true });
-    expect(again.browser).toEqual({ mode: 'own' });
+    expect(again.browser).toEqual({ mode: 'separate' });
     expect(again.headless).toBe(true);
     expect(again.eval).toBe(true);
     expect(again.notify).toBe(false);
@@ -96,10 +96,97 @@ describe('init and doctor', () => {
     expect(first.stderr).toContain(INIT_HINT);
     const second = await cli(home, ['browser', 'which']);
     expect(second.stderr).not.toContain(INIT_HINT);
-    const done = await cli(home, ['init', '--yes', '--browser', 'own', '--notify', 'off']);
+    const done = await cli(home, ['init', '--yes', '--browser', 'separate', '--notify', 'off']);
     expect(done.code, done.stderr).toBe(0);
     const after = await cli(home, ['browser', 'which']);
     expect(after.stderr).not.toContain(INIT_HINT);
+  });
+
+  it('writes a DSH patch without disturbing other rows', async () => {
+    const home = freshHome();
+    const dsh = freshHome();
+    const profile = join(dsh, 'profiles', 'web');
+    mkdirSync(profile, { recursive: true });
+    const patch = join(profile, 'cordis.patch.yml');
+    const original = `# keep me
+- insert:
+    - id: schedule
+      name: '@deepseek-ai/dsh-schedule' # stay
+    # inner comment
+    - id: mcp-relaywright
+      name: old
+      config:
+        command: stale
+- id: other
+  name: keep-me
+`;
+    writeFileSync(patch, original, 'utf8');
+
+    const first = await cli(home, ['init', '--yes', '--notify', 'off', '--write-mcp', 'dsh'], { DSH_HOME: dsh });
+    expect(first.code, `${first.stderr}\n${first.stdout}`).toBe(0);
+    const written = readFileSync(patch, 'utf8');
+    expect(written).toContain('# keep me');
+    expect(written).toContain("# stay");
+    expect(written).toContain('# inner comment');
+    expect(written).toContain('name: keep-me');
+    expect(written).toContain("name: '@deepseek-ai/dsh-schedule'");
+    expect(written).not.toContain('command: stale');
+    expect(written).toContain('DEEPSEEK_API_KEY: !!js process.env.DEEPSEEK_API_KEY');
+    expect(written).not.toMatch(/DEEPSEEK_API_KEY:\s+['"]/);
+    expect(written).toContain('toolCallTimeoutMs: 900000');
+    expect(written).toContain(`command: ${process.execPath}`);
+    expect(written.match(/id: mcp-relaywright/g)).toHaveLength(1);
+
+    const second = await cli(home, ['init', '--yes', '--notify', 'off', '--write-mcp', 'dsh'], { DSH_HOME: dsh });
+    expect(second.code, second.stderr).toBe(0);
+    expect(readFileSync(patch, 'utf8').match(/id: mcp-relaywright/g)).toHaveLength(1);
+  });
+
+  it('refuses to create a missing DSH web profile', async () => {
+    const home = freshHome();
+    const dsh = freshHome();
+    const result = await cli(home, ['init', '--yes', '--notify', 'off', '--write-mcp', 'dsh'], { DSH_HOME: dsh });
+    expect(result.code, result.stdout).not.toBe(0);
+    expect(result.stderr).toContain('No DSH web profile');
+    expect(result.stderr).toContain('0.0.1-rc.1');
+    expect(existsSync(join(dsh, 'profiles'))).toBe(false);
+  });
+
+  it('refuses a DSH patch whose root is not an array', async () => {
+    const home = freshHome();
+    const dsh = freshHome();
+    const profile = join(dsh, 'profiles', 'web');
+    mkdirSync(profile, { recursive: true });
+    const patch = join(profile, 'cordis.patch.yml');
+    const original = 'name: not-an-array\n# comment\n';
+    writeFileSync(patch, original, 'utf8');
+    const result = await cli(home, ['init', '--yes', '--notify', 'off', '--write-mcp', 'dsh'], { DSH_HOME: dsh });
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain('YAML array');
+    expect(readFileSync(patch, 'utf8')).toBe(original);
+  });
+
+  it('rewrites a stored own or attach mode on read', async () => {
+    const separateHome = freshHome();
+    writeFileSync(
+      join(separateHome, 'config.json'),
+      `${JSON.stringify({ custom: { keep: true }, browser: { mode: 'own' } }, null, 2)}\n`,
+      'utf8',
+    );
+    await cli(separateHome, ['doctor', '--json']);
+    const separate = readConfig(separateHome);
+    expect(separate.custom).toEqual({ keep: true });
+    expect(separate.browser).toEqual({ mode: 'separate' });
+
+    const dailyHome = freshHome();
+    const profile = join(dailyHome, 'kept-profile');
+    writeFileSync(
+      join(dailyHome, 'config.json'),
+      `${JSON.stringify({ browser: { mode: 'attach', user_data_dir: profile } }, null, 2)}\n`,
+      'utf8',
+    );
+    await cli(dailyHome, ['doctor', '--json']);
+    expect(readConfig(dailyHome).browser).toEqual({ mode: 'daily', user_data_dir: profile });
   });
 
   it('fails doctor when an attach profile has no DevToolsActivePort', async () => {
@@ -108,7 +195,7 @@ describe('init and doctor', () => {
     mkdirSync(profile, { recursive: true });
     writeFileSync(
       join(home, 'config.json'),
-      `${JSON.stringify({ browser: { mode: 'attach', user_data_dir: profile }, initialized_at: '2026-01-01T00:00:00.000Z' }, null, 2)}\n`,
+      `${JSON.stringify({ browser: { mode: 'daily', user_data_dir: profile }, initialized_at: '2026-01-01T00:00:00.000Z' }, null, 2)}\n`,
       'utf8',
     );
     const result = await cli(home, ['doctor', '--json']);
@@ -130,7 +217,7 @@ describe('init and doctor', () => {
     writeFileSync(join(profile, 'DevToolsActivePort'), `${port}\n/devtools/browser/doctor-test\n`, 'utf8');
     writeFileSync(
       join(home, 'config.json'),
-      `${JSON.stringify({ browser: { mode: 'attach', user_data_dir: profile }, initialized_at: '2026-01-01T00:00:00.000Z' }, null, 2)}\n`,
+      `${JSON.stringify({ browser: { mode: 'daily', user_data_dir: profile }, initialized_at: '2026-01-01T00:00:00.000Z' }, null, 2)}\n`,
       'utf8',
     );
     const result = await cli(home, ['doctor', '--json']);
@@ -181,13 +268,14 @@ function readConfig(home: string): {
   return JSON.parse(readFileSync(join(home, 'config.json'), 'utf8')) as ReturnType<typeof readConfig>;
 }
 
-async function cli(home: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+async function cli(home: string, args: string[], extra: NodeJS.ProcessEnv = {}): Promise<{ code: number; stdout: string; stderr: string }> {
   const tsx = join(repoRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     RELAYWRIGHT_HOME: home,
     RELAYWRIGHT_HEADLESS: '1',
     RELAYWRIGHT_NOTIFY: '0',
+    ...extra,
   };
   delete env.RELAYWRIGHT_EVAL;
   delete env.DEEPSEEK_API_KEY;

@@ -93,11 +93,11 @@ flowchart TB
 
 | 模式 | 浏览器 | 适用场景 |
 |---|---|---|
-| `own`（默认） | 后台进程自己启动的 Chrome，独立配置目录 | 日常使用、技能批量执行 |
-| `attach` | 用户日常用的 Chrome | 直接复用已有登录，不用再扫码 |
+| `separate`（默认） | 后台进程自己启动的 Chrome，独立配置目录 | 日常使用、技能批量执行 |
+| `daily` | 用户日常用的 Chrome | 直接复用已有登录，不用再扫码 |
 | `cdp` | 任意给定的调试地址（`http(s)://` 或 `ws://`） | 远程或容器里的浏览器 |
 
-`attach` 模式要求用户先在日常 Chrome 里打开 `chrome://inspect/#remote-debugging`，勾选"允许对此浏览器实例进行远程调试"。实测（Chrome 156）：
+`daily` 模式要求用户先在日常 Chrome 里打开 `chrome://inspect/#remote-debugging`，勾选"允许对此浏览器实例进行远程调试"。实测（Chrome 156）：
 
 - 调试地址只能从配置目录下的 `DevToolsActivePort` 文件读取，`/json/version` 返回 404；
 - **每次**建立新连接，Chrome 都会弹出"要允许远程调试吗？"，必须由人点"允许"。因此后台进程只保持一条长连接；重启后不主动连接，等第一次真正使用时再连（同时弹系统通知提醒用户去点），最多等 60 秒。
@@ -324,7 +324,7 @@ Chrome 本身已经用系统能力加密 cookie（Windows DPAPI、macOS 钥匙�
 
 ### 3.11 安全策略
 
-- **域名白名单**：`config.json` 里的 `allow_domains`（按可注册域名，包含子域名）。`attach` / `cdp` 模式下始终生效；`own` 模式下只在列表非空时生效。打开网址、新建标签页、点击后跳转到新站点、技能里的跳转，只要目标不在名单里，就在请求发出前拦截，返回 `domain_not_allowed`，并提示模型调用 `browser_request_access`。
+- **域名白名单**：`config.json` 里的 `allow_domains`（按可注册域名，包含子域名）。`daily` / `cdp` 模式下始终生效；`separate` 模式下只在列表非空时生效。打开网址、新建标签页、点击后跳转到新站点、技能里的跳转，只要目标不在名单里，就在请求发出前拦截，返回 `domain_not_allowed`，并提示模型调用 `browser_request_access`。
 - **模型申请授权**：`browser_request_access` 在本机弹出系统对话框，显示域名和理由，按钮是"本次允许 / 始终允许 / 拒绝"，60 秒无响应按拒绝处理。"本次允许"到后台进程重启为止；"始终允许"写入 `allow_domains`。结果只来自对话框，模型不能自己批准；理由文字会先清理控制字符和标记语法再显示。
 - **页面脚本默认关闭**：`browser_eval` 能在页面里执行任意脚本，默认关闭，需要用户用 `relaywright config set eval on`、`init` 或环境变量 `RELAYWRIGHT_EVAL=on` 打开。技能里不能使用，每次调用都记审计。日常取数用 `browser_extract`，它只读、不执行模型写的代码。
 - **敏感动作确认**（路线图）：匹配支付、删除、提交等关键词的按钮，需要人工确认后才执行。
@@ -425,7 +425,7 @@ Chrome 本身已经用系统能力加密 cookie（Windows DPAPI、macOS 钥匙�
 ## 5. CLI
 
 ```text
-relaywright init [--yes] [--browser own|attach|cdp] [--allow-domains a.com,b.com] [--privacy on|off] [--eval on|off] ...
+relaywright init [--yes] [--browser separate|daily|cdp] [--allow-domains a.com,b.com] [--privacy on|off] [--eval on|off] ...
 relaywright doctor                                # 检查环境；不会连接用户的 Chrome（连接会弹窗）
 
 relaywright daemon start | stop [--close-browser] | restart | status
@@ -556,7 +556,7 @@ relaywright/
 - 技能直接调用接口：根据探索阶段录到的网络请求，把界面操作编译成接口调用，回放速度提升一个数量级。
 - 技能市场：在团队内或社区中共享技能（不含凭据）。
 - 远程接管：人不在电脑前时，用手机查看画面并操作（局域网或公网穿透，端到端加密）。
-- 浏览器插件模式：`attach` 模式已经能复用日常 Chrome 的登录，但每次连接都要点"允许"；插件可以免掉这一步，并把状态显示在侧边栏。
+- 浏览器插件模式：`daily` 模式已经能复用日常 Chrome 的登录，但每次连接都要点"允许"；插件可以免掉这一步，并把状态显示在侧边栏。
 - 媒体控制：`browser_media` 查询和控制页面里的音视频（播放、暂停、跳转、倍速），可以作为技能步骤，并写入审计。
 - 决策点：技能里声明"需要判断"的步骤，回放到这里时暂停，把页面摘要交给模型判断，再用 `skill_resume` 继续；判断结果记成备忘，下次相同情况直接复用。
 - 事件和后台任务：`job start` 在后台执行技能，`browser_events` 按游标拉取页面事件（对话框、媒体结束、导航等），`wait --until video_ended`。同一时间只跑一个任务；崩溃后由人手动恢复；任务期间默认阻止电脑休眠。

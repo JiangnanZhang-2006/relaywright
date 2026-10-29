@@ -63,7 +63,7 @@ describe.skipIf(!resolved.path)('attach to a test Chrome', () => {
   it('hides user tabs, gates domains, and leaves the browser running', async () => {
     const attached = await cli(['daemon', 'attach', '--user-data-dir', profile, '--json'], 'deny');
     expect(attached.code, attached.stderr.slice(0, 800)).toBe(0);
-    expect(JSON.parse(attached.stdout)).toMatchObject({ mode: 'attach', endpoint_kind: 'devtools-file' });
+    expect(JSON.parse(attached.stdout)).toMatchObject({ mode: 'daily', endpoint_kind: 'devtools-file' });
 
     const hidden = await cli(['tabs', 'list', '--json'], 'deny');
     expect(hidden.code, hidden.stderr.slice(0, 500)).toBe(0);
@@ -97,7 +97,7 @@ describe.skipIf(!resolved.path)('attach to a test Chrome', () => {
 
     const audit = queryAudit({ event: 'attach' });
     expect(audit.chain.ok).toBe(true);
-    expect(audit.entries.at(-1)).toMatchObject({ event: 'attach', mode: 'attach', endpoint_kind: 'devtools-file' });
+    expect(audit.entries.at(-1)).toMatchObject({ event: 'attach', mode: 'daily', endpoint_kind: 'devtools-file' });
     expect(JSON.stringify(audit.entries)).not.toContain('user.html');
     expect(JSON.stringify(queryAudit({ event: 'access_request' }).entries)).toContain('"decision":"deny"');
 

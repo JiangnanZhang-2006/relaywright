@@ -4,6 +4,14 @@
 
 ## [未发布]
 
+### 变更
+
+- 浏览器模式的存储名改为 `separate`、`daily`、`cdp`。已有配置里的 `own` 和 `attach` 在下次读取时改写。
+
+### 新增
+
+- `relaywright init --write-mcp dsh` 把 MCP 写进 DeepSeek Harness 的 web profile。工具超时盖过转交真人的等待，并显式传回被 DSH 清掉的 `DEEPSEEK_API_KEY`。
+
 ## [0.1.0-rc.1] - 2026-10-29
 
 首个公开版本的预发布。

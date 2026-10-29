@@ -1668,10 +1668,10 @@ addJson(
     .command('init')
     .description('Choose browser mode, privacy, eval, and heal settings. Safe to run again.')
     .option('--yes', 'accept the current value for every question that has no flag')
-    .option('--browser <mode>', 'own, attach, or cdp')
+    .option('--browser <mode>', 'separate, daily, or cdp')
     .option('--cdp-url <url>', 'endpoint used when --browser is cdp')
     .option('--allow-domains <list>', 'comma-separated registrable domains')
-    .option('--headless', "run relaywright's own Chrome headless")
+    .option('--headless', 'run the separate Chrome headless')
     .option('--downloads <dir>', 'directory for saved files')
     .option('--privacy <on|off>', 'model redaction')
     .option('--eval <on|off>', 'page eval')
@@ -1680,32 +1680,35 @@ addJson(
     .option('--heal-model <model>', 'self-heal model')
     .option('--api-key-env <name>', 'env var that holds the heal API key')
     .option('--test-llm', 'send one tiny heal request and print token counts')
-    .option('--write-mcp <target>', 'write a client config; only cursor is supported')
+    .option('--write-mcp <target>', 'write a client config; cursor or dsh')
     .option('--self <kind=value>', 'register a self value without printing it', collect, [])
     .addHelpText(
       'after',
       `
 Non-interactive when stdin is not a TTY, or with --yes. A TTY asks; the default for test-connect is no.
 Examples:
-  relaywright init --yes --browser own --privacy off --eval off --notify off
-  relaywright init --browser attach --allow-domains example.com
+  relaywright init --yes --browser separate --privacy off --eval off --notify off
+  relaywright init --browser daily --allow-domains example.com
   relaywright init --write-mcp cursor
+  relaywright init --write-mcp dsh
 `,
     ),
 ).action(function (this: Command) {
   const command = this;
   return guard(command, async () => {
     const writeMcp = command.getOptionValue('writeMcp') as string | undefined;
-    if (writeMcp !== undefined && writeMcp !== 'cursor') throw new Error('--write-mcp only supports cursor');
+    if (writeMcp !== undefined && writeMcp !== 'cursor' && writeMcp !== 'dsh') {
+      throw new Error('--write-mcp only supports cursor or dsh');
+    }
     const browser = command.getOptionValue('browser') as string | undefined;
-    if (browser !== undefined && browser !== 'own' && browser !== 'attach' && browser !== 'cdp') {
-      throw new Error('--browser must be own, attach, or cdp');
+    if (browser !== undefined && browser !== 'separate' && browser !== 'daily' && browser !== 'cdp') {
+      throw new Error('--browser must be separate, daily, or cdp');
     }
     const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
     const result = await runInit({
       yes: command.getOptionValue('yes') === true || !tty,
       tty,
-      ...(browser === 'own' || browser === 'attach' || browser === 'cdp' ? { browser } : {}),
+      ...(browser === 'separate' || browser === 'daily' || browser === 'cdp' ? { browser } : {}),
       cdpUrl: command.getOptionValue('cdpUrl') as string | undefined,
       allowDomains: command.getOptionValue('allowDomains') as string | undefined,
       headless: argvBool('headless'),
@@ -1717,7 +1720,7 @@ Examples:
       healModel: command.getOptionValue('healModel') as string | undefined,
       apiKeyEnv: command.getOptionValue('apiKeyEnv') as string | undefined,
       testLlm: command.getOptionValue('testLlm') === true,
-      writeMcp: writeMcp === 'cursor',
+      writeMcp: writeMcp === 'cursor' || writeMcp === 'dsh' ? writeMcp : undefined,
       self: (command.getOptionValue('self') as string[] | undefined) ?? [],
     });
     emit(command, formatInit(result), result);

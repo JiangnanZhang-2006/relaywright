@@ -30,14 +30,14 @@ afterEach(() => {
 });
 
 describe('attach policy', () => {
-  it('allows every site in own mode until a list exists, and blocks attach until granted', () => {
-    expect(navigationDecision('https://example.com/a', 'own', [], []).ok).toBe(true);
-    expect(navigationDecision('about:blank', 'attach', [], []).ok).toBe(true);
-    expect(navigationDecision('https://www.example.com/a', 'attach', [], [])).toEqual({ ok: false, domain: 'example.com' });
-    expect(navigationDecision('https://www.example.com/a', 'attach', ['example.com'], []).ok).toBe(true);
-    expect(navigationDecision('https://mail.tsinghua.edu.cn/', 'attach', ['tsinghua.edu.cn'], []).ok).toBe(true);
-    expect(navigationDecision('http://127.0.0.1/item', 'attach', [], ['127.0.0.1']).ok).toBe(true);
-    expect(navigationDecision('https://www.example.com/a', 'own', ['example.com'], []).ok).toBe(true);
+  it('allows every site in separate mode until a list exists, and blocks daily until granted', () => {
+    expect(navigationDecision('https://example.com/a', 'separate', [], []).ok).toBe(true);
+    expect(navigationDecision('about:blank', 'daily', [], []).ok).toBe(true);
+    expect(navigationDecision('https://www.example.com/a', 'daily', [], [])).toEqual({ ok: false, domain: 'example.com' });
+    expect(navigationDecision('https://www.example.com/a', 'daily', ['example.com'], []).ok).toBe(true);
+    expect(navigationDecision('https://mail.tsinghua.edu.cn/', 'daily', ['tsinghua.edu.cn'], []).ok).toBe(true);
+    expect(navigationDecision('http://127.0.0.1/item', 'daily', [], ['127.0.0.1']).ok).toBe(true);
+    expect(navigationDecision('https://www.example.com/a', 'separate', ['example.com'], []).ok).toBe(true);
     expect(normalizeAllowDomain('HTTPS://WWW.Example.com/path')).toBe('example.com');
   });
 
@@ -49,7 +49,7 @@ describe('attach policy', () => {
     };
     const resolved = await resolveAttachRequest({ userDataDir: dir });
     expect(resolved).toMatchObject({
-      mode: 'attach',
+      mode: 'daily',
       endpointKind: 'devtools-file',
       endpoint: 'ws://127.0.0.1:18999/devtools/browser/abc',
     });
@@ -75,7 +75,7 @@ describe('attach policy', () => {
 
   it('keeps startup lazy unless reconnect is eager', () => {
     expect(shouldWarmOnStartup({})).toBe(true);
-    expect(shouldWarmOnStartup({ browser: { mode: 'attach' } })).toBe(false);
+    expect(shouldWarmOnStartup({ browser: { mode: 'daily' } })).toBe(false);
     expect(shouldWarmOnStartup({ browser: { mode: 'cdp' }, attach: { reconnect: 'eager' } })).toBe(true);
   });
 

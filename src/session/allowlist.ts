@@ -2,7 +2,7 @@ import { RelayError } from '../errors.js';
 import { readGlobalConfig } from '../privacy/store.js';
 import { hostOfUrl, registrableDomain } from './domain.js';
 
-export type BrowserModeName = 'own' | 'attach' | 'cdp';
+export type BrowserModeName = 'separate' | 'daily' | 'cdp';
 
 /** about:blank and browser-internal pages are not sites the allowlist can name. */
 export function isUngatedUrl(url: string): boolean {
@@ -45,7 +45,7 @@ export function readAllowDomains(root?: string): string[] {
 export type NavigationDecision = { ok: true } | { ok: false; domain: string };
 
 /**
- * Attach and cdp always enforce the list. Own mode enforces it only when the
+ * Daily and cdp always enforce the list. Separate mode enforces it only when the
  * list is non-empty, so existing profiles keep working until someone sets one.
  */
 export function navigationDecision(
@@ -59,7 +59,7 @@ export function navigationDecision(
   if (!host) return { ok: false, domain: url.slice(0, 120) };
   const domain = registrableDomain(host);
   const permitted = new Set([...allow, ...grants]);
-  if (mode === 'own' && allow.length === 0 && grants.length === 0) return { ok: true };
+  if (mode === 'separate' && allow.length === 0 && grants.length === 0) return { ok: true };
   if (permitted.has(domain)) return { ok: true };
   return { ok: false, domain };
 }

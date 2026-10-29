@@ -15,7 +15,7 @@ export const ATTACH_TRANSFERS_MESSAGE =
 export type EndpointKind = 'devtools-file' | 'cdp-http' | 'cdp-ws';
 
 export interface ResolvedAttach {
-  mode: 'attach' | 'cdp';
+  mode: 'daily' | 'cdp';
   endpoint: string;
   endpointKind: EndpointKind;
   userDataDir?: string;
@@ -35,15 +35,15 @@ export function defaultChromeUserDataDir(): string {
 }
 
 export function shouldWarmOnStartup(config: GlobalConfig): boolean {
-  const mode = config.browser?.mode ?? 'own';
-  if (mode === 'own') return true;
+  const mode = config.browser?.mode ?? 'separate';
+  if (mode === 'separate') return true;
   return (config.attach?.reconnect ?? 'lazy') === 'eager';
 }
 
 export function attachIsDeferred(config: GlobalConfig, phase: string, connected: boolean): boolean {
   if (connected || phase !== 'idle') return false;
-  const mode = config.browser?.mode ?? 'own';
-  if (mode !== 'attach' && mode !== 'cdp') return false;
+  const mode = config.browser?.mode ?? 'separate';
+  if (mode !== 'daily' && mode !== 'cdp') return false;
   return (config.attach?.reconnect ?? 'lazy') !== 'eager';
 }
 
@@ -57,7 +57,7 @@ export function resolveDevToolsFile(profileDir: string): ResolvedAttach {
     );
   }
   return {
-    mode: 'attach',
+    mode: 'daily',
     endpoint: existing.browserWSEndpoint,
     endpointKind: 'devtools-file',
     userDataDir: profileDir,
@@ -104,8 +104,8 @@ export async function resolveStoredAttach(config: GlobalConfig): Promise<Resolve
     if (!cdpUrl) throw new RelayError('attach_failed', 'cdp mode has no cdp_url. Run: relaywright daemon attach --cdp-url <url>');
     return resolveCdpUrl(cdpUrl);
   }
-  if (mode === 'attach') return resolveDevToolsFile(config.browser?.user_data_dir || defaultChromeUserDataDir());
-  throw new RelayError('attach_failed', 'Browser mode is own');
+  if (mode === 'daily') return resolveDevToolsFile(config.browser?.user_data_dir || defaultChromeUserDataDir());
+  throw new RelayError('attach_failed', 'Browser mode is separate');
 }
 
 export async function connectWebSocket(endpoint: string, timeoutMs: number): Promise<Browser> {

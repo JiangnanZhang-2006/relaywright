@@ -26,6 +26,16 @@ npx relaywright browser install
 
 ## 命令行
 
+第一次在终端里运行 `init`。它逐项提问，每项都显示当前值，直接回车就用这个值。没有终端时，或加上 `--yes`，则只按参数写入，不再提问。
+
+```bash
+npx relaywright init
+npx relaywright init --write-mcp cursor
+npx relaywright init --write-mcp dsh
+```
+
+提问包括浏览器模式（`separate`、`daily`、`cdp`）、白名单、有无界面、下载目录、脱敏、页面脚本、自愈接口和通知。姓名和账号只在本机登记，输入时不会显示。`--write-mcp` 把 MCP 启动命令写进当前目录的 `.cursor/mcp.json`，或写进 DSH 的 web profile。
+
 ```bash
 npx relaywright daemon start
 npx relaywright open https://example.com
@@ -40,9 +50,20 @@ npx relaywright daemon stop
 
 ## 接到 Cursor
 
-构建之后，仓库里的 `.cursor/mcp.json` 会用 `node dist/cli/index.js mcp` 启动 MCP 服务。改了源码要重新 `npm run build`。
+构建之后，在终端执行 `npx relaywright init --write-mcp cursor`，把启动命令写进当前目录的 `.cursor/mcp.json`。仓库里已有的那份用 `node dist/cli/index.js mcp`。改了源码要重新 `npm run build`。
 
 推荐的用法已经写在 MCP 的说明里：先 `skill_list`，有合适的技能就 `skill_run`；没有就用浏览器工具做**一组**参数，再 `skill_save`，其余组合交给 `skill_run`。页面改版时，`skill_run` 返回 heal 块，用 `skill_patch` 指定新的控件。
+
+## 接到 DSH
+
+DeepSeek Harness 把 MCP 写在 web profile 的 `cordis.patch.yml` 里，不读项目目录。`dsh-mcp-client` 要和 `dsh --version` 是同一个版本；npm 上的 `latest` 还停在 `0.0.1-rc.1`。
+
+```bash
+dsh plugin --profile web add @deepseek-ai/dsh-mcp-client@<dsh --version 的版本号>
+npx relaywright init --write-mcp dsh
+```
+
+然后重启 `dsh web`。工具名会带 `mcp__relaywright__` 前缀。
 
 ## 技能、登录和隐私
 

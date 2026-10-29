@@ -40,17 +40,17 @@ export interface GlobalConfig {
   /** Page eval stays off until init or `relaywright config set eval on`. */
   eval?: boolean;
   browser?: {
-    mode?: 'own' | 'attach' | 'cdp';
+    mode?: 'separate' | 'daily' | 'cdp';
     cdp_url?: string;
     user_data_dir?: string;
   };
   /** Default reconnect is lazy: the allow dialog waits until the next browser command. */
   attach?: { reconnect?: 'lazy' | 'eager' };
-  /** Registrable domains. Subdomains are included. Empty means own mode allows every site. */
+  /** Registrable domains. Subdomains are included. Empty means separate mode allows every site. */
   allow_domains?: string[];
   /** Set by `relaywright init`. Absent until the first completed init. */
   initialized_at?: string;
-  /** Own-mode Chrome. RELAYWRIGHT_HEADLESS still overrides this. */
+  /** Separate-mode Chrome. RELAYWRIGHT_HEADLESS still overrides this. */
   headless?: boolean;
   /** Directory for files relaywright saves. */
   downloads?: string;
@@ -149,12 +149,27 @@ export function updateGlobalConfig(mutate: (config: GlobalConfig) => void, root 
   return config;
 }
 
+function migrateBrowserMode(config: GlobalConfig): boolean {
+  const mode = config.browser?.mode as string | undefined;
+  if (mode !== 'own' && mode !== 'attach') return false;
+  config.browser = { ...config.browser, mode: mode === 'own' ? 'separate' : 'daily' };
+  return true;
+}
+
 function readConfig(root: string): GlobalConfig {
   const path = configPath(root);
   if (!existsSync(path)) return {};
   try {
     const parsed = JSON.parse(readTextFile(path)) as GlobalConfig;
-    return parsed && typeof parsed === 'object' ? parsed : {};
+    if (!parsed || typeof parsed !== 'object') return {};
+    if (migrateBrowserMode(parsed)) {
+      try {
+        writeJson(path, parsed);
+      } catch {
+        // The caller still sees the new mode name. The next successful write stores it.
+      }
+    }
+    return parsed;
   } catch {
     return {};
   }

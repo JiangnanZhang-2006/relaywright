@@ -132,8 +132,8 @@ export interface BrowserControl {
   privacyList(identity?: string): PrivacyList;
   privacyCheck(): PrivacyCheck;
   privacyMark(input: { ref?: string; value?: string; as: SelfKind }): Promise<{ token: string; as: SelfKind }>;
-  attach(input: { auto?: boolean; cdpUrl?: string; userDataDir?: string }): Promise<{ mode: 'attach' | 'cdp'; endpoint_kind: EndpointKind }>;
-  detach(): Promise<{ mode: 'own'; endpoint_kind: 'own' }>;
+  attach(input: { auto?: boolean; cdpUrl?: string; userDataDir?: string }): Promise<{ mode: 'daily' | 'cdp'; endpoint_kind: EndpointKind }>;
+  detach(): Promise<{ mode: 'separate'; endpoint_kind: 'own' }>;
   requestAccess(domain: string, reason?: string): Promise<{ domain: string; decision: AccessDecision }>;
   listForeignTabs(): Promise<TabsList>;
   adoptTab(index: number): Promise<PageBody>;
@@ -181,7 +181,7 @@ export class BrowserSession implements BrowserControl {
   private launchedHeadless = false;
   private transfersDisabled = false;
   private blockedDomain: string | null = null;
-  private attachedMode: 'attach' | 'cdp' | null = null;
+  private attachedMode: 'daily' | 'cdp' | null = null;
   private endpointKind: EndpointKind | 'own' = 'own';
   private readonly sessionGrants = new Set<string>();
 
@@ -1211,11 +1211,11 @@ export class BrowserSession implements BrowserControl {
     return this.phase.state === 'ready' && this.browser?.connected === true && this.tabSet !== null;
   }
 
-  async attach(input: { auto?: boolean; cdpUrl?: string; userDataDir?: string }): Promise<{ mode: 'attach' | 'cdp'; endpoint_kind: EndpointKind }> {
+  async attach(input: { auto?: boolean; cdpUrl?: string; userDataDir?: string }): Promise<{ mode: 'daily' | 'cdp'; endpoint_kind: EndpointKind }> {
     this.assertModel();
     if (this.closed) throw new Error('Browser session is closed');
     if (this.attempt) await this.attempt.catch(() => undefined);
-    let result: { mode: 'attach' | 'cdp'; endpoint_kind: EndpointKind } | undefined;
+    let result: { mode: 'daily' | 'cdp'; endpoint_kind: EndpointKind } | undefined;
     this.phase = { state: 'launching' };
     this.attempt = this.performAttach(input)
       .then((attached) => {
@@ -1229,22 +1229,22 @@ export class BrowserSession implements BrowserControl {
     return result;
   }
 
-  async detach(): Promise<{ mode: 'own'; endpoint_kind: 'own' }> {
+  async detach(): Promise<{ mode: 'separate'; endpoint_kind: 'own' }> {
     this.assertModel();
     if (this.attempt) await this.attempt.catch(() => undefined);
-    const mode = this.attachedMode ?? 'own';
+    const mode = this.attachedMode ?? 'separate';
     const endpointKind = this.endpointKind;
     await this.dropBrowser('disconnect');
     this.phase = { state: 'idle' };
     this.sessionGrants.clear();
     updateGlobalConfig((config) => {
-      config.browser = { ...(config.browser ?? {}), mode: 'own' };
+      config.browser = { ...(config.browser ?? {}), mode: 'separate' };
       delete config.browser.cdp_url;
       delete config.browser.user_data_dir;
     });
     recordAudit('detach', { mode, endpoint_kind: endpointKind });
     await flushAudit();
-    return { mode: 'own', endpoint_kind: 'own' };
+    return { mode: 'separate', endpoint_kind: 'own' };
   }
 
   async requestAccess(domain: string, reason = ''): Promise<{ domain: string; decision: AccessDecision }> {
@@ -1281,15 +1281,15 @@ export class BrowserSession implements BrowserControl {
 
   private readyWaitMs(): number {
     const mode = readGlobalConfig().browser?.mode;
-    if (mode === 'attach' || mode === 'cdp') return ATTACH_TIMEOUT_MS + 5_000;
+    if (mode === 'daily' || mode === 'cdp') return ATTACH_TIMEOUT_MS + 5_000;
     return READY_WAIT_MS;
   }
 
   private async launchAttempt(): Promise<void> {
     this.startupError = null;
     const config = readGlobalConfig();
-    const mode = config.browser?.mode ?? 'own';
-    if (mode === 'attach' || mode === 'cdp') {
+    const mode = config.browser?.mode ?? 'separate';
+    if (mode === 'daily' || mode === 'cdp') {
       await this.launchConfiguredAttach(config);
       return;
     }
@@ -1399,7 +1399,7 @@ export class BrowserSession implements BrowserControl {
     }
   }
 
-  private async performAttach(input: { auto?: boolean; cdpUrl?: string; userDataDir?: string }): Promise<{ mode: 'attach' | 'cdp'; endpoint_kind: EndpointKind }> {
+  private async performAttach(input: { auto?: boolean; cdpUrl?: string; userDataDir?: string }): Promise<{ mode: 'daily' | 'cdp'; endpoint_kind: EndpointKind }> {
     const target = await resolveAttachRequest(input);
     notify('relaywright', ATTACH_ALLOW_HINT);
     const headlessOwn = this.connection !== 'attached' && (this.launchedHeadless || process.env.RELAYWRIGHT_HEADLESS === '1');
@@ -1435,7 +1435,7 @@ export class BrowserSession implements BrowserControl {
   private rememberAttach(target: ResolvedAttach): void {
     updateGlobalConfig((config) => {
       const browser = { ...(config.browser ?? {}), mode: target.mode };
-      if (target.mode === 'attach') {
+      if (target.mode === 'daily') {
         browser.user_data_dir = target.userDataDir;
         delete browser.cdp_url;
       } else {
@@ -1534,7 +1534,7 @@ export class BrowserSession implements BrowserControl {
   }
 
   private decision(url: string): { ok: true } | { ok: false; domain: string } {
-    const mode: BrowserModeName = this.connection === 'attached' ? (this.attachedMode ?? 'attach') : 'own';
+    const mode: BrowserModeName = this.connection === 'attached' ? (this.attachedMode ?? 'daily') : 'separate';
     return navigationDecision(url, mode, readAllowDomains(), [...this.sessionGrants]);
   }
 

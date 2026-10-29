@@ -295,7 +295,7 @@ export async function waitFor(input: { text?: string; ref?: string; url?: string
 }
 
 const AttachResultSchema = z.object({
-  mode: z.enum(['attach', 'cdp', 'own']),
+  mode: z.enum(['daily', 'cdp', 'separate']),
   endpoint_kind: z.enum(['devtools-file', 'cdp-http', 'cdp-ws', 'own']),
 });
 

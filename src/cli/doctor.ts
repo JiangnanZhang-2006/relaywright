@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { styleText } from 'node:util';
 import { whichBrowser } from '../browser/resolve.js';
 import { verifyAudit } from '../audit/log.js';
 import { configPath, defaultProfileDir, errorText, relaywrightHome } from '../config/paths.js';
@@ -36,13 +37,21 @@ export async function runDoctor(root = relaywrightHome()): Promise<{ ok: boolean
   return { ok: checks.every((check) => check.status !== 'FAIL'), checks };
 }
 
+const INSPECT_URL = 'chrome://inspect/#remote-debugging';
+
 export function formatDoctor(checks: DoctorCheck[]): string {
   return checks
     .map((check) => {
       const line = `${check.status.padEnd(4, ' ')} ${check.name.padEnd(12, ' ')} ${check.detail}`;
-      return check.hint ? `${line}\n     hint: ${check.hint}` : line;
+      return check.hint ? `${line}\n${formatHint(check.hint)}` : line;
     })
     .join('\n');
+}
+
+function formatHint(hint: string): string {
+  const label = styleText('yellow', 'hint:');
+  const body = hint.replaceAll(INSPECT_URL, styleText(['bold', 'cyan', 'underline'], INSPECT_URL));
+  return `     ${label} ${body}`;
 }
 
 function checkNode(): DoctorCheck {
@@ -97,8 +106,8 @@ function readConfig(root: string, checks: DoctorCheck[]): ReturnType<typeof read
 }
 
 async function checkAttach(config: ReturnType<typeof readGlobalConfig> | undefined): Promise<DoctorCheck> {
-  const mode = config?.browser?.mode ?? 'own';
-  if (mode !== 'attach') return item('attach', 'OK', 'Browser mode is not attach', '');
+  const mode = config?.browser?.mode ?? 'separate';
+  if (mode !== 'daily') return item('attach', 'OK', 'Browser mode is not daily', '');
   const dir = config?.browser?.user_data_dir || defaultChromeUserDataDir();
   const endpoint = readDevToolsEndpoint(dir);
   if (!endpoint) {
@@ -117,7 +126,7 @@ async function checkAttach(config: ReturnType<typeof readGlobalConfig> | undefin
 }
 
 async function checkCdp(config: ReturnType<typeof readGlobalConfig> | undefined): Promise<DoctorCheck> {
-  const mode = config?.browser?.mode ?? 'own';
+  const mode = config?.browser?.mode ?? 'separate';
   if (mode !== 'cdp') return item('cdp', 'OK', 'Browser mode is not cdp', '');
   const raw = config?.browser?.cdp_url;
   if (!raw) return item('cdp', 'FAIL', 'cdp mode has no cdp_url', 'Run: relaywright init --browser cdp --cdp-url <url>');
@@ -175,16 +184,22 @@ function item(name: string, status: DoctorStatus, detail: string, hint: string):
   return { name, status, detail, hint };
 }
 
-/** Ask the OS whether something is listening. This never opens a socket, so it cannot raise Chrome's remote-debugging dialog. */
+/**
+ * Ask the OS whether something is listening. This never opens a socket, so it cannot raise Chrome's remote-debugging dialog.
+ * On macOS, netstat spawned by Node omits the TCP table, so a live port looks closed. lsof still lists it.
+ */
 function portListening(port: number): Promise<boolean> {
+  if (process.platform === 'darwin') {
+    return commandShowsListen('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN'], port);
+  }
   const args = process.platform === 'win32' ? ['-ano', '-p', 'tcp'] : ['-an'];
+  return commandShowsListen('netstat', args, port);
+}
+
+function commandShowsListen(command: string, args: string[], port: number): Promise<boolean> {
   return new Promise((resolve) => {
-    execFile('netstat', args, { timeout: 5_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
-      if (err) {
-        resolve(false);
-        return;
-      }
-      resolve(netstatShowsListen(stdout, port));
+    execFile(command, args, { timeout: 5_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (_err, stdout) => {
+      resolve(netstatShowsListen(stdout ?? '', port));
     });
   });
 }
