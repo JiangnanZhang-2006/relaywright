@@ -7,10 +7,17 @@
   "engines": {
     "node": ">=22"
   },
+  "main": "./dist/dsh/plugin.js",
   "bin": {
     "relaywright": "dist/cli/index.js"
   },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "scripts": {
+    "prepare": "tsc",
     "build": "tsc",
     "dev": "tsx src/cli/index.ts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit && tsc -p tsconfig.bench.json",
@@ -21,9 +28,11 @@
   },
   "files": [
     "dist",
+    "cordis.patch.yml",
     "LICENSE"
   ],
   "dependencies": {
+    "@deepseek-ai/dsh-mcp-client": ">=0.2.1-rc.1 <0.2.2",
     "@hono/node-server": "^2.1.5",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "@puppeteer/browsers": "^3.2.5",

@@ -10,7 +10,7 @@
 
 ### 新增
 
-- `relaywright init --write-mcp dsh` 把 MCP 写进 DeepSeek Harness 的 web profile。工具超时盖过转交真人的等待，并显式传回被 DSH 清掉的 `DEEPSEEK_API_KEY`。
+- DeepSeek Harness 通过官方 Add plugin 安装 `JiangnanZhang-2006/relaywright`。包内启动 MCP，工具超时盖过转交真人的等待，并在密钥存在时传回被清掉的 `DEEPSEEK_API_KEY`。
 
 ## [0.1.0-rc.1] - 2026-10-29
 

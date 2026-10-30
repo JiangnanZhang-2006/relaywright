@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -100,70 +100,6 @@ describe('init and doctor', () => {
     expect(done.code, done.stderr).toBe(0);
     const after = await cli(home, ['browser', 'which']);
     expect(after.stderr).not.toContain(INIT_HINT);
-  });
-
-  it('writes a DSH patch without disturbing other rows', async () => {
-    const home = freshHome();
-    const dsh = freshHome();
-    const profile = join(dsh, 'profiles', 'web');
-    mkdirSync(profile, { recursive: true });
-    const patch = join(profile, 'cordis.patch.yml');
-    const original = `# keep me
-- insert:
-    - id: schedule
-      name: '@deepseek-ai/dsh-schedule' # stay
-    # inner comment
-    - id: mcp-relaywright
-      name: old
-      config:
-        command: stale
-- id: other
-  name: keep-me
-`;
-    writeFileSync(patch, original, 'utf8');
-
-    const first = await cli(home, ['init', '--yes', '--notify', 'off', '--write-mcp', 'dsh'], { DSH_HOME: dsh });
-    expect(first.code, `${first.stderr}\n${first.stdout}`).toBe(0);
-    const written = readFileSync(patch, 'utf8');
-    expect(written).toContain('# keep me');
-    expect(written).toContain("# stay");
-    expect(written).toContain('# inner comment');
-    expect(written).toContain('name: keep-me');
-    expect(written).toContain("name: '@deepseek-ai/dsh-schedule'");
-    expect(written).not.toContain('command: stale');
-    expect(written).toContain('DEEPSEEK_API_KEY: !!js process.env.DEEPSEEK_API_KEY');
-    expect(written).not.toMatch(/DEEPSEEK_API_KEY:\s+['"]/);
-    expect(written).toContain('toolCallTimeoutMs: 900000');
-    expect(written).toContain(`command: ${process.execPath}`);
-    expect(written.match(/id: mcp-relaywright/g)).toHaveLength(1);
-
-    const second = await cli(home, ['init', '--yes', '--notify', 'off', '--write-mcp', 'dsh'], { DSH_HOME: dsh });
-    expect(second.code, second.stderr).toBe(0);
-    expect(readFileSync(patch, 'utf8').match(/id: mcp-relaywright/g)).toHaveLength(1);
-  });
-
-  it('refuses to create a missing DSH web profile', async () => {
-    const home = freshHome();
-    const dsh = freshHome();
-    const result = await cli(home, ['init', '--yes', '--notify', 'off', '--write-mcp', 'dsh'], { DSH_HOME: dsh });
-    expect(result.code, result.stdout).not.toBe(0);
-    expect(result.stderr).toContain('No DSH web profile');
-    expect(result.stderr).toContain('0.0.1-rc.1');
-    expect(existsSync(join(dsh, 'profiles'))).toBe(false);
-  });
-
-  it('refuses a DSH patch whose root is not an array', async () => {
-    const home = freshHome();
-    const dsh = freshHome();
-    const profile = join(dsh, 'profiles', 'web');
-    mkdirSync(profile, { recursive: true });
-    const patch = join(profile, 'cordis.patch.yml');
-    const original = 'name: not-an-array\n# comment\n';
-    writeFileSync(patch, original, 'utf8');
-    const result = await cli(home, ['init', '--yes', '--notify', 'off', '--write-mcp', 'dsh'], { DSH_HOME: dsh });
-    expect(result.code).not.toBe(0);
-    expect(result.stderr).toContain('YAML array');
-    expect(readFileSync(patch, 'utf8')).toBe(original);
   });
 
   it('rewrites a stored own or attach mode on read', async () => {

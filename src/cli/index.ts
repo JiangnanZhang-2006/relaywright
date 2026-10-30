@@ -1680,7 +1680,7 @@ addJson(
     .option('--heal-model <model>', 'self-heal model')
     .option('--api-key-env <name>', 'env var that holds the heal API key')
     .option('--test-llm', 'send one tiny heal request and print token counts')
-    .option('--write-mcp <target>', 'write a client config; cursor or dsh')
+    .option('--write-mcp <target>', 'write the Cursor MCP config')
     .option('--self <kind=value>', 'register a self value without printing it', collect, [])
     .addHelpText(
       'after',
@@ -1690,15 +1690,14 @@ Examples:
   relaywright init --yes --browser separate --privacy off --eval off --notify off
   relaywright init --browser daily --allow-domains example.com
   relaywright init --write-mcp cursor
-  relaywright init --write-mcp dsh
 `,
     ),
 ).action(function (this: Command) {
   const command = this;
   return guard(command, async () => {
     const writeMcp = command.getOptionValue('writeMcp') as string | undefined;
-    if (writeMcp !== undefined && writeMcp !== 'cursor' && writeMcp !== 'dsh') {
-      throw new Error('--write-mcp only supports cursor or dsh');
+    if (writeMcp !== undefined && writeMcp !== 'cursor') {
+      throw new Error('--write-mcp only supports cursor');
     }
     const browser = command.getOptionValue('browser') as string | undefined;
     if (browser !== undefined && browser !== 'separate' && browser !== 'daily' && browser !== 'cdp') {
@@ -1720,7 +1719,7 @@ Examples:
       healModel: command.getOptionValue('healModel') as string | undefined,
       apiKeyEnv: command.getOptionValue('apiKeyEnv') as string | undefined,
       testLlm: command.getOptionValue('testLlm') === true,
-      writeMcp: writeMcp === 'cursor' || writeMcp === 'dsh' ? writeMcp : undefined,
+      writeMcp: writeMcp === 'cursor' ? writeMcp : undefined,
       self: (command.getOptionValue('self') as string[] | undefined) ?? [],
     });
     emit(command, formatInit(result), result);

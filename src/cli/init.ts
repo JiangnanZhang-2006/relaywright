@@ -1,11 +1,9 @@
 import { clearScreenDown, cursorTo, emitKeypressEvents, moveCursor, type Key } from 'node:readline';
 import { ReadStream as TtyReadStream } from 'node:tty';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { styleText } from 'node:util';
-import { isMap, isSeq, parseDocument, Scalar, YAMLSeq, type YAMLMap } from 'yaml';
 import { relaywrightHome } from '../config/paths.js';
 import { healKeySet, readHealConfig, writeHealConfig, type HealConfig } from '../healer/config.js';
 import { notify } from '../notify.js';
@@ -31,7 +29,7 @@ export interface InitOptions {
   healModel?: string;
   apiKeyEnv?: string;
   testLlm?: boolean;
-  writeMcp?: 'cursor' | 'dsh';
+  writeMcp?: 'cursor';
   self?: string[];
   cwd?: string;
 }
@@ -133,7 +131,6 @@ export async function runInit(options: InitOptions = {}, root = relaywrightHome(
   const registered = registerSelf(fromFlag ?? answers.self ?? [], root);
   let mcp: string | undefined;
   if (options.writeMcp === 'cursor') mcp = writeCursorMcp(options.cwd ?? process.cwd());
-  if (options.writeMcp === 'dsh') mcp = writeDshMcp(dshWebProfileDir());
   if (notifyOn) notify('relaywright', 'Notifications are on');
   const notes: string[] = [];
   let connectError: string | undefined;
@@ -228,103 +225,6 @@ export function writeCursorMcp(cwd: string): string {
   existing.mcpServers = servers;
   writeFileSync(path, `${JSON.stringify(existing, null, 2)}\n`, 'utf8');
   return path;
-}
-
-const DSH_PATCH = 'cordis.patch.yml';
-const DSH_ROW_ID = 'mcp-relaywright';
-const DSH_TOOL_TIMEOUT_MS = 900_000;
-
-const DSH_ROW_TEMPLATE = `
-id: ${DSH_ROW_ID}
-name: '@deepseek-ai/dsh-mcp-client'
-config:
-  serverName: relaywright
-  transport: stdio
-  command: placeholder
-  args:
-    - placeholder
-  toolCallTimeoutMs: ${DSH_TOOL_TIMEOUT_MS}
-  env:
-    DEEPSEEK_API_KEY: !!js process.env.DEEPSEEK_API_KEY
-`;
-
-/** `$DSH_HOME/profiles/web`, or `~/.dsh/profiles/web` when DSH_HOME is unset. */
-export function dshWebProfileDir(env: NodeJS.ProcessEnv = process.env, home = homedir()): string {
-  const root = env.DSH_HOME?.trim() || join(home, '.dsh');
-  return join(root, 'profiles', 'web');
-}
-
-/**
- * Upsert the relaywright MCP row in a DSH web profile patch.
- * Does not create the profile directory.
- */
-export function writeDshMcp(profileDir: string): string {
-  if (!existsSync(profileDir)) {
-    throw new Error(
-      `No DSH web profile at ${profileDir}. Start dsh once, install @deepseek-ai/dsh-mcp-client at the same version as \`dsh --version\` (the npm latest tag is still 0.0.1-rc.1), then run this again.`,
-    );
-  }
-  const path = join(profileDir, DSH_PATCH);
-  const doc = loadDshPatch(path);
-  if (!isSeq(doc.contents)) throw new Error(`${path} must be a YAML array of patch operations.`);
-  const row = relaywrightDshRow(mcpLaunch());
-  const existing = findDshRow(doc.contents);
-  if (existing) existing.items = row.items;
-  else doc.contents.items.push(dshInsertBlock(row));
-  const text = doc.toString();
-  writeFileSync(path, text.endsWith('\n') ? text : `${text}\n`, 'utf8');
-  return path;
-}
-
-function loadDshPatch(path: string): ReturnType<typeof parseDocument> {
-  if (!existsSync(path)) return parseDocument('[]\n');
-  const text = readFileSync(path, 'utf8');
-  if (text.trim().length === 0) return parseDocument('[]\n');
-  const doc = parseDocument(text);
-  if (doc.errors.length > 0) throw new Error(`${path} is not valid YAML: ${doc.errors[0]?.message ?? 'parse error'}`);
-  if (doc.contents === null) {
-    const empty = parseDocument('[]\n');
-    doc.contents = empty.contents;
-  }
-  return doc;
-}
-
-function relaywrightDshRow(launch: { command: string; args: string[] }): YAMLMap {
-  const doc = parseDocument(DSH_ROW_TEMPLATE);
-  if (!isMap(doc.contents)) throw new Error('DSH row template is not a map');
-  const config = doc.contents.get('config');
-  if (!isMap(config)) throw new Error('DSH row template has no config');
-  const configMap = config as YAMLMap;
-  configMap.set('command', launch.command);
-  const args = new YAMLSeq();
-  args.flow = false;
-  for (const arg of launch.args) args.add(new Scalar(arg));
-  configMap.set('args', args);
-  return doc.contents;
-}
-
-function dshInsertBlock(row: YAMLMap): YAMLMap {
-  const doc = parseDocument('- insert:\n    - id: placeholder\n');
-  if (!isSeq(doc.contents)) throw new Error('DSH insert template is not an array');
-  const block = doc.contents.items[0];
-  if (!isMap(block)) throw new Error('DSH insert template is not a map');
-  const insert = block.get('insert');
-  if (!isSeq(insert)) throw new Error('DSH insert template has no insert list');
-  (insert as YAMLSeq).items = [row];
-  return block;
-}
-
-function findDshRow(root: YAMLSeq): YAMLMap | undefined {
-  for (const item of root.items) {
-    if (!isMap(item)) continue;
-    if (item.get('id') === DSH_ROW_ID) return item;
-    const insert = item.get('insert');
-    if (!isSeq(insert)) continue;
-    for (const row of insert.items) {
-      if (isMap(row) && row.get('id') === DSH_ROW_ID) return row;
-    }
-  }
-  return undefined;
 }
 
 export function mcpLaunch(): { command: string; args: string[] } {

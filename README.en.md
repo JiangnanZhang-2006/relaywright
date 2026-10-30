@@ -31,10 +31,9 @@ Run `init` in a terminal the first time. It asks one question at a time and show
 ```bash
 npx relaywright init
 npx relaywright init --write-mcp cursor
-npx relaywright init --write-mcp dsh
 ```
 
-The questions cover browser mode (`separate`, `daily`, or `cdp`), the domain allowlist, headless mode, the download directory, redaction, page scripts, the heal API, and notifications. Your name and account are stored only on this machine and are not echoed. `--write-mcp` writes the MCP launch command into `.cursor/mcp.json` in the current directory, or into the DSH web profile.
+The questions cover browser mode (`separate`, `daily`, or `cdp`), the domain allowlist, headless mode, the download directory, redaction, page scripts, the heal API, and notifications. Your name and account are stored only on this machine and are not echoed. `--write-mcp cursor` writes the MCP launch command into `.cursor/mcp.json` in the current directory.
 
 ```bash
 npx relaywright daemon start
@@ -56,14 +55,7 @@ The MCP instructions say to call `skill_list` first and `skill_run` when a skill
 
 ## DeepSeek Harness
 
-DeepSeek Harness stores MCP servers in the web profile's `cordis.patch.yml`, not in the project directory. Install `@deepseek-ai/dsh-mcp-client` at the same version as `dsh --version`. The npm `latest` tag is still `0.0.1-rc.1`.
-
-```bash
-dsh plugin --profile web add @deepseek-ai/dsh-mcp-client@<version printed by dsh --version>
-npx relaywright init --write-mcp dsh
-```
-
-Restart `dsh web`. Tool names are prefixed with `mcp__relaywright__`.
+Open DeepSeek Harness once, add the plugin `JiangnanZhang-2006/relaywright`, then restart. Tool names are prefixed with `mcp__relaywright__`. Browser mode and the domain allowlist still come from `relaywright init`.
 
 ## Skills, login, privacy
 

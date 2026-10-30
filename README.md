@@ -31,10 +31,9 @@ npx relaywright browser install
 ```bash
 npx relaywright init
 npx relaywright init --write-mcp cursor
-npx relaywright init --write-mcp dsh
 ```
 
-提问包括浏览器模式（`separate`、`daily`、`cdp`）、白名单、有无界面、下载目录、脱敏、页面脚本、自愈接口和通知。姓名和账号只在本机登记，输入时不会显示。`--write-mcp` 把 MCP 启动命令写进当前目录的 `.cursor/mcp.json`，或写进 DSH 的 web profile。
+提问包括浏览器模式（`separate`、`daily`、`cdp`）、白名单、有无界面、下载目录、脱敏、页面脚本、自愈接口和通知。姓名和账号只在本机登记，输入时不会显示。`--write-mcp cursor` 把 MCP 启动命令写进当前目录的 `.cursor/mcp.json`。
 
 ```bash
 npx relaywright daemon start
@@ -56,14 +55,7 @@ npx relaywright daemon stop
 
 ## 接到 DSH
 
-DeepSeek Harness 把 MCP 写在 web profile 的 `cordis.patch.yml` 里，不读项目目录。`dsh-mcp-client` 要和 `dsh --version` 是同一个版本；npm 上的 `latest` 还停在 `0.0.1-rc.1`。
-
-```bash
-dsh plugin --profile web add @deepseek-ai/dsh-mcp-client@<dsh --version 的版本号>
-npx relaywright init --write-mcp dsh
-```
-
-然后重启 `dsh web`。工具名会带 `mcp__relaywright__` 前缀。
+打开一次 DeepSeek Harness，在插件页添加 `JiangnanZhang-2006/relaywright`，然后重启。工具名会带 `mcp__relaywright__` 前缀。浏览器模式和白名单仍用 `relaywright init`。
 
 ## 技能、登录和隐私
 
