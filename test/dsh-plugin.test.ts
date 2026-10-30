@@ -11,12 +11,13 @@ describe('dsh bundle', () => {
     const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
       main?: string;
       files?: string[];
-      scripts?: { prepare?: string };
+      scripts?: { prepare?: string; build?: string };
       dsh?: { bundle?: { patch?: string } };
     };
     expect(pkg.dsh?.bundle?.patch).toBe('./cordis.patch.yml');
     expect(pkg.main).toBe('./dist/dsh/plugin.js');
-    expect(pkg.scripts?.prepare).toBe('tsc');
+    expect(pkg.scripts?.prepare).toBeUndefined();
+    expect(pkg.scripts?.build).toBe('tsc');
     expect(pkg.files).toContain('cordis.patch.yml');
     const patch = readFileSync(join(root, 'cordis.patch.yml'), 'utf8');
     expect(patch).toContain('id: relaywright');

@@ -1,0 +1,264 @@
+import { PASSWORD_FIELD_HELPERS } from './password-like.js';
+/** Shared page-world helpers. Inserted into isolated-world expressions and callFunctionOn bodies. */
+export const BROWSER_HELPERS = `
+function rwCompact(value) {
+  return String(value == null ? '' : value).replace(/\\s+/g, ' ').trim();
+}
+function rwVisible(el) {
+  if (!el || el.nodeType !== 1) return false;
+  const style = getComputedStyle(el);
+  if (style.display === 'none' || style.visibility === 'hidden') return false;
+  const rect = el.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+function rwCleanLabel(text) {
+  return rwCompact(text).replace(/^\\*+\\s*/, '').replace(/[：:]\\s*$/, '');
+}
+function rwSemanticInteractive(el) {
+  const tag = el.tagName;
+  if (tag === 'A' || tag === 'BUTTON' || tag === 'SELECT' || tag === 'TEXTAREA' || tag === 'SUMMARY') return true;
+  if (tag === 'INPUT') {
+    const type = (el.getAttribute('type') || 'text').toLowerCase();
+    return type !== 'hidden';
+  }
+  const role = (el.getAttribute('role') || '').toLowerCase();
+  return role === 'button' || role === 'link' || role === 'textbox' || role === 'combobox' || role === 'checkbox' || role === 'radio' || role === 'tab' || role === 'menuitem' || role === 'option' || role === 'searchbox' || role === 'switch' || role === 'slider';
+}
+function rwPrecedingLabel(container, select) {
+  const labels = container.querySelectorAll('label, .control-label');
+  let best = '';
+  for (const label of labels) {
+    if (label.contains(select)) continue;
+    const position = label.compareDocumentPosition(select);
+    if (position & Node.DOCUMENT_POSITION_FOLLOWING) {
+      const cleaned = rwCleanLabel(label.textContent || '');
+      if (cleaned) best = cleaned;
+    }
+  }
+  return best;
+}
+function rwLabel(select) {
+  if (select.id) {
+    const explicit = document.querySelector('label[for="' + CSS.escape(select.id) + '"]');
+    if (explicit) {
+      const cleaned = rwCleanLabel(explicit.textContent || '');
+      if (cleaned) return cleaned;
+    }
+  }
+  const aria = select.getAttribute('aria-label');
+  if (aria) {
+    const cleaned = rwCleanLabel(aria);
+    if (cleaned) return cleaned;
+  }
+  const scoped = select.closest('.form-group, .layui-form-item, tr');
+  if (scoped) {
+    const found = rwPrecedingLabel(scoped, select);
+    if (found) return found;
+  }
+  let parent = select.parentElement;
+  for (let depth = 0; depth < 3 && parent; depth += 1) {
+    const found = rwPrecedingLabel(parent, select);
+    if (found) return found;
+    parent = parent.parentElement;
+  }
+  return '';
+}
+function rwClassWidget(select, className) {
+  const parent = select.parentElement;
+  if (!parent) return null;
+  for (const sibling of parent.children) {
+    if (sibling !== select && sibling.classList.contains(className) && rwVisible(sibling)) return sibling;
+  }
+  return null;
+}
+function rwFindWidget(select) {
+  if (select.id) {
+    const byId = document.getElementById(select.id + '_chosen');
+    if (byId && rwVisible(byId)) return byId;
+  }
+  const chosen = rwClassWidget(select, 'chosen-container');
+  if (chosen) return chosen;
+  const select2 = rwClassWidget(select, 'select2-container');
+  if (select2) return select2;
+  const layui = rwClassWidget(select, 'layui-form-select');
+  if (layui) return layui;
+  const bootstrap = select.closest('.bootstrap-select');
+  if (bootstrap && bootstrap !== select && rwVisible(bootstrap)) return bootstrap;
+  const next = select.nextElementSibling;
+  if (next && rwVisible(next)) {
+    const selected = select.options[select.selectedIndex];
+    const text = selected ? rwCompact(selected.text) : '';
+    if (text && rwCompact(next.textContent || '').includes(text)) return next;
+  }
+  return null;
+}
+function rwElementText(el) {
+  return rwCompact(el.innerText || el.textContent || '').slice(0, 80);
+}
+function rwDirectText(el) {
+  let text = '';
+  const nodes = el.childNodes || [];
+  for (const node of nodes) {
+    if (node.nodeType === 3) text += node.textContent || '';
+  }
+  return rwCompact(text);
+}
+function rwSkipToken(token) {
+  if (!token) return true;
+  const lower = String(token).toLowerCase();
+  if (lower === 'ng-star-inserted' || lower === 'icon' || lower === 'fa' || lower === 'fas' || lower === 'far' || lower === 'fab' || lower === 'material-icons' || lower === 'svg-icon') return true;
+  if (lower.indexOf('ant-') === 0) return true;
+  return false;
+}
+function rwClassToken(el) {
+  const raw = typeof el.className === 'string' ? el.className : '';
+  const parts = raw.split(/\\s+/);
+  for (const token of parts) {
+    if (rwSkipToken(token)) continue;
+    return token;
+  }
+  return '';
+}
+function rwFileStem(src) {
+  const clean = String(src || '').split('?')[0].split('#')[0];
+  const base = clean.split('/').pop() || '';
+  const dot = base.lastIndexOf('.');
+  if (dot <= 0) return base;
+  return base.slice(0, dot);
+}
+function rwFallbackName(el) {
+  const aria = rwCompact(el.getAttribute('aria-label') || '');
+  if (aria) return aria;
+  const title = rwCompact(el.getAttribute('title') || '');
+  if (title) return title;
+  const img = el.querySelector ? el.querySelector('img') : null;
+  if (img) {
+    const alt = rwCompact(img.getAttribute('alt') || '');
+    if (alt) return alt;
+    const imgTitle = rwCompact(img.getAttribute('title') || '');
+    if (imgTitle) return imgTitle;
+  }
+  const token = rwClassToken(el);
+  if (token) return 'icon: ' + token;
+  if (img) {
+    const stem = rwFileStem(img.getAttribute('src'));
+    if (stem && !rwSkipToken(stem)) return 'icon: ' + stem;
+  }
+  return '';
+}
+function rwSplitSiblings(outer) {
+  if (rwDirectText(outer)) return null;
+  const groups = new Map();
+  const nodes = outer.querySelectorAll('*');
+  for (const el of nodes) {
+    if (!rwVisible(el)) continue;
+    if (getComputedStyle(el).cursor !== 'pointer') continue;
+    const text = rwCompact(el.innerText || el.textContent || '');
+    if (!text) continue;
+    const parent = el.parentElement;
+    if (!parent) continue;
+    let list = groups.get(parent);
+    if (!list) {
+      list = [];
+      groups.set(parent, list);
+    }
+    list.push({ el: el, text: text });
+  }
+  for (const list of groups.values()) {
+    if (list.length < 2) continue;
+    const seen = new Set();
+    let distinct = true;
+    for (const item of list) {
+      if (seen.has(item.text)) distinct = false;
+      seen.add(item.text);
+    }
+    if (!distinct) continue;
+    const chosen = [];
+    for (const item of list) chosen.push(item.el);
+    return chosen;
+  }
+  return null;
+}
+${PASSWORD_FIELD_HELPERS}
+`;
+export const INSPECT_EXPRESSION = `(() => {
+${BROWSER_HELPERS}
+  const clickables = [];
+  const clickableTexts = [];
+  const elements = document.body ? document.body.querySelectorAll('*') : [];
+  for (const el of elements) {
+    if (clickables.length >= 300) break;
+    if (el.tagName === 'IFRAME' || el.tagName === 'FRAME') continue;
+    if (!rwVisible(el)) continue;
+    const onclick = el.hasAttribute('onclick') || typeof el.onclick === 'function';
+    const parent = el.parentElement;
+    const pointer = getComputedStyle(el).cursor === 'pointer' && !(parent && getComputedStyle(parent).cursor === 'pointer');
+    // Only an explicit tabindex counts; many non-interactive elements are focusable by default.
+    const tab = el.hasAttribute('tabindex') && el.tabIndex >= 0 && !rwSemanticInteractive(el);
+    if (!onclick && !pointer && !tab) continue;
+    if (pointer) {
+      const split = rwSplitSiblings(el);
+      if (split && split.length >= 2) {
+        for (const child of split) {
+          if (clickables.length >= 300) break;
+          clickables.push(child);
+          clickableTexts.push(rwElementText(child));
+        }
+        continue;
+      }
+    }
+    clickables.push(el);
+    clickableTexts.push(rwElementText(el));
+  }
+  const named = [];
+  const namedTexts = [];
+  const candidates = document.body ? document.body.querySelectorAll('a, button, input, textarea, select, summary, [role]') : [];
+  for (const el of candidates) {
+    if (named.length >= 300) break;
+    if (!rwVisible(el) || !rwSemanticInteractive(el)) continue;
+    if (rwElementText(el)) continue;
+    const fallback = rwFallbackName(el);
+    if (!fallback) continue;
+    named.push(el);
+    namedTexts.push(fallback);
+  }
+  const selects = [];
+  for (const select of document.querySelectorAll('select')) {
+    if (rwVisible(select)) continue;
+    const widget = rwFindWidget(select);
+    if (!widget) continue;
+    const options = [];
+    for (const option of select.options) options.push({ value: option.value, text: option.text });
+    const selected = select.options[select.selectedIndex];
+    selects.push({
+      select: select,
+      widget: widget,
+      label: rwLabel(select),
+      selectedText: selected ? selected.text : '',
+      optionsJson: JSON.stringify(options),
+    });
+  }
+  const passwords = [];
+  let visiblePassword = false;
+  for (const input of document.querySelectorAll('input')) {
+    const type = (input.getAttribute('type') || 'text').toLowerCase();
+    if (type === 'password') {
+      passwords.push(input);
+      if (rwVisible(input)) visiblePassword = true;
+      continue;
+    }
+    if (!rwVisible(input) || !rwPasswordLike(input)) continue;
+    passwords.push(input);
+    visiblePassword = true;
+  }
+  return {
+    clickables: clickables,
+    clickableTextJson: JSON.stringify(clickableTexts),
+    selects: selects,
+    passwords: passwords,
+    visiblePassword: visiblePassword,
+    named: named,
+    namedTextJson: JSON.stringify(namedTexts),
+  };
+})()`;
+//# sourceMappingURL=inspect-script.js.map

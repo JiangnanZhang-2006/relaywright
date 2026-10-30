@@ -55,7 +55,7 @@ The MCP instructions say to call `skill_list` first and `skill_run` when a skill
 
 ## DeepSeek Harness
 
-Open DeepSeek Harness once, add the plugin `JiangnanZhang-2006/relaywright`, then restart. Tool names are prefixed with `mcp__relaywright__`. Browser mode and the domain allowlist still come from `relaywright init`.
+Open DeepSeek Harness once, add the plugin `github:JiangnanZhang-2006/relaywright`, then restart. The `github:` prefix has to be typed; the owner and repository alone are not accepted as an address. The repository includes the compiled `dist/`, so installation does not build. Tool names are prefixed with `mcp__relaywright__`. Browser mode and the domain allowlist still come from `relaywright init`.
 
 ## Skills, login, privacy
 

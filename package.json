@@ -17,7 +17,6 @@
     }
   },
   "scripts": {
-    "prepare": "tsc",
     "build": "tsc",
     "dev": "tsx src/cli/index.ts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit && tsc -p tsconfig.bench.json",

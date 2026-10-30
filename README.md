@@ -55,7 +55,7 @@ npx relaywright daemon stop
 
 ## 接到 DSH
 
-打开一次 DeepSeek Harness，在插件页添加 `JiangnanZhang-2006/relaywright`，然后重启。工具名会带 `mcp__relaywright__` 前缀。浏览器模式和白名单仍用 `relaywright init`。
+打开一次 DeepSeek Harness，在插件页填写 `github:JiangnanZhang-2006/relaywright`，然后重启。前面的 `github:` 要自己写上，只写用户名和仓库名不会被当成地址。仓库里带有编译好的 `dist/`，安装时不再编译。工具名会带 `mcp__relaywright__` 前缀。浏览器模式和白名单仍用 `relaywright init`。
 
 ## 技能、登录和隐私
 
