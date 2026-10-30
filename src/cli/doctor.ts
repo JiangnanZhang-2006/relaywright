@@ -110,7 +110,15 @@ async function checkAttach(config: ReturnType<typeof readGlobalConfig> | undefin
   if (mode !== 'daily') return item('attach', 'OK', 'Browser mode is not daily', '');
   const dir = config?.browser?.user_data_dir || defaultChromeUserDataDir();
   const endpoint = readDevToolsEndpoint(dir);
-  if (!endpoint) {
+  if (endpoint.kind === 'denied') {
+    return item(
+      'attach',
+      'FAIL',
+      `Cannot read DevToolsActivePort in ${dir} (${endpoint.code})`,
+      'The process running relaywright has no permission to read Chrome\'s configuration folder. Attach with cdp_url ws://127.0.0.1:9222/devtools/browser.',
+    );
+  }
+  if (endpoint.kind !== 'ok') {
     return item(
       'attach',
       'FAIL',

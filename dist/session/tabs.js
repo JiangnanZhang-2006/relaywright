@@ -107,13 +107,20 @@ export class TabSet {
         }
         return result;
     }
-    async adopt(index) {
-        if (this.scope !== 'owned')
-            throw new RelayError('bad_request', 'Adopt is only available while attached to an existing browser');
+    async foreignPage(index) {
         const pages = await this.foreignPages();
         const page = pages[index - 1];
         if (!page)
             throw new RelayError('bad_request', `No user tab ${index}`);
+        return page;
+    }
+    async adopt(index, pinned) {
+        if (this.scope !== 'owned')
+            throw new RelayError('bad_request', 'Adopt is only available while attached to an existing browser');
+        const pages = await this.foreignPages();
+        const page = pinned ? pages.find((candidate) => candidate === pinned) : pages[index - 1];
+        if (!page)
+            throw new RelayError('bad_request', pinned ? 'That tab is gone' : `No user tab ${index}`);
         this.owned.add(page);
         this.rememberTarget(page);
         const slot = this.addPage(page);

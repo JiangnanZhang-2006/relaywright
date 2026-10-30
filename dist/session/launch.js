@@ -50,21 +50,37 @@ export function chromeLaunchArgs(input) {
     return args;
 }
 export function readDevToolsEndpoint(profileDir) {
+    let text;
     try {
-        const text = readFileSync(join(profileDir, 'DevToolsActivePort'), 'utf8');
-        const lines = text
-            .split(/\r?\n/)
-            .map((line) => line.trim())
-            .filter((line) => line.length > 0);
-        const port = Number(lines[0]);
-        const path = lines[1] ?? '';
-        if (!Number.isInteger(port) || port < 1 || port > 65535 || !path.startsWith('/'))
-            return null;
-        return { port, browserWSEndpoint: `ws://127.0.0.1:${port}${path}` };
+        text = readFileSync(join(profileDir, 'DevToolsActivePort'), 'utf8');
     }
-    catch {
+    catch (err) {
+        const code = errnoCode(err);
+        if (code === 'EPERM' || code === 'EACCES')
+            return { kind: 'denied', code };
+        return { kind: 'missing' };
+    }
+    const parsed = parseDevToolsActivePort(text);
+    if (!parsed)
+        return { kind: 'missing' };
+    return { kind: 'ok', ...parsed };
+}
+export function parseDevToolsActivePort(text) {
+    const lines = text
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+    const port = Number(lines[0]);
+    const path = lines[1] ?? '';
+    if (!Number.isInteger(port) || port < 1 || port > 65535 || !path.startsWith('/'))
         return null;
-    }
+    return { port, browserWSEndpoint: `ws://127.0.0.1:${port}${path}` };
+}
+function errnoCode(err) {
+    if (!err || typeof err !== 'object' || !('code' in err))
+        return '';
+    const code = err.code;
+    return typeof code === 'string' ? code : '';
 }
 export async function probeBrowserWebsocket(port, timeoutMs) {
     try {
@@ -82,7 +98,7 @@ export async function probeBrowserWebsocket(port, timeoutMs) {
 }
 export async function adoptChrome(profileDir, viewport) {
     const existing = readDevToolsEndpoint(profileDir);
-    if (!existing)
+    if (existing.kind !== 'ok')
         return null;
     const endpoint = await probeBrowserWebsocket(existing.port, 1_000);
     if (!endpoint)
@@ -113,7 +129,7 @@ async function waitForEndpoint(profileDir, timeoutMs) {
     let last = 'Chrome did not open a DevTools port';
     while (Date.now() < deadline) {
         const existing = readDevToolsEndpoint(profileDir);
-        if (existing) {
+        if (existing.kind === 'ok') {
             const endpoint = await probeBrowserWebsocket(existing.port, 1_000);
             if (endpoint)
                 return endpoint;

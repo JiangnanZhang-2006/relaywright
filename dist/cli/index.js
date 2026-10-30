@@ -319,7 +319,9 @@ addJson(program
     .command('snapshot')
     .description('Print a snapshot of the current page. --diff is against the last snapshot from any client.')
     .option('--diff', 'print only changes since the last snapshot')
+    .option('--text', 'print the visible text instead of the accessibility snapshot')
     .option('--max-rows <n>', 'maximum data rows to render for each table', (value) => Number(value))
+    .option('--max-chars <n>', 'maximum characters for --text', (value) => Number(value))
     .addHelpText('after', `
 Examples:
   relaywright snapshot
@@ -329,11 +331,18 @@ Examples:
     const command = this;
     return guard(command, async () => {
         const diff = command.getOptionValue('diff') === true;
+        const text = command.getOptionValue('text') === true;
         const maxRows = command.getOptionValue('maxRows');
+        const maxChars = command.getOptionValue('maxChars');
+        if (diff && text)
+            throw new Error('Choose one of --diff or --text');
         if (maxRows !== undefined && (!Number.isInteger(maxRows) || maxRows < 1 || maxRows > 50)) {
             throw new Error('--max-rows must be an integer from 1 to 50');
         }
-        const page = await getSnapshot({ mode: diff ? 'diff' : 'full', maxRows });
+        if (maxChars !== undefined && (!Number.isInteger(maxChars) || maxChars < 1 || maxChars > 50_000)) {
+            throw new Error('--max-chars must be an integer from 1 to 50000');
+        }
+        const page = await getSnapshot({ mode: text ? 'text' : diff ? 'diff' : 'full', maxRows, maxChars });
         emit(command, formatPage(page), page);
     });
 });
@@ -502,7 +511,7 @@ Examples:
 });
 addJson(tabs
     .command('adopt')
-    .description('Show tabs that were already open in an attached Chrome, or adopt one by index. Not available to the model.')
+    .description('Show tabs that were already open in an attached Chrome, or adopt one by index. The model uses browser_tabs action=user, then action=adopt, which asks you to confirm.')
     .option('--index <n>', '1-based index from the user-tab list', (value) => parseStepFlag('index', value))
     .addHelpText('after', `
 Without --index this prints the person's tabs and changes nothing.

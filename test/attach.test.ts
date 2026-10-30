@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -6,18 +6,33 @@ import { createRelayMcpServer } from '../src/mcp/server.js';
 import { daemonLogPath } from '../src/config/paths.js';
 import {
   accessDialogBody,
+  adoptDialogBody,
   askAccess,
+  askAdopt,
+  linuxAdoptArgs,
   linuxDialogArgs,
+  MAC_ADOPT_SCRIPT,
+  parseAdoptDecision,
   parseDecision,
   presetAccessDecision,
+  presetAdoptDecision,
   sanitizeAccessReason,
   WINDOWS_ACCESS_SCRIPT,
+  WINDOWS_ADOPT_SCRIPT,
 } from '../src/session/access-dialog.js';
+import { TabsCommandSchema } from '../src/protocol.js';
 import { navigationDecision, normalizeAllowDomain } from '../src/session/allowlist.js';
-import { resolveAttachRequest, resolveCdpUrl, shouldWarmOnStartup } from '../src/session/connect.js';
+import {
+  devToolsClosedPortMessage,
+  resolveAttachRequest,
+  resolveCdpUrl,
+  resolveDevToolsFile,
+  shouldWarmOnStartup,
+} from '../src/session/connect.js';
+import { readDevToolsEndpoint } from '../src/session/launch.js';
 
 const ORIGINAL_FETCH = globalThis.fetch;
-const envKeys = ['RELAYWRIGHT_TEST_ACCESS_DECISION', 'RELAYWRIGHT_NOTIFY'] as const;
+const envKeys = ['RELAYWRIGHT_TEST_ACCESS_DECISION', 'RELAYWRIGHT_TEST_ADOPT_DECISION', 'RELAYWRIGHT_NOTIFY'] as const;
 const saved = new Map<string, string | undefined>(envKeys.map((key) => [key, process.env[key]]));
 
 afterEach(() => {
@@ -68,9 +83,80 @@ describe('attach policy', () => {
 
     globalThis.fetch = async () => new Response('nope', { status: 404 });
     const fallback = await resolveCdpUrl('http://127.0.0.1:18991/devtools/browser/direct');
-    expect(fallback).toMatchObject({ endpointKind: 'cdp-ws', endpoint: 'ws://127.0.0.1:18991/devtools/browser/direct' });
-    await expect(resolveCdpUrl('http://127.0.0.1:18991')).rejects.toMatchObject({ code: 'attach_failed' });
+    expect(fallback).toMatchObject({
+      endpointKind: 'cdp-ws',
+      endpoint: 'ws://127.0.0.1:18991/devtools/browser/direct',
+      cdpUrl: 'ws://127.0.0.1:18991/devtools/browser/direct',
+    });
+    const bare = await resolveCdpUrl('http://127.0.0.1:18991');
+    expect(bare).toMatchObject({
+      mode: 'cdp',
+      endpointKind: 'cdp-ws',
+      endpoint: 'ws://127.0.0.1:18991/devtools/browser',
+      cdpUrl: 'ws://127.0.0.1:18991/devtools/browser',
+    });
+    expect(bare.endpoint).not.toContain('--user-data-dir');
     expect(await resolveCdpUrl('ws://127.0.0.1:18991/devtools/browser/raw')).toMatchObject({ endpointKind: 'cdp-ws' });
+    const secure = await resolveCdpUrl('https://127.0.0.1:18991');
+    expect(secure.endpoint).toBe('wss://127.0.0.1:18991/devtools/browser');
+  });
+
+  it('falls back to port 9222 when auto cannot read DevToolsActivePort', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rw-devtools-missing-'));
+    const calls: string[] = [];
+    globalThis.fetch = async (input) => {
+      calls.push(String(input));
+      return new Response('', { status: 404 });
+    };
+    const resolved = await resolveDevToolsFile(dir, { portOpen: async (port) => port === 9222 });
+    expect(calls.some((call) => call.includes('127.0.0.1:9222/json/version'))).toBe(true);
+    expect(resolved).toMatchObject({
+      mode: 'cdp',
+      endpointKind: 'cdp-ws',
+      endpoint: 'ws://127.0.0.1:9222/devtools/browser',
+      cdpUrl: 'ws://127.0.0.1:9222/devtools/browser',
+      inspectFallback: { read: 'missing', profileDir: dir, port: 9222 },
+    });
+  });
+
+  it('names a permission failure and still uses the inspect port when it is open', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'rw-devtools-denied-'));
+    const dir = join(root, 'profile');
+    mkdirSync(dir);
+    writeFileSync(join(dir, 'DevToolsActivePort'), '18999\n/devtools/browser/secret\n', 'utf8');
+    chmodSync(dir, 0);
+    try {
+      expect(readDevToolsEndpoint(dir)).toMatchObject({ kind: 'denied' });
+      globalThis.fetch = async () => new Response('', { status: 404 });
+      const open = await resolveDevToolsFile(dir, { portOpen: async () => true });
+      expect(open.endpoint).toBe('ws://127.0.0.1:9222/devtools/browser');
+      expect(open.cdpUrl).toBe(open.endpoint);
+      expect(open.inspectFallback?.read).toBe('denied');
+      await expect(resolveDevToolsFile(dir, { portOpen: async () => false })).rejects.toMatchObject({ code: 'attach_failed' });
+      try {
+        await resolveDevToolsFile(dir, { portOpen: async () => false });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : '';
+        expect(message).toMatch(/EPERM|EACCES/);
+        expect(message).toContain('no permission to read Chrome\'s configuration folder');
+        expect(message).toContain('cdp_url ws://127.0.0.1:9222/devtools/browser');
+        expect(message).not.toContain('chrome://inspect');
+        expect(message).not.toContain('--user-data-dir');
+      }
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+  });
+
+  it('tells a missing profile to allow remote debugging when port 9222 is closed', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rw-devtools-closed-'));
+    globalThis.fetch = async () => {
+      throw new Error('connection refused');
+    };
+    await expect(resolveDevToolsFile(dir, { port: 9, portOpen: async () => false })).rejects.toThrow(/chrome:\/\/inspect\/#remote-debugging/);
+    const message = devToolsClosedPortMessage({ read: 'denied', code: 'EPERM', profileDir: dir, port: 9222 });
+    expect(message).toContain('EPERM');
+    expect(message).not.toContain('chrome://inspect');
   });
 
   it('keeps startup lazy unless reconnect is eager', () => {
@@ -142,11 +228,31 @@ describe('attach policy', () => {
     }
   });
 
-  it('does not register a tool that can adopt a user tab', () => {
+  it('adopts a user tab through browser_tabs, which asks the person to confirm', async () => {
     const { toolNames } = createRelayMcpServer();
     expect(toolNames).toContain('browser_attach');
+    expect(toolNames).toContain('browser_tabs');
     expect(toolNames).toContain('browser_detach');
     expect(toolNames).toContain('browser_request_access');
-    expect(toolNames.some((name) => name.includes('adopt'))).toBe(false);
+    expect(toolNames.some((name) => name === 'browser_adopt' || name.endsWith('_adopt'))).toBe(false);
+    expect(TabsCommandSchema.safeParse({ action: 'user' }).success).toBe(true);
+    expect(TabsCommandSchema.safeParse({ action: 'adopt' }).success).toBe(false);
+    expect(TabsCommandSchema.safeParse({ action: 'adopt', index: 2 }).success).toBe(true);
+    expect(WINDOWS_ADOPT_SCRIPT).toContain('RW_ADOPT_TITLE');
+    expect(WINDOWS_ADOPT_SCRIPT).toContain('允许');
+    expect(WINDOWS_ADOPT_SCRIPT).toContain('拒绝');
+    expect(WINDOWS_ADOPT_SCRIPT).not.toContain('${');
+    expect(MAC_ADOPT_SCRIPT).not.toContain('${');
+    expect(linuxAdoptArgs('title', 'https://example.test')).toContain('--no-markup');
+    const body = adoptDialogBody(`hello\u0007\n${'x'.repeat(200)}`, 'https://example.test/a');
+    expect(body.split('\n')).toHaveLength(2);
+    expect(body).not.toContain('\u0007');
+    expect([...((body.split('\n')[0] ?? ''))].length).toBeLessThanOrEqual(120);
+    process.env.RELAYWRIGHT_TEST_ADOPT_DECISION = 'allow';
+    expect(await askAdopt('华为 ICT', 'https://example.test')).toBe('allow');
+    expect(parseAdoptDecision('noise\ndeny\nallow\n')).toBe('allow');
+    process.env.RELAYWRIGHT_NOTIFY = '0';
+    delete process.env.RELAYWRIGHT_TEST_ADOPT_DECISION;
+    expect(presetAdoptDecision()).toBe('deny');
   });
 });

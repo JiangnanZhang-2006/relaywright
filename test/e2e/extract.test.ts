@@ -90,10 +90,10 @@ describe.skipIf(!resolved.path)('extract and eval', () => {
       secret: '‹redacted›',
       alt: '‹redacted›',
     });
-    expect(body.rows[0]?.frame.url).toContain('list.html');
+    expect(body.rows[0]?.frame).toBeUndefined();
     expect(body.rows[1]?.secret).toBeNull();
     expect(body.rows[59]?.title).toBe('Item 60');
-    const framed = body.rows.filter((row) => row.frame.url.includes('frame.html'));
+    const framed = body.rows.filter((row) => row.frame?.url.includes('frame.html'));
     expect(framed.map((row) => row.title)).toEqual(['Frame 1', 'Frame 2']);
     expect(framed[0]?.frame.name).toBe('extra');
     expect(JSON.stringify(body)).not.toContain('hunter2');

@@ -103,9 +103,13 @@ export const WaitResultSchema = PageSchema.extend({
 
 export type WaitBody = z.infer<typeof WaitResultSchema>;
 
+export const TEXT_DEFAULT_CHARS = 20_000;
+export const TEXT_MAX_CHARS = 50_000;
+
 export const SnapshotQuery = z.object({
-  mode: z.enum(['full', 'diff']).default('full'),
+  mode: z.enum(['full', 'diff', 'text']).default('full'),
   maxRows: z.number().int().min(1).max(50).optional(),
+  maxChars: z.number().int().min(1).max(TEXT_MAX_CHARS).optional(),
 });
 
 export const ActSchema = z
@@ -165,13 +169,13 @@ export type TabsList = z.infer<typeof TabsListSchema>;
 
 export const TabsCommandSchema = z
   .object({
-    action: z.enum(['list', 'select', 'close', 'new']),
+    action: z.enum(['list', 'select', 'close', 'new', 'user', 'adopt']),
     index: z.number().int().positive().optional(),
     url: z.string().min(1).optional(),
   })
   .superRefine((input, ctx) => {
-    if (input.action === 'select' && input.index === undefined) {
-      ctx.addIssue({ code: 'custom', message: 'index is required for select', path: ['index'] });
+    if ((input.action === 'select' || input.action === 'adopt') && input.index === undefined) {
+      ctx.addIssue({ code: 'custom', message: 'index is required for select and adopt', path: ['index'] });
     }
     if (input.url !== undefined && input.action !== 'new') {
       ctx.addIssue({ code: 'custom', message: 'url is only valid for new', path: ['url'] });

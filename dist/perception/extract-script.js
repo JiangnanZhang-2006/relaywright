@@ -45,9 +45,14 @@ function readOne(el, attr) {
 }
 
 function readField(root, field) {
+  var selector = String(field.selector || '').replace(/^\\s+|\\s+$/g, '');
+  if (selector === ':scope') {
+    var own = readOne(root, field.attr);
+    return field.all ? [own] : own;
+  }
   var nodes;
   try {
-    nodes = root.querySelectorAll(field.selector);
+    nodes = root.querySelectorAll(selector);
   } catch (err) {
     throw new Error('Invalid selector: ' + field.selector);
   }
@@ -70,7 +75,8 @@ function walk(doc, frame, depth) {
       truncated = true;
       return;
     }
-    var row = { frame: frame };
+    var row = {};
+    if (depth > 0) row.frame = frame;
     var names = Object.keys(fields);
     for (var n = 0; n < names.length; n += 1) row[names[n]] = readField(roots[i], fields[names[n]]);
     rows.push(row);

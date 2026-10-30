@@ -1,9 +1,10 @@
+import { createConnection } from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import puppeteer, { type Browser } from 'puppeteer-core';
 import { RelayError } from '../errors.js';
 import type { GlobalConfig } from '../privacy/store.js';
-import { readDevToolsEndpoint } from './launch.js';
+import { readDevToolsEndpoint, type DevToolsRead } from './launch.js';
 
 export const ATTACH_TIMEOUT_MS = 60_000;
 
@@ -12,7 +13,17 @@ export const ATTACH_ALLOW_HINT = '请在 Chrome 里点「允许」以连接 rela
 export const ATTACH_TRANSFERS_MESSAGE =
   'attach_downloads_disabled: downloads and PDF export are off while attached to an existing Chrome, because the download folder cannot be limited to relaywright tabs without changing that profile.';
 
+export const DEFAULT_INSPECT_PORT = 9222;
+
 export type EndpointKind = 'devtools-file' | 'cdp-http' | 'cdp-ws';
+
+/** Why DevToolsActivePort was skipped. The endpoint is then the inspect-port fallback. */
+export interface InspectFallback {
+  read: 'missing' | 'denied';
+  code?: string;
+  profileDir: string;
+  port: number;
+}
 
 export interface ResolvedAttach {
   mode: 'daily' | 'cdp';
@@ -20,6 +31,12 @@ export interface ResolvedAttach {
   endpointKind: EndpointKind;
   userDataDir?: string;
   cdpUrl?: string;
+  inspectFallback?: InspectFallback;
+}
+
+export interface InspectProbe {
+  port?: number;
+  portOpen?: (port: number) => Promise<boolean>;
 }
 
 export interface AttachRequest {
@@ -47,21 +64,49 @@ export function attachIsDeferred(config: GlobalConfig, phase: string, connected:
   return (config.attach?.reconnect ?? 'lazy') !== 'eager';
 }
 
-/** Reads DevToolsActivePort only. Does not open /json/version. */
-export function resolveDevToolsFile(profileDir: string): ResolvedAttach {
-  const existing = readDevToolsEndpoint(profileDir);
-  if (!existing) {
-    throw new RelayError(
-      'attach_failed',
-      `No DevToolsActivePort in ${profileDir}. Open chrome://inspect/#remote-debugging and allow remote debugging for this browser.`,
-    );
+/** Uses DevToolsActivePort when it can be read. Otherwise probes 127.0.0.1:9222. */
+export async function resolveDevToolsFile(profileDir: string, probe: InspectProbe = {}): Promise<ResolvedAttach> {
+  const read = readDevToolsEndpoint(profileDir);
+  if (read.kind === 'ok') {
+    return {
+      mode: 'daily',
+      endpoint: read.browserWSEndpoint,
+      endpointKind: 'devtools-file',
+      userDataDir: profileDir,
+    };
   }
-  return {
-    mode: 'daily',
-    endpoint: existing.browserWSEndpoint,
-    endpointKind: 'devtools-file',
-    userDataDir: profileDir,
-  };
+  const port = probe.port ?? DEFAULT_INSPECT_PORT;
+  const fallback = inspectFallbackFor(read, profileDir, port);
+  const versionUrl = await probeVersion(new URL(`http://127.0.0.1:${port}/`));
+  if (versionUrl) {
+    return { mode: 'cdp', endpoint: versionUrl, endpointKind: 'cdp-http', cdpUrl: versionUrl, inspectFallback: fallback };
+  }
+  const open = await (probe.portOpen ?? portAccepts)(port);
+  if (open) {
+    const endpoint = inspectBrowserWs(port);
+    return { mode: 'cdp', endpoint, endpointKind: 'cdp-ws', cdpUrl: endpoint, inspectFallback: fallback };
+  }
+  throw new RelayError('attach_failed', devToolsClosedPortMessage(fallback));
+}
+
+export function inspectBrowserWs(port: number): string {
+  return `ws://127.0.0.1:${port}/devtools/browser`;
+}
+
+export function devToolsFileProblem(fallback: InspectFallback): string {
+  const file = join(fallback.profileDir, 'DevToolsActivePort');
+  if (fallback.read === 'denied') {
+    return `The process running relaywright cannot read ${file} (${fallback.code ?? 'EPERM'}). That host has no permission to read Chrome's configuration folder.`;
+  }
+  return `No DevToolsActivePort in ${fallback.profileDir}.`;
+}
+
+export function devToolsClosedPortMessage(fallback: InspectFallback): string {
+  const problem = devToolsFileProblem(fallback);
+  if (fallback.read === 'denied') {
+    return `${problem} Nothing answered on 127.0.0.1:${fallback.port}. Attach with cdp_url ${inspectBrowserWs(fallback.port)}.`;
+  }
+  return `${problem} Nothing answered on 127.0.0.1:${fallback.port}. Open chrome://inspect/#remote-debugging and allow remote debugging for this browser.`;
 }
 
 export async function resolveCdpUrl(cdpUrl: string): Promise<ResolvedAttach> {
@@ -80,14 +125,8 @@ export async function resolveCdpUrl(cdpUrl: string): Promise<ResolvedAttach> {
   }
   const probed = await probeVersion(url);
   if (probed) return { mode: 'cdp', endpoint: probed, endpointKind: 'cdp-http', cdpUrl: trimmed };
-  if (url.pathname.startsWith('/devtools/')) {
-    const ws = `${url.protocol === 'https:' ? 'wss:' : 'ws:'}//${url.host}${url.pathname}`;
-    return { mode: 'cdp', endpoint: ws, endpointKind: 'cdp-ws', cdpUrl: trimmed };
-  }
-  throw new RelayError(
-    'attach_failed',
-    '/json/version did not return a WebSocket URL. Pass the ws URL from DevToolsActivePort, or attach with --user-data-dir.',
-  );
+  const ws = devtoolsWs(url);
+  return { mode: 'cdp', endpoint: ws, endpointKind: 'cdp-ws', cdpUrl: ws };
 }
 
 export async function resolveAttachRequest(input: AttachRequest): Promise<ResolvedAttach> {
@@ -125,6 +164,41 @@ export function mapAttachError(err: unknown): RelayError {
     return new RelayError('attach_timeout', `Timed out waiting for Chrome to allow the debugger. ${ATTACH_ALLOW_HINT}`);
   }
   return new RelayError('attach_failed', message);
+}
+
+/** Keeps a DevToolsActivePort failure visible when the inspect-port fallback also fails to connect. */
+export function explainAttachFailure(target: ResolvedAttach, err: unknown): RelayError {
+  const mapped = mapAttachError(err);
+  if (!target.inspectFallback) return mapped;
+  return new RelayError(mapped.code, `${devToolsFileProblem(target.inspectFallback)} ${mapped.message}`);
+}
+
+function inspectFallbackFor(read: DevToolsRead, profileDir: string, port: number): InspectFallback {
+  if (read.kind === 'denied') return { read: 'denied', code: read.code, profileDir, port };
+  return { read: 'missing', profileDir, port };
+}
+
+function devtoolsWs(url: URL): string {
+  const scheme = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  if (url.pathname.startsWith('/devtools/')) return `${scheme}//${url.host}${url.pathname}`;
+  return `${scheme}//${url.host}/devtools/browser`;
+}
+
+export function portAccepts(port: number, timeoutMs = 400): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = createConnection({ host: '127.0.0.1', port });
+    let settled = false;
+    const finish = (open: boolean): void => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(open);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+  });
 }
 
 async function probeVersion(base: URL): Promise<string | null> {

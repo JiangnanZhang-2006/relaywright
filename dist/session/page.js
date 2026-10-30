@@ -3,12 +3,13 @@ import { RelayError } from '../errors.js';
 import { performAction } from '../actions/perform.js';
 import { loadDocument } from '../perception/capture.js';
 import { EXTRACT_SOURCE } from '../perception/extract-script.js';
-import { normalizeExtract } from '../perception/extract.js';
+import { normalizeExtract, withExtractWarning } from '../perception/extract.js';
 import { BROWSER_HELPERS } from '../perception/inspect-script.js';
 import { diffLines } from '../perception/diff.js';
 import { RefRegistry } from '../perception/registry.js';
 import { formatLines, loginHintLine, renderSnapshotParts } from '../perception/snapshot.js';
 import { errorText, logDaemon } from '../config/paths.js';
+import { TEXT_DEFAULT_CHARS, TEXT_MAX_CHARS } from '../protocol.js';
 import { bounded, runPaint } from './timeout.js';
 import { describeBackend, findFrameId, queryCssBackends } from '../recorder/dom.js';
 import { isSensitive } from '../recorder/redact.js';
@@ -125,6 +126,14 @@ export class PageController {
         this.baseline = null;
         this.navigatedSinceBaseline = false;
     }
+    /** Visible text only. Does not move the diff baseline. */
+    async visibleText(maxChars) {
+        await this.paint();
+        const title = await bounded(this.page.title(), EVAL_TIMEOUT_MS, 'title');
+        const url = this.page.url();
+        const raw = await readPageText(this.page);
+        return { url, title, snapshot: formatVisibleText({ title, url, text: raw, maxChars }) };
+    }
     async snapshot(mode, maxRows, tabs) {
         await this.paint();
         const title = await bounded(this.page.title(), EVAL_TIMEOUT_MS, 'title');
@@ -159,7 +168,7 @@ export class PageController {
                 const fn = new Function('request', source);
                 return fn(payload);
             }, EXTRACT_SOURCE, request), 10_000, 'extract');
-            return { rows: raw.rows, limit: request.limit, truncated: Boolean(raw.truncated) };
+            return withExtractWarning({ rows: raw.rows, limit: request.limit, truncated: Boolean(raw.truncated) });
         }
         catch (err) {
             if (err instanceof RelayError)
@@ -465,6 +474,17 @@ export class PageController {
         await runPaint((fn) => this.page.evaluate(fn));
     }
 }
+export function formatVisibleText(input) {
+    const limit = input.maxChars ?? TEXT_DEFAULT_CHARS;
+    if (!Number.isInteger(limit) || limit < 1 || limit > TEXT_MAX_CHARS) {
+        throw new RelayError('bad_request', `max_chars must be an integer from 1 to ${TEXT_MAX_CHARS}`);
+    }
+    const collapsed = input.text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    const chars = [...collapsed];
+    const truncated = chars.length > limit;
+    const body = truncated ? `${chars.slice(0, limit).join('')}\n[truncated]` : collapsed;
+    return `page: ${input.title}  url: ${input.url}\n${body}`;
+}
 async function readPageText(page) {
     return bounded(page.evaluate(() => {
         const parts = [];
@@ -477,13 +497,18 @@ async function readPageText(page) {
                 if (!frames)
                     return;
                 for (const frame of frames) {
-                    const child = frame.contentWindow;
-                    if (child)
-                        visit(child);
+                    try {
+                        const child = frame.contentWindow;
+                        if (child)
+                            visit(child);
+                    }
+                    catch {
+                        // A cross-origin frame throws; keep reading the frames after it.
+                    }
                 }
             }
             catch {
-                // Out-of-process frames throw on contentWindow access.
+                // The document itself is unreachable.
             }
         };
         visit(globalThis);

@@ -33,7 +33,7 @@ describe.skipIf(!resolved.path)('chrome stays up across a daemon disconnect', ()
   afterAll(async () => {
     await session?.close().catch(() => undefined);
     const endpoint = readDevToolsEndpoint(defaultProfileDir());
-    if (endpoint) {
+    if (endpoint.kind === 'ok') {
       const ws = await probeBrowserWebsocket(endpoint.port, 1_000);
       if (ws) {
         const browser = await puppeteer.connect({ browserWSEndpoint: ws, defaultViewport: null }).catch(() => null);
@@ -50,8 +50,8 @@ describe.skipIf(!resolved.path)('chrome stays up across a daemon disconnect', ()
     expect(opened.url).toContain('/zf-mock/v1/');
     await first.close({ keepBrowser: true });
     const endpoint = readDevToolsEndpoint(defaultProfileDir());
-    expect(endpoint).not.toBeNull();
-    expect(await probeBrowserWebsocket(endpoint?.port ?? 0, 1_000)).toBeTruthy();
+    expect(endpoint.kind).toBe('ok');
+    expect(await probeBrowserWebsocket(endpoint.kind === 'ok' ? endpoint.port : 0, 1_000)).toBeTruthy();
 
     const second = new BrowserSession();
     session = second;
@@ -65,7 +65,7 @@ describe.skipIf(!resolved.path)('chrome stays up across a daemon disconnect', ()
     let gone = false;
     while (Date.now() < deadline) {
       const still = readDevToolsEndpoint(defaultProfileDir());
-      if (!still || !(await probeBrowserWebsocket(still.port, 500))) {
+      if (still.kind !== 'ok' || !(await probeBrowserWebsocket(still.port, 500))) {
         gone = true;
         break;
       }

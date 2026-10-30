@@ -66,6 +66,13 @@ export function buildSkill(steps, input) {
     }
     if (drafts.length === 0)
         throw new RelayError('bad_params', 'No steps to save');
+    if (!drafts.some((draft) => draft.action !== 'expect')) {
+        const ranged = input.from_step !== undefined || input.to_step !== undefined;
+        const where = ranged
+            ? `The selected range starts at step ${range.from}.`
+            : `The default range starts at step ${range.from} (the last goto).`;
+        throw new RelayError('bad_params', `No action steps to save. browser_eval, browser_extract, and browser_snapshot are not recorded. ${where} Pass from_step to include earlier actions.`);
+    }
     const unused = examples.filter((param) => !used.has(param.name)).map((param) => param.name);
     if (unused.length === 1)
         throw new RelayError('param_unused', `Unused param ${unused[0]}`);

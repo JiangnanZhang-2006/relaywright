@@ -239,11 +239,12 @@ export async function navigate(url: string): Promise<PageView> {
   );
 }
 
-export async function getSnapshot(options?: { mode?: 'full' | 'diff'; maxRows?: number }): Promise<PageView> {
+export async function getSnapshot(options?: { mode?: 'full' | 'diff' | 'text'; maxRows?: number; maxChars?: number }): Promise<PageView> {
   const info = await ensureDaemon();
   const params = new URLSearchParams();
   if (options?.mode) params.set('mode', options.mode);
   if (options?.maxRows !== undefined) params.set('maxRows', String(options.maxRows));
+  if (options?.maxChars !== undefined) params.set('maxChars', String(options.maxChars));
   const query = params.size > 0 ? `?${params.toString()}` : '';
   return PageSchema.parse(await authorized(info, `/snapshot${query}`, { timeoutMs: 45_000 }));
 }
@@ -297,6 +298,7 @@ export async function waitFor(input: { text?: string; ref?: string; url?: string
 const AttachResultSchema = z.object({
   mode: z.enum(['daily', 'cdp', 'separate']),
   endpoint_kind: z.enum(['devtools-file', 'cdp-http', 'cdp-ws', 'own']),
+  user_tabs: z.number().int().nonnegative().optional(),
 });
 
 const AccessResultSchema = z.object({
@@ -349,8 +351,9 @@ export async function browserTabs(input: TabsCommand): Promise<TabsList | PageBo
   const parsed = TabsCommandSchema.parse(input);
   const info = await ensureDaemon();
   if (parsed.action === 'list') return TabsListSchema.parse(await authorized(info, '/tabs'));
-  const data = await authorized(info, '/tabs', { method: 'POST', body: parsed, timeoutMs: 70_000 });
-  if (parsed.action === 'close') return TabsListSchema.parse(data);
+  const timeoutMs = parsed.action === 'adopt' ? 90_000 : 70_000;
+  const data = await authorized(info, '/tabs', { method: 'POST', body: parsed, timeoutMs });
+  if (parsed.action === 'close' || parsed.action === 'user') return TabsListSchema.parse(data);
   return PageSchema.parse(data);
 }
 

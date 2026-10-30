@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { errorText, logDaemon } from '../config/paths.js';
 
 export type AccessDecision = 'once' | 'always' | 'deny';
+export type AdoptDecision = 'allow' | 'deny';
 
 const DIALOG_MS = 60_000;
 
@@ -80,7 +81,68 @@ end run
 const REASON_MAX_CHARS = 200;
 const REASON_MAX_LINES = 4;
 
+export const WINDOWS_ADOPT_SCRIPT = `
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$title = [Environment]::GetEnvironmentVariable('RW_ADOPT_TITLE')
+$url = [Environment]::GetEnvironmentVariable('RW_ADOPT_URL')
+$form = New-Object System.Windows.Forms.Form
+$form.Text = 'relaywright'
+$form.TopMost = $true
+$form.StartPosition = 'CenterScreen'
+$form.FormBorderStyle = 'FixedDialog'
+$form.MaximizeBox = $false
+$form.MinimizeBox = $false
+$form.ClientSize = New-Object System.Drawing.Size(460, 200)
+$label = New-Object System.Windows.Forms.Label
+$label.AutoSize = $false
+$label.Size = New-Object System.Drawing.Size(440, 110)
+$label.Location = New-Object System.Drawing.Point(10, 10)
+$label.Text = "$title\`r\`n$url"
+$allow = New-Object System.Windows.Forms.Button
+$allow.Text = '允许'
+$allow.DialogResult = [System.Windows.Forms.DialogResult]::OK
+$allow.Location = New-Object System.Drawing.Point(10, 150)
+$allow.Size = New-Object System.Drawing.Size(110, 32)
+$deny = New-Object System.Windows.Forms.Button
+$deny.Text = '拒绝'
+$deny.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+$deny.Location = New-Object System.Drawing.Point(130, 150)
+$deny.Size = New-Object System.Drawing.Size(110, 32)
+$form.Controls.Add($label)
+$form.Controls.Add($allow)
+$form.Controls.Add($deny)
+$form.CancelButton = $deny
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = 60000
+$timer.Add_Tick({ $form.Close() })
+$timer.Start()
+$result = $form.ShowDialog()
+$timer.Stop()
+if ($result -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output 'allow' } else { Write-Output 'deny' }
+`;
+
+export const MAC_ADOPT_SCRIPT = `
+on run argv
+  set tabTitle to item 1 of argv
+  set tabUrl to item 2 of argv
+  try
+    set choice to display dialog (tabTitle & return & tabUrl) buttons {"拒绝", "允许"} default button "拒绝" with title "relaywright" giving up after 60
+    if gave up of choice then return "deny"
+    if button returned of choice is "允许" then return "allow"
+    return "deny"
+  on error
+    return "deny"
+  end try
+end run
+`;
+
+const ADOPT_TITLE_CHARS = 120;
+const ADOPT_URL_CHARS = 300;
+
 let loggedIgnoredDecision = false;
+let loggedIgnoredAdopt = false;
 
 /** Test-only switches are inert unless this process was started by the test harness. */
 export function testOverridesEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -145,6 +207,58 @@ export function presetAccessDecision(): AccessDecision | null {
   return null;
 }
 
+/** One line, no control characters, capped so a tab title cannot be pushed off the dialog. */
+export function sanitizeAdoptLine(value: string, maxChars: number): string {
+  const stripped = value.replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, ' ').replace(/\s+/g, ' ').trim();
+  return [...stripped].slice(0, maxChars).join('');
+}
+
+export function adoptDialogBody(title: string, url: string): string {
+  const heading = sanitizeAdoptLine(title, ADOPT_TITLE_CHARS) || '(untitled)';
+  const link = sanitizeAdoptLine(url, ADOPT_URL_CHARS) || '(no url)';
+  return `${heading}\n${link}`;
+}
+
+export function linuxAdoptArgs(title: string, url: string): string[] {
+  return ['--question', '--no-markup', '--title=relaywright', '--text', adoptDialogBody(title, url), '--ok-label=允许', '--cancel-label=拒绝', '--timeout=60'];
+}
+
+/** The dialog never approves itself. Tests set RELAYWRIGHT_TEST_ADOPT_DECISION. */
+export function presetAdoptDecision(): AdoptDecision | null {
+  const value = process.env.RELAYWRIGHT_TEST_ADOPT_DECISION;
+  if (value === 'allow' || value === 'deny') {
+    if (testOverridesEnabled()) return value;
+    if (!loggedIgnoredAdopt) {
+      loggedIgnoredAdopt = true;
+      logDaemon('ignoring RELAYWRIGHT_TEST_ADOPT_DECISION outside tests');
+    }
+  }
+  if (process.env.RELAYWRIGHT_NOTIFY === '0') return 'deny';
+  return null;
+}
+
+export async function askAdopt(title: string, url: string): Promise<AdoptDecision> {
+  const preset = presetAdoptDecision();
+  if (preset) return preset;
+  const [heading, link] = adoptDialogBody(title, url).split('\n');
+  try {
+    if (process.platform === 'win32') return await askWindowsAdopt(heading ?? '(untitled)', link ?? '(no url)');
+    if (process.platform === 'darwin') return await askMacAdopt(heading ?? '(untitled)', link ?? '(no url)');
+    return await askLinuxAdopt(heading ?? '(untitled)', link ?? '(no url)');
+  } catch (err) {
+    logDaemon(`adopt dialog failed: ${errorText(err)}`);
+    return 'deny';
+  }
+}
+
+export function parseAdoptDecision(stdout: string): AdoptDecision {
+  const lines = stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line === 'allow' || line === 'deny');
+  return lines.at(-1) === 'allow' ? 'allow' : 'deny';
+}
+
 export async function askAccess(domain: string, reason: string): Promise<AccessDecision> {
   const preset = presetAccessDecision();
   if (preset) return preset;
@@ -169,6 +283,32 @@ function askWindows(domain: string, reason: string): Promise<AccessDecision> {
     env: { ...process.env, RW_ACCESS_DOMAIN: domain, RW_ACCESS_REASON: reason },
   });
   return readChild(child, DIALOG_MS + 5_000);
+}
+
+function askWindowsAdopt(title: string, url: string): Promise<AdoptDecision> {
+  const encoded = Buffer.from(WINDOWS_ADOPT_SCRIPT, 'utf16le').toString('base64');
+  const child = spawn('powershell.exe', ['-Sta', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'ignore'],
+    env: { ...process.env, RW_ADOPT_TITLE: title, RW_ADOPT_URL: url },
+  });
+  return readAdopt(child, DIALOG_MS + 5_000);
+}
+
+function askMacAdopt(title: string, url: string): Promise<AdoptDecision> {
+  const child = spawn('osascript', ['-e', MAC_ADOPT_SCRIPT, title, url], { stdio: ['ignore', 'pipe', 'ignore'] });
+  return readAdopt(child, DIALOG_MS + 5_000);
+}
+
+async function askLinuxAdopt(title: string, url: string): Promise<AdoptDecision> {
+  const child = spawn('zenity', linuxAdoptArgs(title, url), { stdio: ['ignore', 'pipe', 'ignore'] });
+  const outcome = await readChildRaw(child, DIALOG_MS + 5_000);
+  if (outcome.error) logDaemon('zenity is not installed; tab adopt denied');
+  return outcome.code === 0 ? 'allow' : 'deny';
+}
+
+function readAdopt(child: ReturnType<typeof spawn>, timeoutMs: number): Promise<AdoptDecision> {
+  return readChildRaw(child, timeoutMs).then((outcome) => parseAdoptDecision(outcome.stdout));
 }
 
 function askMac(domain: string, reason: string): Promise<AccessDecision> {

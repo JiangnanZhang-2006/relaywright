@@ -60,14 +60,15 @@ import { HandoffManager } from './handoff.js';
 import { bounded } from './timeout.js';
 import { IdentityStore } from './identity.js';
 import { domainNotAllowed, navigationDecision, normalizeAllowDomain, readAllowDomains, type BrowserModeName } from './allowlist.js';
-import { askAccess, testOverridesEnabled, type AccessDecision } from './access-dialog.js';
+import { askAccess, askAdopt, testOverridesEnabled, type AccessDecision } from './access-dialog.js';
+import { hostOfUrl, registrableDomain } from './domain.js';
 import {
   ATTACH_ALLOW_HINT,
   ATTACH_TIMEOUT_MS,
   ATTACH_TRANSFERS_MESSAGE,
   attachIsDeferred,
   connectWebSocket,
-  mapAttachError,
+  explainAttachFailure,
   resolveAttachRequest,
   resolveStoredAttach,
   type EndpointKind,
@@ -102,7 +103,7 @@ export interface BrowserControl {
   browserState(): BrowserStateView;
   status(): Promise<DaemonStatus>;
   navigate(url: string): Promise<PageBody>;
-  snapshot(options?: { mode?: 'full' | 'diff'; maxRows?: number }): Promise<PageBody>;
+  snapshot(options?: { mode?: 'full' | 'diff' | 'text'; maxRows?: number; maxChars?: number }): Promise<PageBody>;
   extract(input: ExtractInput): Promise<ExtractResult>;
   evalExpr(expr: string, args?: unknown[]): Promise<unknown>;
   act(input: ActInput): Promise<PageBody>;
@@ -132,7 +133,7 @@ export interface BrowserControl {
   privacyList(identity?: string): PrivacyList;
   privacyCheck(): PrivacyCheck;
   privacyMark(input: { ref?: string; value?: string; as: SelfKind }): Promise<{ token: string; as: SelfKind }>;
-  attach(input: { auto?: boolean; cdpUrl?: string; userDataDir?: string }): Promise<{ mode: 'daily' | 'cdp'; endpoint_kind: EndpointKind }>;
+  attach(input: { auto?: boolean; cdpUrl?: string; userDataDir?: string }): Promise<{ mode: 'daily' | 'cdp'; endpoint_kind: EndpointKind; user_tabs: number }>;
   detach(): Promise<{ mode: 'separate'; endpoint_kind: 'own' }>;
   requestAccess(domain: string, reason?: string): Promise<{ domain: string; decision: AccessDecision }>;
   listForeignTabs(): Promise<TabsList>;
@@ -259,9 +260,13 @@ export class BrowserSession implements BrowserControl {
     });
   }
 
-  async snapshot(options?: { mode?: 'full' | 'diff'; maxRows?: number }): Promise<PageBody> {
+  async snapshot(options?: { mode?: 'full' | 'diff' | 'text'; maxRows?: number; maxChars?: number }): Promise<PageBody> {
     this.assertModel();
     const controller = await this.prepareController();
+    if (options?.mode === 'text') {
+      const body = await controller.visibleText(options.maxChars);
+      return this.finishLive(body);
+    }
     const kind = this.tabset().peekSwitch();
     const mode = options?.mode ?? 'full';
     const body = await controller.snapshot(kind ? 'full' : mode, options?.maxRows, this.tabset().tabHint());
@@ -505,6 +510,11 @@ export class BrowserSession implements BrowserControl {
       if (input.index === undefined) throw new RelayError('bad_request', 'index is required for select');
       const controller = await tabs.select(input.index);
       return this.finishLive(await controller.snapshot('full', undefined, tabs.tabHint()));
+    }
+    if (input.action === 'user') return this.userTabs();
+    if (input.action === 'adopt') {
+      if (input.index === undefined) throw new RelayError('bad_request', 'index is required for adopt');
+      return this.requestAdopt(input.index);
     }
     if (input.action === 'new') {
       const controller = await tabs.openBlank();
@@ -784,6 +794,8 @@ export class BrowserSession implements BrowserControl {
   }
 
   async requestHandoff(reason: string, url?: string): Promise<HandoffView> {
+    const revealed = url === undefined ? undefined : this.privacy.reveal(url, 'handoff', this.pageUrl || url);
+    const target = revealed === undefined ? undefined : parseHandoffUrl(revealed);
     await this.ensureReady();
     // Tests play the human in a headless browser.
     if (this.connection !== 'attached' && this.launchedHeadless && !testOverridesEnabled()) {
@@ -792,8 +804,6 @@ export class BrowserSession implements BrowserControl {
         'The browser is headless, so nobody can see it to log in. Report that a login is needed, or restart the daemon with a visible browser.',
       );
     }
-    const revealed = url === undefined ? undefined : this.privacy.reveal(url, 'handoff', this.pageUrl || url);
-    const target = revealed === undefined ? undefined : parseHttpUrl(revealed);
     if (target) this.assertNavigation(target);
     return this.handoff.start(reason, target);
   }
@@ -1211,11 +1221,11 @@ export class BrowserSession implements BrowserControl {
     return this.phase.state === 'ready' && this.browser?.connected === true && this.tabSet !== null;
   }
 
-  async attach(input: { auto?: boolean; cdpUrl?: string; userDataDir?: string }): Promise<{ mode: 'daily' | 'cdp'; endpoint_kind: EndpointKind }> {
+  async attach(input: { auto?: boolean; cdpUrl?: string; userDataDir?: string }): Promise<{ mode: 'daily' | 'cdp'; endpoint_kind: EndpointKind; user_tabs: number }> {
     this.assertModel();
     if (this.closed) throw new Error('Browser session is closed');
     if (this.attempt) await this.attempt.catch(() => undefined);
-    let result: { mode: 'daily' | 'cdp'; endpoint_kind: EndpointKind } | undefined;
+    let result: { mode: 'daily' | 'cdp'; endpoint_kind: EndpointKind; user_tabs: number } | undefined;
     this.phase = { state: 'launching' };
     this.attempt = this.performAttach(input)
       .then((attached) => {
@@ -1276,6 +1286,38 @@ export class BrowserSession implements BrowserControl {
     await this.ensureReady();
     if (this.connection !== 'attached') throw new RelayError('bad_request', 'Adopt is only available while attached to an existing browser');
     const controller = await this.tabset().adopt(index);
+    return this.finishLive(await controller.snapshot('full', undefined, this.tabset().tabHint()));
+  }
+
+  private async userTabs(): Promise<TabsList> {
+    if (this.connection !== 'attached') {
+      throw new RelayError('bad_request', 'User tabs are only available while attached to an existing browser');
+    }
+    const listed = await this.listForeignTabs();
+    if (listed.tabs.length === 0) {
+      return { tabs: [], text: 'No user tabs. Tabs relaywright opened are listed with action=list.' };
+    }
+    return listed;
+  }
+
+  /** Model path: the person confirms the tab before it becomes visible. The CLI adopt skips this. */
+  private async requestAdopt(index: number): Promise<PageBody> {
+    if (this.connection !== 'attached') throw new RelayError('bad_request', 'Adopt is only available while attached to an existing browser');
+    const page = await this.tabset().foreignPage(index);
+    let title = '';
+    try {
+      title = await bounded(page.title(), 1_500, 'tab title');
+    } catch {
+      title = '';
+    }
+    const url = page.isClosed() ? '' : page.url();
+    const decision = await askAdopt(title, url);
+    if (decision !== 'allow') throw new RelayError('bad_request', 'The person refused access to that tab.');
+    const domain = grantDomain(url);
+    if (domain) this.sessionGrants.add(domain);
+    const controller = await this.tabset().adopt(index, page);
+    recordAudit('tab_adopted', { domain: domain ?? '' });
+    await flushAudit();
     return this.finishLive(await controller.snapshot('full', undefined, this.tabset().tabHint()));
   }
 
@@ -1379,8 +1421,9 @@ export class BrowserSession implements BrowserControl {
 
   private async launchConfiguredAttach(config: ReturnType<typeof readGlobalConfig>): Promise<void> {
     this.phase = { state: 'launching' };
+    let target: ResolvedAttach | undefined;
     try {
-      const target = await resolveStoredAttach(config);
+      target = await resolveStoredAttach(config);
       notify('relaywright', ATTACH_ALLOW_HINT);
       const browser = await connectWebSocket(target.endpoint, ATTACH_TIMEOUT_MS);
       if (this.closed) {
@@ -1388,18 +1431,20 @@ export class BrowserSession implements BrowserControl {
         return;
       }
       await this.finishAttached(browser, target);
+      const stored = config.browser?.cdp_url;
+      if (target.inspectFallback || (stored && target.cdpUrl && target.cdpUrl !== stored)) this.rememberAttach(target);
       logDaemon(`attached ${target.endpointKind}`);
     } catch (err) {
       if (this.browser) await this.dropBrowser('disconnect').catch(() => undefined);
       if (this.closed) return;
-      const mapped = mapAttachError(err);
+      const mapped = explainAttachFailure(target ?? { mode: 'daily', endpoint: '', endpointKind: 'devtools-file' }, err);
       logDaemon(`attach failed: ${mapped.message}`);
       this.startupError = mapped;
       this.phase = { state: 'error', message: mapped.message };
     }
   }
 
-  private async performAttach(input: { auto?: boolean; cdpUrl?: string; userDataDir?: string }): Promise<{ mode: 'daily' | 'cdp'; endpoint_kind: EndpointKind }> {
+  private async performAttach(input: { auto?: boolean; cdpUrl?: string; userDataDir?: string }): Promise<{ mode: 'daily' | 'cdp'; endpoint_kind: EndpointKind; user_tabs: number }> {
     const target = await resolveAttachRequest(input);
     notify('relaywright', ATTACH_ALLOW_HINT);
     const headlessOwn = this.connection !== 'attached' && (this.launchedHeadless || process.env.RELAYWRIGHT_HEADLESS === '1');
@@ -1408,7 +1453,7 @@ export class BrowserSession implements BrowserControl {
     try {
       browser = await connectWebSocket(target.endpoint, ATTACH_TIMEOUT_MS);
     } catch (err) {
-      const mapped = mapAttachError(err);
+      const mapped = explainAttachFailure(target, err);
       this.phase = { state: 'error', message: mapped.message };
       throw mapped;
     }
@@ -1421,7 +1466,7 @@ export class BrowserSession implements BrowserControl {
     } catch (err) {
       if (this.browser === browser) await this.dropBrowser('disconnect').catch(() => undefined);
       else await browser.disconnect().catch(() => undefined);
-      const mapped = mapAttachError(err);
+      const mapped = explainAttachFailure(target, err);
       this.phase = { state: 'error', message: mapped.message };
       throw mapped;
     }
@@ -1429,7 +1474,13 @@ export class BrowserSession implements BrowserControl {
     recordAudit('attach', { mode: target.mode, endpoint_kind: target.endpointKind });
     await flushAudit();
     logDaemon(`attached ${target.endpointKind}`);
-    return { mode: target.mode, endpoint_kind: target.endpointKind };
+    let userTabs = 0;
+    try {
+      userTabs = (await this.tabset().listForeign()).length;
+    } catch (err) {
+      logDaemon(`user tab count failed: ${errorText(err)}`);
+    }
+    return { mode: target.mode, endpoint_kind: target.endpointKind, user_tabs: userTabs };
   }
 
   private rememberAttach(target: ResolvedAttach): void {
@@ -1644,6 +1695,29 @@ function missingSelfResult(name: string, input: RunSkillInput, message: string):
     exit_code: 30,
     out_dir: input.out_dir ?? runOutputDir(name),
   };
+}
+
+function grantDomain(url: string): string | null {
+  const host = hostOfUrl(url);
+  if (!host) return null;
+  const domain = registrableDomain(host);
+  return domain || null;
+}
+
+function parseHandoffUrl(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new RelayError('bad_request', `Invalid URL: ${value}`);
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new RelayError(
+      'bad_request',
+      `request_human only opens an http(s) page so a person can log in. It cannot change Chrome settings. Got ${url.protocol}`,
+    );
+  }
+  return url.toString();
 }
 
 function parseHttpUrl(value: string): string {

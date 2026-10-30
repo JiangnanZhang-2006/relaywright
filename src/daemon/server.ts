@@ -165,9 +165,10 @@ export function createApp(options: AppOptions): Hono {
       const parsed = SnapshotQuery.safeParse({
         mode: emptyAsUndefined(c.req.query('mode')) ?? 'full',
         maxRows: emptyAsUndefined(c.req.query('maxRows')) === undefined ? undefined : Number(c.req.query('maxRows')),
+        maxChars: emptyAsUndefined(c.req.query('maxChars')) === undefined ? undefined : Number(c.req.query('maxChars')),
       });
       if (!parsed.success) return jsonError(c, 400, 'bad_request', issuesText(parsed.error));
-      return show(c, await options.session.snapshot({ mode: parsed.data.mode, maxRows: parsed.data.maxRows }));
+      return show(c, await options.session.snapshot({ mode: parsed.data.mode, maxRows: parsed.data.maxRows, maxChars: parsed.data.maxChars }));
     } catch (err) {
       return fail(c, err);
     }

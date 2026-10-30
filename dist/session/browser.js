@@ -21,8 +21,9 @@ import { HandoffManager } from './handoff.js';
 import { bounded } from './timeout.js';
 import { IdentityStore } from './identity.js';
 import { domainNotAllowed, navigationDecision, normalizeAllowDomain, readAllowDomains } from './allowlist.js';
-import { askAccess, testOverridesEnabled } from './access-dialog.js';
-import { ATTACH_ALLOW_HINT, ATTACH_TIMEOUT_MS, ATTACH_TRANSFERS_MESSAGE, attachIsDeferred, connectWebSocket, mapAttachError, resolveAttachRequest, resolveStoredAttach, } from './connect.js';
+import { askAccess, askAdopt, testOverridesEnabled } from './access-dialog.js';
+import { hostOfUrl, registrableDomain } from './domain.js';
+import { ATTACH_ALLOW_HINT, ATTACH_TIMEOUT_MS, ATTACH_TRANSFERS_MESSAGE, attachIsDeferred, connectWebSocket, explainAttachFailure, resolveAttachRequest, resolveStoredAttach, } from './connect.js';
 import { armNavigationGate } from './nav-gate.js';
 import { adoptChrome, HEADLESS_VIEWPORT, launchChrome } from './launch.js';
 import { HANDOFF_TIMEOUT_MS } from './login.js';
@@ -141,6 +142,10 @@ export class BrowserSession {
     async snapshot(options) {
         this.assertModel();
         const controller = await this.prepareController();
+        if (options?.mode === 'text') {
+            const body = await controller.visibleText(options.maxChars);
+            return this.finishLive(body);
+        }
         const kind = this.tabset().peekSwitch();
         const mode = options?.mode ?? 'full';
         const body = await controller.snapshot(kind ? 'full' : mode, options?.maxRows, this.tabset().tabHint());
@@ -393,6 +398,13 @@ export class BrowserSession {
                 throw new RelayError('bad_request', 'index is required for select');
             const controller = await tabs.select(input.index);
             return this.finishLive(await controller.snapshot('full', undefined, tabs.tabHint()));
+        }
+        if (input.action === 'user')
+            return this.userTabs();
+        if (input.action === 'adopt') {
+            if (input.index === undefined)
+                throw new RelayError('bad_request', 'index is required for adopt');
+            return this.requestAdopt(input.index);
         }
         if (input.action === 'new') {
             const controller = await tabs.openBlank();
@@ -651,13 +663,13 @@ export class BrowserSession {
         };
     }
     async requestHandoff(reason, url) {
+        const revealed = url === undefined ? undefined : this.privacy.reveal(url, 'handoff', this.pageUrl || url);
+        const target = revealed === undefined ? undefined : parseHandoffUrl(revealed);
         await this.ensureReady();
         // Tests play the human in a headless browser.
         if (this.connection !== 'attached' && this.launchedHeadless && !testOverridesEnabled()) {
             throw new RelayError('human_required', 'The browser is headless, so nobody can see it to log in. Report that a login is needed, or restart the daemon with a visible browser.');
         }
-        const revealed = url === undefined ? undefined : this.privacy.reveal(url, 'handoff', this.pageUrl || url);
-        const target = revealed === undefined ? undefined : parseHttpUrl(revealed);
         if (target)
             this.assertNavigation(target);
         return this.handoff.start(reason, target);
@@ -1152,6 +1164,40 @@ export class BrowserSession {
         const controller = await this.tabset().adopt(index);
         return this.finishLive(await controller.snapshot('full', undefined, this.tabset().tabHint()));
     }
+    async userTabs() {
+        if (this.connection !== 'attached') {
+            throw new RelayError('bad_request', 'User tabs are only available while attached to an existing browser');
+        }
+        const listed = await this.listForeignTabs();
+        if (listed.tabs.length === 0) {
+            return { tabs: [], text: 'No user tabs. Tabs relaywright opened are listed with action=list.' };
+        }
+        return listed;
+    }
+    /** Model path: the person confirms the tab before it becomes visible. The CLI adopt skips this. */
+    async requestAdopt(index) {
+        if (this.connection !== 'attached')
+            throw new RelayError('bad_request', 'Adopt is only available while attached to an existing browser');
+        const page = await this.tabset().foreignPage(index);
+        let title = '';
+        try {
+            title = await bounded(page.title(), 1_500, 'tab title');
+        }
+        catch {
+            title = '';
+        }
+        const url = page.isClosed() ? '' : page.url();
+        const decision = await askAdopt(title, url);
+        if (decision !== 'allow')
+            throw new RelayError('bad_request', 'The person refused access to that tab.');
+        const domain = grantDomain(url);
+        if (domain)
+            this.sessionGrants.add(domain);
+        const controller = await this.tabset().adopt(index, page);
+        recordAudit('tab_adopted', { domain: domain ?? '' });
+        await flushAudit();
+        return this.finishLive(await controller.snapshot('full', undefined, this.tabset().tabHint()));
+    }
     readyWaitMs() {
         const mode = readGlobalConfig().browser?.mode;
         if (mode === 'daily' || mode === 'cdp')
@@ -1255,8 +1301,9 @@ export class BrowserSession {
     }
     async launchConfiguredAttach(config) {
         this.phase = { state: 'launching' };
+        let target;
         try {
-            const target = await resolveStoredAttach(config);
+            target = await resolveStoredAttach(config);
             notify('relaywright', ATTACH_ALLOW_HINT);
             const browser = await connectWebSocket(target.endpoint, ATTACH_TIMEOUT_MS);
             if (this.closed) {
@@ -1264,6 +1311,9 @@ export class BrowserSession {
                 return;
             }
             await this.finishAttached(browser, target);
+            const stored = config.browser?.cdp_url;
+            if (target.inspectFallback || (stored && target.cdpUrl && target.cdpUrl !== stored))
+                this.rememberAttach(target);
             logDaemon(`attached ${target.endpointKind}`);
         }
         catch (err) {
@@ -1271,7 +1321,7 @@ export class BrowserSession {
                 await this.dropBrowser('disconnect').catch(() => undefined);
             if (this.closed)
                 return;
-            const mapped = mapAttachError(err);
+            const mapped = explainAttachFailure(target ?? { mode: 'daily', endpoint: '', endpointKind: 'devtools-file' }, err);
             logDaemon(`attach failed: ${mapped.message}`);
             this.startupError = mapped;
             this.phase = { state: 'error', message: mapped.message };
@@ -1287,7 +1337,7 @@ export class BrowserSession {
             browser = await connectWebSocket(target.endpoint, ATTACH_TIMEOUT_MS);
         }
         catch (err) {
-            const mapped = mapAttachError(err);
+            const mapped = explainAttachFailure(target, err);
             this.phase = { state: 'error', message: mapped.message };
             throw mapped;
         }
@@ -1303,7 +1353,7 @@ export class BrowserSession {
                 await this.dropBrowser('disconnect').catch(() => undefined);
             else
                 await browser.disconnect().catch(() => undefined);
-            const mapped = mapAttachError(err);
+            const mapped = explainAttachFailure(target, err);
             this.phase = { state: 'error', message: mapped.message };
             throw mapped;
         }
@@ -1311,7 +1361,14 @@ export class BrowserSession {
         recordAudit('attach', { mode: target.mode, endpoint_kind: target.endpointKind });
         await flushAudit();
         logDaemon(`attached ${target.endpointKind}`);
-        return { mode: target.mode, endpoint_kind: target.endpointKind };
+        let userTabs = 0;
+        try {
+            userTabs = (await this.tabset().listForeign()).length;
+        }
+        catch (err) {
+            logDaemon(`user tab count failed: ${errorText(err)}`);
+        }
+        return { mode: target.mode, endpoint_kind: target.endpointKind, user_tabs: userTabs };
     }
     rememberAttach(target) {
         updateGlobalConfig((config) => {
@@ -1528,6 +1585,26 @@ function missingSelfResult(name, input, message) {
         exit_code: 30,
         out_dir: input.out_dir ?? runOutputDir(name),
     };
+}
+function grantDomain(url) {
+    const host = hostOfUrl(url);
+    if (!host)
+        return null;
+    const domain = registrableDomain(host);
+    return domain || null;
+}
+function parseHandoffUrl(value) {
+    let url;
+    try {
+        url = new URL(value);
+    }
+    catch {
+        throw new RelayError('bad_request', `Invalid URL: ${value}`);
+    }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+        throw new RelayError('bad_request', `request_human only opens an http(s) page so a person can log in. It cannot change Chrome settings. Got ${url.protocol}`);
+    }
+    return url.toString();
 }
 function parseHttpUrl(value) {
     let url;

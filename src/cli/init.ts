@@ -57,7 +57,8 @@ const INSPECT_URL = 'chrome://inspect/#remote-debugging';
 const ATTACH_GUIDE =
   'Attach: open chrome://inspect/#remote-debugging in your daily Chrome, allow remote debugging, then run: relaywright daemon attach --auto';
 
-const TAB_SCOPE = 'Tab scope: relaywright only sees tabs it opens. Other tabs stay hidden unless you run: relaywright tabs adopt --index <n>';
+const TAB_SCOPE =
+  'Tab scope: relaywright only sees tabs it opens. Other tabs stay hidden until you adopt one: relaywright tabs adopt --index <n>, or the model calls browser_tabs action=user and then action=adopt (that asks you to confirm).';
 
 function terminalAppName(): string {
   const hints = [process.env.VSCODE_GIT_ASKPASS_MAIN, process.env.VSCODE_GIT_ASKPASS_NODE, process.env.PATH].join('\n');

@@ -97,6 +97,41 @@ describe('skill yaml', () => {
     expect(again.params.year).toEqual({ type: 'string', example: '2025-2026' });
     expect(again.steps[3]?.expect?.any[0]?.message).toBe('{{year}} 第{{term}}学期尚未排课');
   });
+
+  it('refuses a trace whose selected range has no action', () => {
+    const steps = [
+      traceStep({ n: 1, action: 'goto', value: PAGE, urlBefore: 'about:blank', urlAfter: PAGE }),
+      traceStep({
+        n: 2,
+        action: 'click',
+        target: target({ role: 'link', name: 'guide', tag: 'a' }),
+      }),
+      traceStep({ n: 3, action: 'goto', value: `${PAGE}guide`, urlBefore: PAGE, urlAfter: `${PAGE}guide` }),
+    ];
+    const checks = [
+      {
+        after_step: 3,
+        any: [
+          { outcome: 'ok' as const, when: { text_present: '只需 3 步' } },
+          { outcome: 'empty' as const, when: { text_absent: '只需 3 步' } },
+        ],
+      },
+    ];
+    let thrown: unknown;
+    try {
+      buildSkill(steps, { name: 'read-guide', description: 'read the guide', checks });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toMatchObject({ code: 'bad_params' });
+    const message = thrown instanceof Error ? thrown.message : '';
+    expect(message).toContain('No action steps to save');
+    expect(message).toContain('browser_eval, browser_extract, and browser_snapshot are not recorded');
+    expect(message).toContain('step 3');
+    expect(message).toContain('from_step');
+    const kept = buildSkill(steps, { name: 'read-guide', description: 'read the guide', from_step: 2, to_step: 2 });
+    expect(kept.skill.steps.some((step) => step.click)).toBe(true);
+  });
 });
 
 describe('skill save', () => {

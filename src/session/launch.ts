@@ -59,20 +59,46 @@ export function chromeLaunchArgs(input: { userDataDir: string; headless: boolean
   return args;
 }
 
-export function readDevToolsEndpoint(profileDir: string): { port: number; browserWSEndpoint: string } | null {
+export interface DevToolsEndpoint {
+  port: number;
+  browserWSEndpoint: string;
+}
+
+/** `missing` is an absent or unreadable-as-a-port file. `denied` is EPERM or EACCES. */
+export type DevToolsRead =
+  | ({ kind: 'ok' } & DevToolsEndpoint)
+  | { kind: 'missing' }
+  | { kind: 'denied'; code: string };
+
+export function readDevToolsEndpoint(profileDir: string): DevToolsRead {
+  let text: string;
   try {
-    const text = readFileSync(join(profileDir, 'DevToolsActivePort'), 'utf8');
-    const lines = text
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
-    const port = Number(lines[0]);
-    const path = lines[1] ?? '';
-    if (!Number.isInteger(port) || port < 1 || port > 65535 || !path.startsWith('/')) return null;
-    return { port, browserWSEndpoint: `ws://127.0.0.1:${port}${path}` };
-  } catch {
-    return null;
+    text = readFileSync(join(profileDir, 'DevToolsActivePort'), 'utf8');
+  } catch (err) {
+    const code = errnoCode(err);
+    if (code === 'EPERM' || code === 'EACCES') return { kind: 'denied', code };
+    return { kind: 'missing' };
   }
+  const parsed = parseDevToolsActivePort(text);
+  if (!parsed) return { kind: 'missing' };
+  return { kind: 'ok', ...parsed };
+}
+
+export function parseDevToolsActivePort(text: string): DevToolsEndpoint | null {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const port = Number(lines[0]);
+  const path = lines[1] ?? '';
+  if (!Number.isInteger(port) || port < 1 || port > 65535 || !path.startsWith('/')) return null;
+  return { port, browserWSEndpoint: `ws://127.0.0.1:${port}${path}` };
+}
+
+function errnoCode(err: unknown): string {
+  if (!err || typeof err !== 'object' || !('code' in err)) return '';
+  const code = (err as { code?: unknown }).code;
+  return typeof code === 'string' ? code : '';
 }
 
 export async function probeBrowserWebsocket(port: number, timeoutMs: number): Promise<string | null> {
@@ -93,7 +119,7 @@ export async function adoptChrome(
   viewport: { width: number; height: number } | null,
 ): Promise<Browser | null> {
   const existing = readDevToolsEndpoint(profileDir);
-  if (!existing) return null;
+  if (existing.kind !== 'ok') return null;
   const endpoint = await probeBrowserWebsocket(existing.port, 1_000);
   if (!endpoint) return null;
   return puppeteer.connect({ browserWSEndpoint: endpoint, defaultViewport: viewport });
@@ -123,7 +149,7 @@ async function waitForEndpoint(profileDir: string, timeoutMs: number): Promise<s
   let last = 'Chrome did not open a DevTools port';
   while (Date.now() < deadline) {
     const existing = readDevToolsEndpoint(profileDir);
-    if (existing) {
+    if (existing.kind === 'ok') {
       const endpoint = await probeBrowserWebsocket(existing.port, 1_000);
       if (endpoint) return endpoint;
       last = `DevTools port ${existing.port} did not answer`;

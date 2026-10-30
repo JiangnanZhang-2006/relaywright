@@ -241,7 +241,7 @@ function launchTestChrome(profile: string, port: number, url: string): Promise<{
       chrome.removeAllListeners('exit');
       writeFileSync(join(profile, 'DevToolsActivePort'), `${actual}\n${path}\n`, 'utf8');
       const recorded = readDevToolsEndpoint(profile);
-      if (!recorded || recorded.port !== actual) {
+      if (recorded.kind !== 'ok' || recorded.port !== actual) {
         reject(new Error('DevToolsActivePort could not be recorded'));
         return;
       }

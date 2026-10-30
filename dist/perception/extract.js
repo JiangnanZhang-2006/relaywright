@@ -2,6 +2,19 @@ import { RelayError } from '../errors.js';
 export const EXTRACT_DEFAULT_LIMIT = 200;
 export const EXTRACT_MAX_LIMIT = 2000;
 export const EXTRACT_REDACTED = '‹redacted›';
+export const EXTRACT_NULL_WARNING = 'Every field was null. Field selectors are relative to each row; use :scope to read the row itself.';
+/** A selector that matches nothing looks like an empty page. Point at :scope when every field is null. */
+export function withExtractWarning(result) {
+    if (result.rows.length === 0 || result.warning)
+        return result;
+    const names = [...new Set(result.rows.flatMap((row) => Object.keys(row).filter((name) => name !== 'frame')))];
+    if (names.length === 0)
+        return result;
+    const allNull = result.rows.every((row) => names.every((name) => row[name] === null));
+    if (!allNull)
+        return result;
+    return { ...result, warning: EXTRACT_NULL_WARNING };
+}
 export function normalizeExtract(input) {
     const root = input.root_selector.trim();
     if (!root)
