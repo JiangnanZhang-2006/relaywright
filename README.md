@@ -1,5 +1,7 @@
 # relaywright
 
+[![M8ven Score](https://m8ven.ai/badge/mcp/jiangnanzhang-2006-relaywright-1ahr1r?v=558a900da678a487fe9e494100639542)](https://m8ven.ai/mcp/jiangnanzhang-2006-relaywright-1ahr1r?s=readme)
+
 [English](README.en.md)
 
 **AI 第一次做浏览器任务时踩过的坑，沉淀成一份技能文件；之后同类任务直接调用，不再让模型从头看页面、从头试错。**
