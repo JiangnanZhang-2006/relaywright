@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { mcpClientConfig } from '../src/dsh/plugin.js';
 
@@ -26,13 +26,13 @@ describe('dsh bundle', () => {
   });
 
   it('points the MCP bridge at this package', () => {
-    const here = 'file:///pkg/dist/dsh/plugin.js';
+    const here = pathToFileURL(join(root, 'dist', 'dsh', 'plugin.js')).href;
     const config = mcpClientConfig({ DEEPSEEK_API_KEY: 'present' }, here);
     expect(config).toEqual({
       transport: 'stdio',
       serverName: 'relaywright',
       command: process.execPath,
-      args: ['/pkg/dist/cli/index.js', 'mcp'],
+      args: [join(root, 'dist', 'cli', 'index.js'), 'mcp'],
       toolCallTimeoutMs: 900_000,
       env: { DEEPSEEK_API_KEY: 'present' },
     });
