@@ -239,6 +239,7 @@ function fakePage(): { page: ReplayPage; visits: string[] } {
       throw new Error('eval was not expected');
     },
     queryCss: async () => [],
+    rowTexts: async () => [],
     hasVisiblePassword: async () => false,
     isPasswordBackend: async () => false,
     performBackend: async () => {

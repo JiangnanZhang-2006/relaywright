@@ -65,6 +65,10 @@ class FakePage implements ReplayPage {
     return [];
   }
 
+  async rowTexts(): Promise<string[]> {
+    return [];
+  }
+
   async hasVisiblePassword(): Promise<boolean> {
     return false;
   }

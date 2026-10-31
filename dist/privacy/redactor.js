@@ -363,6 +363,7 @@ export class Redactor {
             }
         }
         const frame = target.frame ? { name: this.rewrite(target.frame.name, ctx), url: this.rewrite(target.frame.url, ctx) } : undefined;
+        const within = target.within === undefined ? undefined : this.rewrite(target.within, ctx);
         if (!name.trim() && !(text && text.trim()) && !css) {
             throw new RelayError('bad_params', `Step ${stepId} cannot be saved because personal data is part of its only locator. Choose a role and name that do not include that data.`);
         }
@@ -373,6 +374,9 @@ export class Redactor {
             ...(css ? { css } : {}),
             ...(text !== undefined ? { text } : {}),
             ...(frame ? { frame } : {}),
+            ...(within !== undefined ? { within } : {}),
+            ...(target.nth !== undefined ? { nth: target.nth } : {}),
+            ...(target.of !== undefined ? { of: target.of } : {}),
         };
     }
     personal(text, ctx) {
@@ -728,6 +732,7 @@ function mapTarget(target, render) {
         ...(target.css ? { css: render(target.css) } : {}),
         ...(target.text ? { text: render(target.text) } : {}),
         ...(target.frame ? { frame: { name: render(target.frame.name), url: render(target.frame.url) } } : {}),
+        ...(target.within ? { within: render(target.within) } : {}),
     };
 }
 function wantKind(pending) {

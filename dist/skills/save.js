@@ -1,8 +1,9 @@
 import { RelayError } from '../errors.js';
 import { issuesText } from '../protocol.js';
 import { fileExtension } from '../session/downloads.js';
+import { rowScoped } from './locate.js';
 import { SkillSchema } from './schema.js';
-import { templatize } from './template.js';
+import { templatize, tokenIndex } from './template.js';
 export function makeStepId(index, action, targetName) {
     const slug = slugTarget(targetName ?? '');
     return slug ? `s${index}-${action}-${slug}` : `s${index}-${action}`;
@@ -99,6 +100,10 @@ export function buildSkill(steps, input) {
                 warnings.push(`${id} css is not unique (${draft.css.value})`);
             warnings.push(`${id} relies only on name`);
         }
+        if (draft.row?.nth !== undefined) {
+            const which = draft.row.nth.includes('{{') ? `position ${draft.row.nth}` : `position ${draft.row.nth} (fixed)`;
+            warnings.push(`${id} picks ${which} of ${draft.row.of} "${draft.row.name}" by order; a reordered list clicks another row, a different count stops the replay`);
+        }
         if (draft.drifted)
             warnings.push(`${id} runs after a navigation away from the start URL`);
         if (draft.tabUrl)
@@ -173,8 +178,6 @@ function expectDraft(check) {
     };
 }
 function actionDraft(step, apply, drifted, examples, used) {
-    const target = step.target ? toSkillTarget(step.target) : undefined;
-    const css = step.target ? { value: step.target.css, unique: step.target.cssUnique } : undefined;
     const hits = [];
     const text = (value, place, field) => {
         const result = apply(value, place);
@@ -182,8 +185,11 @@ function actionDraft(step, apply, drifted, examples, used) {
             hits.push({ name: miss.name, field, part: miss.part });
         return result.text;
     };
-    const base = { targetName: target?.name, css, drifted, tabUrl: step.tabUrl, unsubstituted: hits };
-    hits.push(...locatorMisses(step.target, examples));
+    const target = step.target ? scopeTarget(step.target, examples, (value, place) => text(value, place, 'target row')) : undefined;
+    const scoped = target ? rowScoped(target) : false;
+    const css = step.target && !scoped ? { value: step.target.css, unique: step.target.cssUnique } : undefined;
+    const base = { targetName: target?.name, css, drifted, tabUrl: step.tabUrl, unsubstituted: hits, row: scoped ? target : undefined };
+    hits.push(...locatorMisses(step.target, examples, !scoped));
     switch (step.action) {
         case 'goto':
             return { action: 'goto', ...base, step: { goto: { url: text(step.value || step.urlAfter, 'url', 'url') } } };
@@ -289,11 +295,11 @@ function saveAsForTrace(raw, apply, examples, used) {
         used.add(param.name);
     return { saveAs: rewritten, rewritten, missed: templated.missed };
 }
-function locatorMisses(target, examples) {
+function locatorMisses(target, examples, keepsCss) {
     if (!target)
         return [];
     const fields = [
-        ['target css', target.css],
+        ['target css', keepsCss ? target.css : undefined],
         ['target id', target.id],
         ['target name', target.name],
         ['target label', target.label],
@@ -335,5 +341,42 @@ export function toSkillTarget(target) {
         ...(target.text ? { text: target.text } : {}),
         ...(target.frame ? { frame: { name: target.frame.name, url: target.frame.url } } : {}),
     };
+}
+const ANCHOR_LEFT_MAX = 20;
+/**
+ * A control that repeats on the page (one per row) is scoped to a row so a matrix can loop over rows.
+ * In order: a param shown in the row becomes `within`; a param equal to the position becomes `nth`;
+ * otherwise a control with no unique CSS is pinned to its recorded position.
+ * A scoped target drops its CSS, which points at the recorded row.
+ */
+export function scopeTarget(described, examples, apply) {
+    const base = toSkillTarget(described);
+    if (!described.nth || !described.peers || described.peers < 2)
+        return base;
+    const { css: _pinned, ...unpinned } = base;
+    const row = described.row ?? '';
+    const ordered = [...examples].sort((left, right) => [...right.example].length - [...left.example].length);
+    for (const param of ordered) {
+        const at = tokenIndex(row, param.example);
+        if (at < 0)
+            continue;
+        const within = apply(row.slice(anchorStart(row, at), at + param.example.length), 'anchor');
+        return { ...unpinned, within };
+    }
+    const nth = apply(String(described.nth), 'value');
+    if (nth.includes('{{'))
+        return { ...unpinned, nth, of: described.peers };
+    if (base.css)
+        return base;
+    return { ...unpinned, nth, of: described.peers };
+}
+/** Start of the anchor: back to whitespace, at most ANCHOR_LEFT_MAX characters, never inside a word. */
+function anchorStart(row, at) {
+    let start = at;
+    while (start > 0 && at - start < ANCHOR_LEFT_MAX && !/\s/.test(row[start - 1] ?? ''))
+        start -= 1;
+    while (start > 0 && start < at && /[A-Za-z0-9]/.test(row[start - 1] ?? '') && /[A-Za-z0-9]/.test(row[start] ?? ''))
+        start += 1;
+    return start;
 }
 //# sourceMappingURL=save.js.map

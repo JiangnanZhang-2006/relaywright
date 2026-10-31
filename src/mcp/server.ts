@@ -206,7 +206,7 @@ export function createRelayMcpServer(): { server: McpServer; toolNames: string[]
     'skill_save',
     {
       description:
-        'Save the current exploration trace as a versioned skill. Tool results show the trace step number of each action. Params map names to example literals from the trace. A check such as { after_step: 3, any: [{ outcome: "ok", when: { text_absent: "无数据" } }, { outcome: "empty", when: { text_present: "无数据" } }] } ends a replay as empty when the page says there is no data.',
+        'Save the current exploration trace as a versioned skill. Tool results show the trace step number of each action. Params map names to example literals from the trace. When a clicked control repeats once per row (the click result says "is 4 of 50"), a param whose example is shown in that row, or equals the position, scopes the step to that row, so skill_run with a matrix of rows clicks each one. A check such as { after_step: 3, any: [{ outcome: "ok", when: { text_absent: "无数据" } }, { outcome: "empty", when: { text_present: "无数据" } }] } ends a replay as empty when the page says there is no data.',
       inputSchema: {
         name: z.string().describe('Skill name: lowercase letters, digits, and hyphens.'),
         description: z.string().describe('What the skill does.'),

@@ -1,0 +1,11 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>云实验</title>
+<main id="lab"></main>
+<script>
+  const id = new URLSearchParams(location.search).get('id') || '';
+  const maintenance = ['3', '5'];
+  document.getElementById('lab').innerHTML = maintenance.includes(id)
+    ? '<h1>KooLabs云实验</h1><p>该实验维护中</p>'
+    : '<h1>实验编号' + id + '号</h1><button type="button">开始实验</button>';
+</script>

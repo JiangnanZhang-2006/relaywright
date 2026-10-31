@@ -7,7 +7,7 @@ import type { ReplayDownload, ReplayPage } from '../src/session/page.js';
 import { valueForTrace } from '../src/recorder/redact.js';
 import { observedLines, TraceLog } from '../src/recorder/trace.js';
 import type { TargetDescriptor, TraceStep } from '../src/recorder/types.js';
-import { chooseLocator } from '../src/skills/locate.js';
+import { chooseInRow, chooseLocator, rowPeers } from '../src/skills/locate.js';
 import { expandMatrix, summaryExitCode, bindSkill, runSkill } from '../src/skills/run.js';
 import { buildSkill, makeStepId, slugTarget } from '../src/skills/save.js';
 import { parseSkill, stringifySkill, type Skill } from '../src/skills/schema.js';
@@ -493,6 +493,88 @@ describe('locator chain', () => {
   });
 });
 
+describe('repeated controls', () => {
+  const ROWS = ['赛题3：openEuler文件 未开始 去做题', '赛题4：5分钟极速建站体验 未开始 去做题', '赛题40：云搜索 未开始 去做题'];
+  const peers = ROWS.map((_row, index) => item({ backend: 30 + index, role: 'link', name: '去做题' }));
+
+  function rowClick(row: string, nth: number, extra: Partial<TargetDescriptor> = {}): TraceStep[] {
+    const list = `${PAGE}problems`;
+    return [
+      traceStep({ n: 1, action: 'goto', value: list, urlBefore: 'about:blank', urlAfter: list }),
+      traceStep({
+        n: 2,
+        action: 'click',
+        urlBefore: list,
+        urlAfter: list,
+        target: target({ role: 'link', name: '去做题', tag: 'a', css: `div.row:nth-of-type(${nth}) > a`, cssUnique: true, text: '去做题', nth, peers: 50, row, ...extra }),
+      }),
+    ];
+  }
+
+  it('picks the row whose text holds the anchor as a whole token', () => {
+    expect(chooseInRow(peers, { role: 'link', name: '去做题', within: '赛题4' }, ROWS)).toEqual({ locator: 'row', backend: 31 });
+    expect(chooseInRow(peers, { role: 'link', name: '去做题', within: '赛题40' }, ROWS)).toEqual({ locator: 'row', backend: 32 });
+    expect(chooseInRow(peers, { role: 'link', name: '去做题', within: '赛题5' }, ROWS)).toBe('target_not_found');
+    expect(chooseInRow(peers, { role: 'link', name: '去做题', within: '去做题' }, ROWS)).toBe('target_not_found');
+  });
+
+  it('picks by position and stops when the count changed', () => {
+    expect(chooseInRow(peers, { role: 'link', name: '去做题', nth: '2', of: 3 }, [])).toEqual({ locator: 'nth', backend: 31 });
+    expect(chooseInRow(peers, { role: 'link', name: '去做题', nth: '2', of: 50 }, [])).toBe('nth_shifted');
+    expect(chooseInRow(peers, { role: 'link', name: '去做题', nth: '4' }, [])).toBe('target_not_found');
+    expect(rowPeers([...peers, item({ backend: 99, role: 'button', name: '去做题' })], { role: 'link', name: '去做题' })).toHaveLength(3);
+  });
+
+  it('saves a param shown in the row as a row anchor and drops the pinned css', () => {
+    const built = buildSkill(rowClick('赛题4：5分钟极速建站体验 在云学堂做题 去做题', 4), {
+      name: 'ict-lab-status',
+      description: '打开第 n 题',
+      params: { n: '4' },
+    });
+    const click = built.skill.steps[0]?.click?.target;
+    expect(click).toEqual({ role: 'link', name: '去做题', text: '去做题', within: '赛题{{n}}' });
+    expect(built.warnings.join('\n')).not.toContain('target css');
+    expect(parseSkill(stringifySkill(built.skill))).toEqual(built.skill);
+  });
+
+  it('saves a param equal to the position as nth with the recorded count', () => {
+    const built = buildSkill(rowClick('5分钟极速建站体验 去做题', 4), { name: 'ict-lab-status', description: '打开第 i 个', params: { i: '4' } });
+    expect(built.skill.steps[0]?.click?.target).toEqual({ role: 'link', name: '去做题', text: '去做题', nth: '{{i}}', of: 50 });
+    expect(built.warnings.some((warning) => warning.includes('position {{i}} of 50'))).toBe(true);
+  });
+
+  it('pins a repeated control without unique css to its position and keeps unique css otherwise', () => {
+    const pinned = buildSkill(rowClick('5分钟极速建站体验', 4, { cssUnique: false }), { name: 'one-row', description: '固定一行' });
+    expect(pinned.skill.steps[0]?.click?.target).toMatchObject({ nth: '4', of: 50 });
+    const kept = buildSkill(rowClick('5分钟极速建站体验', 4), { name: 'one-row', description: '固定一行' });
+    expect(kept.skill.steps[0]?.click?.target).toEqual({ role: 'link', name: '去做题', css: 'div.row:nth-of-type(4) > a', text: '去做题' });
+  });
+
+  it('replays each matrix row against its own anchor', async () => {
+    const clicked: number[] = [];
+    const base = fakeReplay({ text: '开始实验', begin: null }).page;
+    const page: ReplayPage = {
+      ...base,
+      capture: async () => ({ items: peers, tables: [], url: PAGE }),
+      rowTexts: async (backends) => backends.map((backend) => ROWS[backend - 30] ?? ''),
+      performBackend: async (backend) => {
+        clicked.push(backend);
+      },
+    };
+    const skill = buildSkill(rowClick('赛题4：5分钟极速建站体验 去做题', 4), {
+      name: 'ict-lab-status',
+      description: '打开第 n 题',
+      params: { n: '4' },
+    }).skill;
+    const out = mkdtempSync(join(tmpdir(), 'relaywright-row-'));
+    expect((await runSkill(page, skill, { n: '40' }, { outDir: out })).outcome).toBe('ok');
+    expect((await runSkill(page, skill, { n: '3' }, { outDir: out })).outcome).toBe('ok');
+    const missing = await runSkill(page, skill, { n: '7' }, { outDir: out });
+    expect(missing.broken?.reason).toBe('target_not_found');
+    expect(clicked).toEqual([32, 30]);
+  });
+});
+
 describe('matrix and outcomes', () => {
   it('expands a cartesian product and maps broken to exit 30', () => {
     expect(expandMatrix({ year: ['2025-2026', '2026-2027'], term: ['1', '2'] }, { campus: 'main' })).toEqual([
@@ -714,6 +796,7 @@ function fakeReplay(options: { text: string; begin: ReplayDownload | null }): { 
       throw new Error('eval was not expected');
     },
     queryCss: async () => [],
+    rowTexts: async () => [],
     hasVisiblePassword: async () => false,
     isPasswordBackend: async () => false,
     performBackend: async () => {

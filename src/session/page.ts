@@ -12,8 +12,9 @@ import { formatLines, loginHintLine, renderSnapshotParts, type ModelItem, type T
 import { errorText, logDaemon } from '../config/paths.js';
 import { TEXT_DEFAULT_CHARS, TEXT_MAX_CHARS, type DownloadInfo, type PageBody, type WaitInput } from '../protocol.js';
 import { bounded, runPaint } from './timeout.js';
-import { describeBackend, findFrameId, queryCssBackends, type FrameNode } from '../recorder/dom.js';
+import { describeBackend, findFrameId, queryCssBackends, rowTextsFor, type FrameNode } from '../recorder/dom.js';
 import { isSensitive } from '../recorder/redact.js';
+import { rowPeers } from '../skills/locate.js';
 import type { DescribedTarget, FrameRef, TargetDescriptor } from '../recorder/types.js';
 
 export interface WaitBody extends PageBody {
@@ -93,6 +94,8 @@ export interface ReplayPage {
   /** Returns the JSON text of an eval result. The caller audits and enforces the size cap. */
   evalExpr(expr: string, args: unknown[]): Promise<string>;
   queryCss(css: string, frame?: FrameRef): Promise<number[]>;
+  /** Row text of each backend, computed against the others in the list. */
+  rowTexts(backends: readonly number[]): Promise<string[]>;
   hasVisiblePassword(): Promise<boolean>;
   isPasswordBackend(backend: number): Promise<boolean>;
   performBackend(backend: number, input: Omit<ActInput, 'ref'>): Promise<void>;
@@ -291,7 +294,22 @@ export class PageController {
     if (dom.id) target.id = dom.id;
     if (dom.text && !sensitive) target.text = dom.text;
     if (item?.frame) target.frame = item.frame;
+    const peers = item ? rowPeers(this.model.items, { role, name, frame: item.frame }) : [];
+    const position = peers.findIndex((entry) => entry.backend === backend);
+    if (peers.length > 1 && position >= 0) {
+      target.nth = position + 1;
+      target.peers = peers.length;
+      if (!sensitive) {
+        const rows = await this.rowTexts(peers.map((entry) => entry.backend)).catch(() => [] as string[]);
+        const row = rows[position];
+        if (row) target.row = row;
+      }
+    }
     return { target, sensitive };
+  }
+
+  async rowTexts(backends: readonly number[]): Promise<string[]> {
+    return bounded(rowTextsFor(this.cdp, backends), CALL_TIMEOUT_MS, 'row text');
   }
 
   async capture(): Promise<PageModel> {

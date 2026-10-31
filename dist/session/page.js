@@ -11,8 +11,9 @@ import { formatLines, loginHintLine, renderSnapshotParts } from '../perception/s
 import { errorText, logDaemon } from '../config/paths.js';
 import { TEXT_DEFAULT_CHARS, TEXT_MAX_CHARS } from '../protocol.js';
 import { bounded, runPaint } from './timeout.js';
-import { describeBackend, findFrameId, queryCssBackends } from '../recorder/dom.js';
+import { describeBackend, findFrameId, queryCssBackends, rowTextsFor } from '../recorder/dom.js';
 import { isSensitive } from '../recorder/redact.js';
+import { rowPeers } from '../skills/locate.js';
 const NAV_DETECT_MS = 500;
 const LOAD_CAP_MS = 15_000;
 const IDLE_CAP_MS = 5_000;
@@ -215,7 +216,22 @@ export class PageController {
             target.text = dom.text;
         if (item?.frame)
             target.frame = item.frame;
+        const peers = item ? rowPeers(this.model.items, { role, name, frame: item.frame }) : [];
+        const position = peers.findIndex((entry) => entry.backend === backend);
+        if (peers.length > 1 && position >= 0) {
+            target.nth = position + 1;
+            target.peers = peers.length;
+            if (!sensitive) {
+                const rows = await this.rowTexts(peers.map((entry) => entry.backend)).catch(() => []);
+                const row = rows[position];
+                if (row)
+                    target.row = row;
+            }
+        }
         return { target, sensitive };
+    }
+    async rowTexts(backends) {
+        return bounded(rowTextsFor(this.cdp, backends), CALL_TIMEOUT_MS, 'row text');
     }
     async capture() {
         await this.paint();

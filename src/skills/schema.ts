@@ -14,6 +14,12 @@ export const SkillTargetSchema = z.object({
   css: z.string().min(1).optional(),
   text: z.string().optional(),
   frame: z.object({ name: z.string(), url: z.string() }).optional(),
+  /** Text in the same row. Among controls with this role and name, only the one whose row contains it matches. */
+  within: z.string().min(1).optional(),
+  /** 1-based position among controls with this role and name. A string so it can hold a placeholder. */
+  nth: z.string().min(1).optional(),
+  /** How many such controls the page had when nth was recorded. A different count stops the replay. */
+  of: z.number().int().positive().optional(),
 });
 
 export type SkillTarget = z.infer<typeof SkillTargetSchema>;
@@ -142,7 +148,7 @@ export const SkillSchema = z.object({
 
 export type Skill = z.infer<typeof SkillSchema>;
 
-export const LocatorKindSchema = z.enum(['role_name', 'css', 'text', 'role_name_contains']);
+export const LocatorKindSchema = z.enum(['role_name', 'css', 'text', 'role_name_contains', 'row', 'nth']);
 
 export const ArtifactSchema = z.object({
   step_id: z.string(),

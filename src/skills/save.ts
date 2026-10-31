@@ -2,8 +2,9 @@ import { RelayError } from '../errors.js';
 import { issuesText } from '../protocol.js';
 import type { TargetDescriptor, TraceStep } from '../recorder/types.js';
 import { fileExtension } from '../session/downloads.js';
+import { rowScoped } from './locate.js';
 import { SkillSchema, type CheckInput, type Skill, type SkillStep, type SkillTarget } from './schema.js';
-import { templatize, type ExampleParam, type TemplateMiss, type TemplatePlace } from './template.js';
+import { templatize, tokenIndex, type ExampleParam, type TemplateMiss, type TemplatePlace } from './template.js';
 
 export interface BuiltSkill {
   skill: Skill;
@@ -121,6 +122,10 @@ export function buildSkill(steps: readonly TraceStep[], input: {
       if (draft.css.value && !draft.css.unique) warnings.push(`${id} css is not unique (${draft.css.value})`);
       warnings.push(`${id} relies only on name`);
     }
+    if (draft.row?.nth !== undefined) {
+      const which = draft.row.nth.includes('{{') ? `position ${draft.row.nth}` : `position ${draft.row.nth} (fixed)`;
+      warnings.push(`${id} picks ${which} of ${draft.row.of} "${draft.row.name}" by order; a reordered list clicks another row, a different count stops the replay`);
+    }
     if (draft.drifted) warnings.push(`${id} runs after a navigation away from the start URL`);
     if (draft.tabUrl) warnings.push(`${id} runs in tab ${draft.tabUrl}`);
     if (draft.rewritten) {
@@ -158,6 +163,8 @@ interface Draft {
   tabUrl?: string;
   rewritten?: string;
   unsubstituted?: UnsubstitutedHit[];
+  /** The saved target when it is scoped to a row. */
+  row?: SkillTarget;
 }
 
 interface UnsubstitutedHit {
@@ -217,16 +224,17 @@ function actionDraft(
   examples: readonly ExampleParam[],
   used: Set<string>,
 ): Draft {
-  const target = step.target ? toSkillTarget(step.target) : undefined;
-  const css = step.target ? { value: step.target.css, unique: step.target.cssUnique } : undefined;
   const hits: UnsubstitutedHit[] = [];
   const text = (value: string, place: TemplatePlace, field: string): string => {
     const result = apply(value, place);
     for (const miss of result.missed) hits.push({ name: miss.name, field, part: miss.part });
     return result.text;
   };
-  const base = { targetName: target?.name, css, drifted, tabUrl: step.tabUrl, unsubstituted: hits };
-  hits.push(...locatorMisses(step.target, examples));
+  const target = step.target ? scopeTarget(step.target, examples, (value, place) => text(value, place, 'target row')) : undefined;
+  const scoped = target ? rowScoped(target) : false;
+  const css = step.target && !scoped ? { value: step.target.css, unique: step.target.cssUnique } : undefined;
+  const base = { targetName: target?.name, css, drifted, tabUrl: step.tabUrl, unsubstituted: hits, row: scoped ? target : undefined };
+  hits.push(...locatorMisses(step.target, examples, !scoped));
   switch (step.action) {
     case 'goto':
       return { action: 'goto', ...base, step: { goto: { url: text(step.value || step.urlAfter, 'url', 'url') } } };
@@ -334,10 +342,10 @@ function saveAsForTrace(
   return { saveAs: rewritten, rewritten, missed: templated.missed };
 }
 
-function locatorMisses(target: TraceStep['target'], examples: readonly ExampleParam[]): UnsubstitutedHit[] {
+function locatorMisses(target: TraceStep['target'], examples: readonly ExampleParam[], keepsCss: boolean): UnsubstitutedHit[] {
   if (!target) return [];
   const fields: Array<[string, string | undefined]> = [
-    ['target css', target.css],
+    ['target css', keepsCss ? target.css : undefined],
     ['target id', target.id],
     ['target name', target.name],
     ['target label', target.label],
@@ -378,4 +386,42 @@ export function toSkillTarget(target: TargetDescriptor): SkillTarget {
     ...(target.text ? { text: target.text } : {}),
     ...(target.frame ? { frame: { name: target.frame.name, url: target.frame.url } } : {}),
   };
+}
+
+const ANCHOR_LEFT_MAX = 20;
+
+/**
+ * A control that repeats on the page (one per row) is scoped to a row so a matrix can loop over rows.
+ * In order: a param shown in the row becomes `within`; a param equal to the position becomes `nth`;
+ * otherwise a control with no unique CSS is pinned to its recorded position.
+ * A scoped target drops its CSS, which points at the recorded row.
+ */
+export function scopeTarget(
+  described: TargetDescriptor,
+  examples: readonly ExampleParam[],
+  apply: (value: string, place: TemplatePlace) => string,
+): SkillTarget {
+  const base = toSkillTarget(described);
+  if (!described.nth || !described.peers || described.peers < 2) return base;
+  const { css: _pinned, ...unpinned } = base;
+  const row = described.row ?? '';
+  const ordered = [...examples].sort((left, right) => [...right.example].length - [...left.example].length);
+  for (const param of ordered) {
+    const at = tokenIndex(row, param.example);
+    if (at < 0) continue;
+    const within = apply(row.slice(anchorStart(row, at), at + param.example.length), 'anchor');
+    return { ...unpinned, within };
+  }
+  const nth = apply(String(described.nth), 'value');
+  if (nth.includes('{{')) return { ...unpinned, nth, of: described.peers };
+  if (base.css) return base;
+  return { ...unpinned, nth, of: described.peers };
+}
+
+/** Start of the anchor: back to whitespace, at most ANCHOR_LEFT_MAX characters, never inside a word. */
+function anchorStart(row: string, at: number): number {
+  let start = at;
+  while (start > 0 && at - start < ANCHOR_LEFT_MAX && !/\s/.test(row[start - 1] ?? '')) start -= 1;
+  while (start > 0 && start < at && /[A-Za-z0-9]/.test(row[start - 1] ?? '') && /[A-Za-z0-9]/.test(row[start] ?? '')) start += 1;
+  return start;
 }

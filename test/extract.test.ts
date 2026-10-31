@@ -244,6 +244,7 @@ function fake(visits: string[]): ReplayPage {
       throw new Error('eval was not expected');
     },
     queryCss: async () => [],
+    rowTexts: async () => [],
     hasVisiblePassword: async () => false,
     isPasswordBackend: async () => false,
     performBackend: async () => undefined,

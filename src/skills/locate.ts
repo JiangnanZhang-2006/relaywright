@@ -1,6 +1,7 @@
 import type { ModelItem } from '../perception/snapshot.js';
+import { tokenIndex } from './template.js';
 
-export type LocatorKind = 'role_name' | 'css' | 'text' | 'role_name_contains';
+export type LocatorKind = 'role_name' | 'css' | 'text' | 'role_name_contains' | 'row' | 'nth';
 
 export interface LocatorHit {
   locator: LocatorKind;
@@ -13,7 +14,12 @@ export interface LocateTarget {
   css?: string;
   text?: string;
   frame?: { name: string; url: string };
+  within?: string;
+  nth?: string;
+  of?: number;
 }
+
+export type RowMiss = 'target_not_found' | 'nth_shifted';
 
 const TEXT_ROLES = new Set(['clickable', 'button', 'link']);
 
@@ -38,13 +44,41 @@ export function chooseLocator(items: readonly ModelItem[], target: LocateTarget,
   return null;
 }
 
+export function rowScoped(target: LocateTarget): boolean {
+  return target.within !== undefined || target.nth !== undefined;
+}
+
+/** Controls that share the target's role and name, in snapshot order. Row and position count among these. */
+export function rowPeers(items: readonly ModelItem[], target: Pick<LocateTarget, 'role' | 'name' | 'frame'>): ModelItem[] {
+  return items.filter((item) => frameOk(item, target) && item.role === target.role && item.name === target.name);
+}
+
+/**
+ * A row-scoped target never falls back to the other locators: every peer has the same
+ * role and name, so a fallback would click some other row.
+ * `rows[i]` is the row text of `peers[i]`; only `within` needs it.
+ */
+export function chooseInRow(peers: readonly ModelItem[], target: LocateTarget, rows: readonly string[]): LocatorHit | RowMiss {
+  if (target.within !== undefined) {
+    const within = target.within;
+    const hits = peers.filter((_peer, index) => tokenIndex(rows[index] ?? '', within) >= 0);
+    if (hits.length === 1 && hits[0]) return { locator: 'row', backend: hits[0].backend };
+    return 'target_not_found';
+  }
+  const position = Number(target.nth);
+  if (!Number.isInteger(position) || position < 1) return 'target_not_found';
+  if (target.of !== undefined && peers.length !== target.of) return 'nth_shifted';
+  const hit = peers[position - 1];
+  return hit ? { locator: 'nth', backend: hit.backend } : 'target_not_found';
+}
+
 function textMatches(item: ModelItem, text: string): boolean {
   if (!text || !TEXT_ROLES.has(item.role)) return false;
   if (item.text !== undefined) return item.text === text;
   return item.name === text;
 }
 
-function frameOk(item: ModelItem, target: LocateTarget): boolean {
+function frameOk(item: ModelItem, target: Pick<LocateTarget, 'frame'>): boolean {
   if (!target.frame) return true;
   if (!item.frame) return false;
   if (target.frame.name && item.frame.name !== target.frame.name) return false;

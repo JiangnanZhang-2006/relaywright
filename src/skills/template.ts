@@ -8,9 +8,10 @@ export interface ExampleParam {
 /**
  * Where an example literal is allowed to become a placeholder.
  * `value` is a whole select/type value. `text` is free text such as wait text.
- * `file` is a save_as file name. `url` is a page or wait URL.
+ * `file` is a save_as file name. `url` is a page or wait URL. `anchor` is the
+ * short row text that scopes a repeated control; like `file`, it takes 1-character examples.
  */
-export type TemplatePlace = 'value' | 'text' | 'file' | 'url';
+export type TemplatePlace = 'value' | 'text' | 'file' | 'url' | 'anchor';
 
 export type UrlPart = 'scheme' | 'host' | 'port' | 'path' | 'query' | 'hash' | 'url';
 
@@ -49,8 +50,8 @@ export function templatize(
   if (input === '{{secret}}') return { text: input, used: new Set(), missed: [] };
   const ordered = orderedParams(params);
   if (place === 'value') return finish(input, ordered, valueRanges(input, ordered), () => undefined);
-  if (place === 'text' || place === 'file') {
-    return finish(input, ordered, textRanges(input, ordered, place === 'file'), () => undefined);
+  if (place === 'text' || place === 'file' || place === 'anchor') {
+    return finish(input, ordered, textRanges(input, ordered, place !== 'text'), () => undefined);
   }
   const marks = urlMarks(input);
   return finish(input, ordered, urlRanges(input, ordered, marks), (index) => partAt(marks, index));
@@ -126,6 +127,18 @@ function tokenBounded(input: string, index: number, literal: string): boolean {
   const before = index > 0 ? input[index - 1] : '';
   const after = input[index + literal.length] ?? '';
   return !/[A-Za-z0-9]/.test(before ?? '') && !/[A-Za-z0-9]/.test(after);
+}
+
+/** First index where `literal` occurs with no letter or digit on either side, or -1. */
+export function tokenIndex(input: string, literal: string): number {
+  if (!literal) return -1;
+  let from = 0;
+  for (;;) {
+    const at = input.indexOf(literal, from);
+    if (at < 0) return -1;
+    if (tokenBounded(input, at, literal)) return at;
+    from = at + 1;
+  }
 }
 
 function urlRanges(input: string, params: readonly ExampleParam[], marks: readonly Mark[]): Range[] {

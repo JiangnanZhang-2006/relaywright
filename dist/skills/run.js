@@ -8,7 +8,7 @@ import { assertSaveAs } from '../session/downloads.js';
 import { pageNeedsLogin } from '../session/login.js';
 import { parseStateValue, statePut } from '../state/store.js';
 import { resolveStateText, resolveStateValue } from '../state/template.js';
-import { chooseLocator } from './locate.js';
+import { chooseInRow, chooseLocator, rowPeers, rowScoped } from './locate.js';
 import { stepTarget, } from './schema.js';
 import { renderTemplate } from './template.js';
 export function expandMatrix(matrix, fixed = {}) {
@@ -38,7 +38,10 @@ export function stopsMatrix(result) {
     const reason = result.broken?.reason;
     if (result.outcome !== 'broken' || !result.broken?.heal)
         return false;
-    return reason === 'target_not_found' || reason === 'no_download';
+    return locatorMiss(reason) || reason === 'no_download';
+}
+function locatorMiss(reason) {
+    return reason === 'target_not_found' || reason === 'nth_shifted';
 }
 export async function runMatrix(page, skill, input, hooks, 
 /** A combination that already ran outside this matrix, e.g. the pass the skill was saved from. */
@@ -221,8 +224,8 @@ async function driveSteps(page, steps, outDir, prior, hooks, params, startIndex,
             warnings.push(result.warning);
         if (result.broken) {
             const reason = result.broken.reason;
-            const missingTarget = result.locator === undefined && (reason === 'target_not_found' || reason === 'no_download');
-            const healable = reason === 'target_not_found' || (reason === 'no_download' && missingTarget);
+            const missingTarget = result.locator === undefined && (locatorMiss(reason) || reason === 'no_download');
+            const healable = locatorMiss(reason) || (reason === 'no_download' && missingTarget);
             let next = result.broken;
             if ((healable || reason === 'expect_unmatched') && hooks?.onFailure) {
                 const heal = await hooks.onFailure({
@@ -332,8 +335,8 @@ async function runDownload(page, step, outDir) {
     const target = download.click.target;
     const model = await page.capture();
     const hit = await locate(page, model.items, target);
-    if (!hit)
-        return { status: 'failed', broken: await report(page, step, 'target_not_found') };
+    if (typeof hit === 'string')
+        return { status: 'failed', broken: await report(page, step, hit) };
     const mark = page.markDownloads();
     try {
         await page.performBackend(hit.backend, { action: 'click' });
@@ -376,8 +379,8 @@ async function runAct(page, step) {
     if (target) {
         const model = await page.capture();
         const hit = await locate(page, model.items, target);
-        if (!hit)
-            return { status: 'failed', broken: await report(page, step, 'target_not_found') };
+        if (typeof hit === 'string')
+            return { status: 'failed', broken: await report(page, step, hit) };
         locator = hit.locator;
         backend = hit.backend;
     }
@@ -430,7 +433,7 @@ async function runWait(page, step) {
         const text = wait.text ? await page.pageText() : '';
         const urlOk = !wait.url || page.currentUrl().includes(wait.url);
         const textOk = !wait.text || text.includes(wait.text);
-        if (hit && urlOk && textOk)
+        if (typeof hit !== 'string' && urlOk && textOk)
             return { status: 'done', locator: hit.locator };
         if (Date.now() >= deadline)
             return { status: 'failed', broken: await report(page, step, 'timeout') };
@@ -452,8 +455,13 @@ async function runExpect(page, step) {
     return { status: 'failed', broken: await report(page, step, 'expect_unmatched'), outcome: 'broken' };
 }
 async function locate(page, items, target) {
+    if (rowScoped(target)) {
+        const peers = rowPeers(items, target);
+        const rows = target.within !== undefined ? await page.rowTexts(peers.map((peer) => peer.backend)) : [];
+        return chooseInRow(peers, target, rows);
+    }
     const cssBackends = target.css ? await page.queryCss(target.css, target.frame) : [];
-    return chooseLocator(items, target, cssBackends);
+    return chooseLocator(items, target, cssBackends) ?? 'target_not_found';
 }
 async function report(page, step, reason) {
     let excerpt = '';
@@ -659,7 +667,7 @@ function bindExtractFields(fields, render) {
     }
     return out;
 }
-function bindTarget(target, render) {
+export function bindTarget(target, render) {
     return {
         role: target.role,
         name: render(target.name),
@@ -667,6 +675,9 @@ function bindTarget(target, render) {
         ...(target.css !== undefined ? { css: render(target.css) } : {}),
         ...(target.text !== undefined ? { text: render(target.text) } : {}),
         ...(target.frame ? { frame: { name: render(target.frame.name), url: render(target.frame.url) } } : {}),
+        ...(target.within !== undefined ? { within: render(target.within) } : {}),
+        ...(target.nth !== undefined ? { nth: render(target.nth) } : {}),
+        ...(target.of !== undefined ? { of: target.of } : {}),
     };
 }
 function bindWhen(when, render) {

@@ -11,7 +11,7 @@ import { pageNeedsLogin } from '../session/login.js';
 import type { ReplayPage } from '../session/page.js';
 import { parseStateValue, statePut } from '../state/store.js';
 import { resolveStateText, resolveStateValue } from '../state/template.js';
-import { chooseLocator, type LocatorKind } from './locate.js';
+import { chooseInRow, chooseLocator, rowPeers, rowScoped, type LocatorHit, type LocatorKind, type RowMiss } from './locate.js';
 import {
   stepTarget,
   type BrokenReport,
@@ -88,7 +88,11 @@ export interface RunHooks {
 export function stopsMatrix(result: { outcome: string; broken?: { reason?: string; heal?: unknown } }): boolean {
   const reason = result.broken?.reason;
   if (result.outcome !== 'broken' || !result.broken?.heal) return false;
-  return reason === 'target_not_found' || reason === 'no_download';
+  return locatorMiss(reason) || reason === 'no_download';
+}
+
+function locatorMiss(reason: string | undefined): boolean {
+  return reason === 'target_not_found' || reason === 'nth_shifted';
 }
 
 export async function runMatrix(
@@ -303,8 +307,8 @@ async function driveSteps(
     if (result.warning) warnings.push(result.warning);
     if (result.broken) {
       const reason = result.broken.reason;
-      const missingTarget = result.locator === undefined && (reason === 'target_not_found' || reason === 'no_download');
-      const healable = reason === 'target_not_found' || (reason === 'no_download' && missingTarget);
+      const missingTarget = result.locator === undefined && (locatorMiss(reason) || reason === 'no_download');
+      const healable = locatorMiss(reason) || (reason === 'no_download' && missingTarget);
       let next = result.broken;
       if ((healable || reason === 'expect_unmatched') && hooks?.onFailure) {
         const heal = await hooks.onFailure({
@@ -410,7 +414,7 @@ async function runDownload(page: ReplayPage, step: SkillStep, outDir: string): P
   const target = download.click.target;
   const model = await page.capture();
   const hit = await locate(page, model.items, target);
-  if (!hit) return { status: 'failed', broken: await report(page, step, 'target_not_found') };
+  if (typeof hit === 'string') return { status: 'failed', broken: await report(page, step, hit) };
   const mark = page.markDownloads();
   try {
     await page.performBackend(hit.backend, { action: 'click' });
@@ -451,7 +455,7 @@ async function runAct(page: ReplayPage, step: SkillStep): Promise<OneStep> {
   if (target) {
     const model = await page.capture();
     const hit = await locate(page, model.items, target);
-    if (!hit) return { status: 'failed', broken: await report(page, step, 'target_not_found') };
+    if (typeof hit === 'string') return { status: 'failed', broken: await report(page, step, hit) };
     locator = hit.locator;
     backend = hit.backend;
   } else if (!optional) {
@@ -492,7 +496,7 @@ async function runWait(page: ReplayPage, step: SkillStep): Promise<OneStep> {
     const text = wait.text ? await page.pageText() : '';
     const urlOk = !wait.url || page.currentUrl().includes(wait.url);
     const textOk = !wait.text || text.includes(wait.text);
-    if (hit && urlOk && textOk) return { status: 'done', locator: hit.locator };
+    if (typeof hit !== 'string' && urlOk && textOk) return { status: 'done', locator: hit.locator };
     if (Date.now() >= deadline) return { status: 'failed', broken: await report(page, step, 'timeout') };
     await delay(200);
   }
@@ -511,9 +515,14 @@ async function runExpect(page: ReplayPage, step: SkillStep): Promise<OneStep> {
   return { status: 'failed', broken: await report(page, step, 'expect_unmatched'), outcome: 'broken' };
 }
 
-async function locate(page: ReplayPage, items: readonly ModelItem[], target: SkillTarget) {
+async function locate(page: ReplayPage, items: readonly ModelItem[], target: SkillTarget): Promise<LocatorHit | RowMiss> {
+  if (rowScoped(target)) {
+    const peers = rowPeers(items, target);
+    const rows = target.within !== undefined ? await page.rowTexts(peers.map((peer) => peer.backend)) : [];
+    return chooseInRow(peers, target, rows);
+  }
   const cssBackends = target.css ? await page.queryCss(target.css, target.frame) : [];
-  return chooseLocator(items, target, cssBackends);
+  return chooseLocator(items, target, cssBackends) ?? 'target_not_found';
 }
 
 async function report(page: ReplayPage, step: SkillStep, reason: string): Promise<BrokenReport> {
@@ -722,7 +731,7 @@ function bindExtractFields(
   return out;
 }
 
-function bindTarget(target: SkillTarget, render: (value: string) => string): SkillTarget {
+export function bindTarget(target: SkillTarget, render: (value: string) => string): SkillTarget {
   return {
     role: target.role,
     name: render(target.name),
@@ -730,6 +739,9 @@ function bindTarget(target: SkillTarget, render: (value: string) => string): Ski
     ...(target.css !== undefined ? { css: render(target.css) } : {}),
     ...(target.text !== undefined ? { text: render(target.text) } : {}),
     ...(target.frame ? { frame: { name: render(target.frame.name), url: render(target.frame.url) } } : {}),
+    ...(target.within !== undefined ? { within: render(target.within) } : {}),
+    ...(target.nth !== undefined ? { nth: render(target.nth) } : {}),
+    ...(target.of !== undefined ? { of: target.of } : {}),
   };
 }
 

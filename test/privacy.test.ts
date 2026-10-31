@@ -448,6 +448,14 @@ describe('privacy redactor', () => {
     } catch (err) {
       expect(err instanceof Error ? err.message : '').not.toContain(PHONE);
     }
+
+    const rowScoped: Skill = {
+      ...skillWith(),
+      steps: [{ id: 's2-click-查看', click: { target: { role: 'link', name: '查看', within: ACCOUNT, nth: '{{n}}', of: 3 } } }],
+    };
+    const scoped = redactor.deidentify(rowScoped, URL).skill.steps[0]?.click?.target;
+    expect(scoped?.within).toBe('‹我.账号›');
+    expect(scoped).toMatchObject({ nth: '{{n}}', of: 3 });
   });
 
   it('fails a skill run with a step error when a self token has no value', () => {

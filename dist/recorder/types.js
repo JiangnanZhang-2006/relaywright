@@ -13,6 +13,11 @@ export const TargetDescriptorSchema = z.object({
     cssUnique: z.boolean(),
     text: z.string().optional(),
     frame: FrameRefSchema.optional(),
+    /** Set when other controls share this role and name: 1-based position and count, in snapshot order. */
+    nth: z.number().int().positive().optional(),
+    peers: z.number().int().positive().optional(),
+    /** Text of the row that holds this control and none of its peers. */
+    row: z.string().optional(),
 });
 export const TraceActionSchema = z.enum(['goto', 'click', 'type', 'select', 'press', 'scroll', 'wait', 'download', 'pdf']);
 export const TraceStepSchema = z.object({

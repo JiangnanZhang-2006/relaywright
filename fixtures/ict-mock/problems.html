@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>实验赛题</title>
+<h1>实验赛题平台</h1>
+<div id="problems"></div>
+<script>
+  const titles = ['码道鸿蒙应用开发', '码道CodeArts速成', 'openEuler文件增删改查', '5分钟极速建站体验', '在EulerOS中安装Python3', 'Linux的shell脚本',
+    '九九乘法表', '猜数游戏', 'MySQL导入导出', '多表连接查询', '文件权限修改', '系统基础实践'];
+  const list = document.getElementById('problems');
+  titles.forEach((title, index) => {
+    const n = index + 1;
+    const row = document.createElement('div');
+    row.className = 'problem';
+    row.innerHTML = '<h3>赛题' + n + '：' + title + '</h3><p>在云学堂做题 → 完成实验 → 系统每日 0 点刷新判题结果</p>'
+      + '<span class="state">未开始</span><a class="go" target="_blank" href="lab.html?id=' + n + '">去做题</a>';
+    list.appendChild(row);
+  });
+</script>

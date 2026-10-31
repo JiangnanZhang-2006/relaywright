@@ -17,6 +17,8 @@ export interface FrameNode {
   childFrames?: FrameNode[];
 }
 
+const ROW_TEXT_MAX = 300;
+
 const STALE = /Could not find node|No node with given id|Node is detached|Cannot find context|Inspected target navigated|Backend node/i;
 
 /**
@@ -131,6 +133,55 @@ export async function describeBackend(cdp: CDPSession, backendNodeId: number): P
     return asDescriptor(result.result.value);
   } finally {
     await cdp.send('Runtime.releaseObject', { objectId }).catch(() => undefined);
+  }
+}
+
+/**
+ * For each node: climb while the parent holds no other node of the set, so the result is
+ * the largest ancestor unique to it (a list row or card). Stops below body.
+ */
+const ROW_TEXT_FUNCTION = `function() {
+  const nodes = Array.prototype.slice.call(arguments);
+  return nodes.map(function (el) {
+    if (!el || el.nodeType !== 1 || !el.isConnected) return '';
+    const doc = el.ownerDocument;
+    let row = el;
+    while (row.parentElement && row.parentElement !== doc.body && row.parentElement !== doc.documentElement) {
+      const up = row.parentElement;
+      if (nodes.some(function (other) { return other && other !== el && up.contains(other); })) break;
+      row = up;
+    }
+    return String(row.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, ${ROW_TEXT_MAX});
+  });
+}`;
+
+/** Row text for each backend, '' when a node cannot be resolved (for example in another process frame). */
+export async function rowTextsFor(cdp: CDPSession, backends: readonly number[]): Promise<string[]> {
+  const objectIds: string[] = [];
+  for (const backendNodeId of backends) {
+    try {
+      const resolved = await cdp.send('DOM.resolveNode', { backendNodeId });
+      objectIds.push(resolved.object.objectId ?? '');
+    } catch {
+      objectIds.push('');
+    }
+  }
+  const live = objectIds.filter((id) => id.length > 0);
+  const first = live[0];
+  if (!first) return backends.map(() => '');
+  try {
+    const result = await cdp.send('Runtime.callFunctionOn', {
+      objectId: first,
+      functionDeclaration: ROW_TEXT_FUNCTION,
+      arguments: live.map((objectId) => ({ objectId })),
+      returnByValue: true,
+    });
+    const value = result.exceptionDetails ? [] : (result.result.value as unknown);
+    const texts = Array.isArray(value) ? value.map((text) => (typeof text === 'string' ? text : '')) : [];
+    let cursor = 0;
+    return objectIds.map((id) => (id ? (texts[cursor++] ?? '') : ''));
+  } finally {
+    await Promise.all(live.map((objectId) => cdp.send('Runtime.releaseObject', { objectId }).catch(() => undefined)));
   }
 }
 

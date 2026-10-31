@@ -64,6 +64,7 @@ steps:
 ```
 
 - Each control records its role, name, CSS, and text. After a small page change, another locator can still find it.
+- A control that repeats once per row, such as a "去做题" (start) link on every problem, is scoped to its row: `{ role: link, name: 去做题, within: "赛题{{n}}" }`. A matrix over `n` then clicks each row's own link.
 - `expect` turns a business result such as "no timetable" into `empty` and reports it, instead of treating the page as broken.
 - Saving removes personal data: your own values become tokens such as `‹我.姓名›`, and other people's values become parameters.
 

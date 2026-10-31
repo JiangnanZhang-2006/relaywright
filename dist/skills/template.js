@@ -13,8 +13,8 @@ export function templatize(input, params, place) {
     const ordered = orderedParams(params);
     if (place === 'value')
         return finish(input, ordered, valueRanges(input, ordered), () => undefined);
-    if (place === 'text' || place === 'file') {
-        return finish(input, ordered, textRanges(input, ordered, place === 'file'), () => undefined);
+    if (place === 'text' || place === 'file' || place === 'anchor') {
+        return finish(input, ordered, textRanges(input, ordered, place !== 'text'), () => undefined);
     }
     const marks = urlMarks(input);
     return finish(input, ordered, urlRanges(input, ordered, marks), (index) => partAt(marks, index));
@@ -82,6 +82,20 @@ function tokenBounded(input, index, literal) {
     const before = index > 0 ? input[index - 1] : '';
     const after = input[index + literal.length] ?? '';
     return !/[A-Za-z0-9]/.test(before ?? '') && !/[A-Za-z0-9]/.test(after);
+}
+/** First index where `literal` occurs with no letter or digit on either side, or -1. */
+export function tokenIndex(input, literal) {
+    if (!literal)
+        return -1;
+    let from = 0;
+    for (;;) {
+        const at = input.indexOf(literal, from);
+        if (at < 0)
+            return -1;
+        if (tokenBounded(input, at, literal))
+            return at;
+        from = at + 1;
+    }
 }
 function urlRanges(input, params, marks) {
     const ranges = [];

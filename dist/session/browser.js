@@ -13,8 +13,10 @@ import { ensureTabHeader, pageHeader, switchBanner } from '../perception/snapsho
 import { observedLines, TraceLog } from '../recorder/trace.js';
 import { valueForTrace } from '../recorder/redact.js';
 import { buildHealContext, HEAL_TOKEN_MS, HealLedger, MAX_PATCH_ATTEMPTS, rerunFailedReason } from '../skills/heal.js';
-import { bindSkill, mergeResumedRun, replaceStepTarget, resumeFromStep, runMatrix, runOutputDir } from '../skills/run.js';
-import { buildSkill, toSkillTarget } from '../skills/save.js';
+import { bindSkill, bindTarget, mergeResumedRun, replaceStepTarget, resumeFromStep, runMatrix, runOutputDir } from '../skills/run.js';
+import { buildSkill, scopeTarget } from '../skills/save.js';
+import { stepTarget, } from '../skills/schema.js';
+import { renderTemplate, templatize } from '../skills/template.js';
 import { listSkills as listStoredSkills, readSkill as readStoredSkill, rollbackSkill as rollbackStoredSkill, skillHistory as storedSkillHistory, writeSkill as writeStoredSkill, writeSkillChecks, } from '../skills/store.js';
 import { assertSaveAs, canceledLine, sanitizeFilename, downloadLine, DownloadManager, preferExternalPdf, PRINT_REQUESTED_LINE, publishDownload, stageBytes, stripDownloadUrl, } from './downloads.js';
 import { HandoffManager } from './handoff.js';
@@ -224,6 +226,11 @@ export class BrowserSession {
             const lines = [...caught.lines];
             if (await this.printIncreased(controller, printBefore))
                 lines.push(PRINT_REQUESTED_LINE);
+            if (input.action === 'click' && input.ref && described) {
+                const repeated = repeatedControlLine(input.ref, described.target);
+                if (repeated)
+                    lines.push(repeated);
+            }
             const kind = this.tabset().peekSwitch();
             const body = await this.readSnapshot(kind || switched ? 'full' : 'diff');
             const shown = await this.finishLive(body, { downloads: caught.files, lines });
@@ -460,6 +467,7 @@ export class BrowserSession {
                 step.target?.text,
                 step.target?.label,
                 step.target?.css,
+                step.target?.row,
                 ...(step.observed ?? []),
             ]),
         ]
@@ -575,16 +583,24 @@ export class BrowserSession {
             }
             if (described.sensitive)
                 return await this.rejectPatch(input.name, input.step_id, 'human_required', ticket);
-            const rawTarget = toSkillTarget(described.target);
             const stored = readStoredSkill(input.name).skill;
             if (stored.version !== ticket.version) {
                 this.heals.dropTicket();
                 return { accepted: false, name: input.name, step_id: input.step_id, reason: 'heal_token', retryable: false };
             }
+            const examples = Object.entries(ticket.params)
+                .filter(([, example]) => example.length > 0)
+                .map(([name, example]) => ({ name, example }));
+            const savedTarget = scopeTarget(described.target, examples, (value, place) => templatize(value, examples, place).text);
+            if (rowParam(stepTargetOf(stored, input.step_id)) && !rowParam(savedTarget)) {
+                return await this.rejectPatch(input.name, input.step_id, 'anchor_lost', ticket);
+            }
+            const declared = new Set(Object.keys(stored.params));
+            const rawTarget = bindTarget(savedTarget, (value) => renderTemplate(value, ticket.params, declared));
             let cleaned;
             try {
-                const replaced = replaceSkillStep(stored, input.step_id, rawTarget);
-                this.privacy.absorb([ticket.snapshot, rawTarget.name, rawTarget.text, rawTarget.label, rawTarget.css].filter(Boolean).join('\n'), ticket.url);
+                const replaced = replaceSkillStep(stored, input.step_id, savedTarget);
+                this.privacy.absorb([ticket.snapshot, rawTarget.name, rawTarget.text, rawTarget.label, rawTarget.css, rawTarget.within].filter(Boolean).join('\n'), ticket.url);
                 cleaned = this.privacy.deidentify(replaced, ticket.url);
             }
             catch (err) {
@@ -809,6 +825,7 @@ export class BrowserSession {
             extract: async (input) => (await use()).extract(input),
             evalExpr: async (expr, args) => (await use()).evalExpr(expr, args),
             queryCss: async (css, frame) => (await use()).queryCss(css, frame),
+            rowTexts: async (backends) => (await use()).rowTexts(backends),
             performBackend: async (backend, input) => {
                 const page = await use();
                 const opener = page.pageHandle();
@@ -1556,6 +1573,21 @@ export class BrowserSession {
             this.releasing = false;
         }
     }
+}
+/** Tells the model a repeated control (one per row) can be looped over by a skill. */
+export function repeatedControlLine(ref, target) {
+    if (!target.nth || !target.peers || target.peers < 2)
+        return null;
+    const row = target.row ? ` in row "${target.row.slice(0, 40)}"` : '';
+    return `${ref} is ${target.nth} of ${target.peers} ${target.role} "${target.name}"${row}. To do the same for other rows, skill_save with the row number or a value shown in the row as a param, then skill_run a matrix of rows.`;
+}
+function stepTargetOf(skill, stepId) {
+    const step = skill.steps.find((item) => item.id === stepId);
+    return step ? stepTarget(step) : undefined;
+}
+/** True when the target picks its row from a param, so every matrix combination clicks a different row. */
+function rowParam(target) {
+    return `${target?.within ?? ''}${target?.nth ?? ''}`.includes('{{');
 }
 function replaceSkillStep(skill, stepId, target) {
     let found = false;
