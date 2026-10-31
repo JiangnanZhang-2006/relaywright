@@ -27,8 +27,12 @@ import { ATTACH_ALLOW_HINT, ATTACH_TIMEOUT_MS, ATTACH_TRANSFERS_MESSAGE, attachI
 import { armNavigationGate } from './nav-gate.js';
 import { adoptChrome, HEADLESS_VIEWPORT, launchChrome } from './launch.js';
 import { HANDOFF_TIMEOUT_MS } from './login.js';
-import { formatTabList, POPUP_GRACE_MS, TabSet } from './tabs.js';
+import { formatTabList, formatUserTabText, POPUP_GRACE_MS, TabSet } from './tabs.js';
 const NO_DOWNLOAD_QUIET_MS = 3_000;
+/** Already attached to this Chrome. Reconnecting would drop adopted tabs. */
+export function reuseLiveAttach(live, nextEndpoint) {
+    return live.connection === 'attached' && live.connected && live.endpoint.length > 0 && live.endpoint === nextEndpoint;
+}
 const READY_WAIT_MS = 30_000;
 const TITLE_TIMEOUT_MS = 3_000;
 export class BrowserSession {
@@ -65,6 +69,8 @@ export class BrowserSession {
     blockedDomain = null;
     attachedMode = null;
     endpointKind = 'own';
+    /** WebSocket endpoint of the Chrome this session is attached to. Empty unless attach finished. */
+    attachedEndpoint = '';
     sessionGrants = new Set();
     constructor(options = {}) {
         this.resolveExecutable = options.resolveExecutable ?? resolveBrowserForLaunch;
@@ -1169,10 +1175,10 @@ export class BrowserSession {
             throw new RelayError('bad_request', 'User tabs are only available while attached to an existing browser');
         }
         const listed = await this.listForeignTabs();
-        if (listed.tabs.length === 0) {
-            return { tabs: [], text: 'No user tabs. Tabs relaywright opened are listed with action=list.' };
-        }
-        return listed;
+        return {
+            tabs: listed.tabs,
+            text: formatUserTabText(listed.text, listed.tabs.length, this.tabset().adoptedCount()),
+        };
     }
     /** Model path: the person confirms the tab before it becomes visible. The CLI adopt skips this. */
     async requestAdopt(index) {
@@ -1329,6 +1335,12 @@ export class BrowserSession {
     }
     async performAttach(input) {
         const target = await resolveAttachRequest(input);
+        if (reuseLiveAttach({ connection: this.connection, connected: this.browser?.connected === true, endpoint: this.attachedEndpoint }, target.endpoint)) {
+            this.phase = { state: 'ready' };
+            const mode = this.attachedMode ?? target.mode;
+            const endpointKind = this.endpointKind === 'own' ? target.endpointKind : this.endpointKind;
+            return { mode, endpoint_kind: endpointKind, user_tabs: await this.foreignTabCount() };
+        }
         notify('relaywright', ATTACH_ALLOW_HINT);
         const headlessOwn = this.connection !== 'attached' && (this.launchedHeadless || process.env.RELAYWRIGHT_HEADLESS === '1');
         await this.dropBrowser(this.connection === 'attached' || !headlessOwn ? 'disconnect' : 'close');
@@ -1361,14 +1373,16 @@ export class BrowserSession {
         recordAudit('attach', { mode: target.mode, endpoint_kind: target.endpointKind });
         await flushAudit();
         logDaemon(`attached ${target.endpointKind}`);
-        let userTabs = 0;
+        return { mode: target.mode, endpoint_kind: target.endpointKind, user_tabs: await this.foreignTabCount() };
+    }
+    async foreignTabCount() {
         try {
-            userTabs = (await this.tabset().listForeign()).length;
+            return (await this.tabset().listForeign()).length;
         }
         catch (err) {
             logDaemon(`user tab count failed: ${errorText(err)}`);
+            return 0;
         }
-        return { mode: target.mode, endpoint_kind: target.endpointKind, user_tabs: userTabs };
     }
     rememberAttach(target) {
         updateGlobalConfig((config) => {
@@ -1408,6 +1422,7 @@ export class BrowserSession {
             return;
         }
         this.browserVersion = await browser.version().catch(() => '');
+        this.attachedEndpoint = target.endpoint;
         this.phase = { state: 'ready' };
     }
     async dropBrowser(policy) {
@@ -1441,6 +1456,7 @@ export class BrowserSession {
                 this.releasing = false;
             }
         }
+        this.attachedEndpoint = '';
         this.connection = 'own';
     }
     watchBrowser(browser) {
@@ -1449,6 +1465,7 @@ export class BrowserSession {
             if (this.browser !== browser)
                 return;
             this.browser = null;
+            this.attachedEndpoint = '';
             const open = this.tabSet;
             this.tabSet = null;
             const caught = this.downloads;

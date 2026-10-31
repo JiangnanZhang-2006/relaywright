@@ -299,7 +299,7 @@ export function createRelayMcpServer() {
         }
     });
     register('browser_tabs', {
-        description: 'List, select, close, or open relaywright tabs. list marks the active tab with *. user lists tabs that were already open in an attached Chrome (index, title, and URL). adopt asks the person at this computer to allow one of those tabs, then returns a full snapshot.',
+        description: 'List, select, close, or open relaywright tabs. list marks the active tab with * and an adopted profile tab with (adopted). relaywright does not close adopted tabs. user lists tabs that were already open and not yet adopted, and says how many are already adopted (those are in action=list). adopt asks the person at this computer to allow one of those tabs, then returns a full snapshot. A page opened from an adopted tab can be closed.',
         inputSchema: {
             action: z.enum(['list', 'select', 'close', 'new', 'user', 'adopt']),
             index: z.number().int().positive().optional().describe('1-based tab index for select, close, or adopt. For adopt, use the index from action=user.'),
@@ -457,7 +457,7 @@ export function createRelayMcpServer() {
         }
     });
     register('browser_attach', {
-        description: 'Attach the daemon to an existing Chrome. auto uses the default Chrome profile and, if DevToolsActivePort cannot be read, tries ws://127.0.0.1:9222/devtools/browser. cdp_url is an http(s) base or a ws URL. A person must click Allow in Chrome. Existing tabs stay hidden until browser_tabs action=user lists them and action=adopt takes one over; adopt asks the person to confirm. The result includes user_tabs, the number of those tabs.',
+        description: 'Attach the daemon to an existing Chrome. auto uses the default Chrome profile and, if DevToolsActivePort cannot be read, tries ws://127.0.0.1:9222/devtools/browser. cdp_url is an http(s) base or a ws URL. A person must click Allow in Chrome. Existing tabs stay hidden until browser_tabs action=user lists them and action=adopt takes one over; adopt asks the person to confirm. The result includes user_tabs, the number of those tabs. Attaching the same Chrome again keeps tabs that were already adopted.',
         inputSchema: {
             auto: z.boolean().optional().describe('Attach using the default Chrome user data directory.'),
             cdp_url: z.string().optional().describe('WebSocket URL, or an http(s) base such as http://127.0.0.1:9222.'),
@@ -530,11 +530,19 @@ function withStep(text, step) {
         return text;
     return `${text}\n(step ${step})`;
 }
-function toolText(text) {
-    const warning = daemonMismatchLine();
-    if (!warning || text.includes(warning))
+let announcedMismatch = null;
+/** The same mismatch line is attached to the first tool result only. A new line is announced again. */
+export function appendDaemonWarning(text, warning) {
+    if (!warning || text.includes(warning) || announcedMismatch === warning)
         return text;
+    announcedMismatch = warning;
     return `${text}\n${warning}`;
+}
+export function resetDaemonWarningForTests() {
+    announcedMismatch = null;
+}
+function toolText(text) {
+    return appendDaemonWarning(text, daemonMismatchLine());
 }
 function toolError(err) {
     return {

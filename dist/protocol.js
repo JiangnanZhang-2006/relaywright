@@ -121,6 +121,7 @@ export const TabInfoSchema = z.object({
     title: z.string(),
     url: z.string(),
     active: z.boolean(),
+    adopted: z.boolean().optional(),
 });
 export const TabsListSchema = z.object({
     tabs: z.array(TabInfoSchema),

@@ -30,7 +30,7 @@ export function formatBuildMismatch(expected, health, stored) {
     const shown = healthDiff ? health : stored;
     if (!shown)
         return null;
-    return `relaywright: warning: running daemon is from ${shown.entry} (built ${shown.builtAt}); this CLI is ${expected.entry}. Run: relaywright daemon restart`;
+    return `relaywright: warning: running daemon is from ${shown.entry} (built ${shown.builtAt}); this CLI is ${expected.entry} (built ${expected.builtAt}). Run: relaywright daemon restart`;
 }
 export function explainDaemonError(message, status, code, warning) {
     if (status === 404 && code === 'not_found' && warning)

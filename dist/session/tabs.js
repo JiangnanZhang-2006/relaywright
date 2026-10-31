@@ -12,9 +12,17 @@ export function formatTabList(tabs) {
         .map((tab) => {
         const title = tab.title.replace(/\s+/g, ' ').trim();
         const mark = tab.active ? '*' : '';
-        return `${mark}[${tab.index}] ${title}  ${tab.url}`;
+        const adopted = tab.adopted ? ' (adopted)' : '';
+        return `${mark}[${tab.index}] ${title}${adopted}  ${tab.url}`;
     })
         .join('\n');
+}
+/** Text for browser_tabs action=user. An empty foreign list keeps its existing sentence. */
+export function formatUserTabText(foreignText, foreignCount, adoptedCount) {
+    const base = foreignCount === 0 ? 'No user tabs. Tabs relaywright opened are listed with action=list.' : foreignText;
+    if (adoptedCount <= 0)
+        return base;
+    return `${base}\nAlready adopted: ${adoptedCount} tab(s), shown by action=list.`;
 }
 export class TabSet {
     browser;
@@ -88,6 +96,16 @@ export class TabSet {
             if (!page.isClosed())
                 await page.close().catch(() => undefined);
         }
+    }
+    /** Profile tabs a person adopted. Popups opened from those tabs are not counted. */
+    adoptedCount() {
+        let count = 0;
+        for (const page of this.owned) {
+            if (this.created.has(page) || page.isClosed())
+                continue;
+            count += 1;
+        }
+        return count;
     }
     async listForeign() {
         const pages = await this.foreignPages();
@@ -255,11 +273,13 @@ export class TabSet {
             catch {
                 title = '';
             }
+            const adopted = this.owned.has(slot.page) && !this.created.has(slot.page);
             result.push({
                 index: index + 1,
                 title,
                 url: slot.page.isClosed() ? '' : slot.page.url(),
                 active: slot === this.active,
+                ...(adopted ? { adopted: true } : {}),
             });
         }
         return result;
@@ -358,7 +378,8 @@ export class TabSet {
             if (!fromOurs)
                 return;
             this.owned.add(page);
-            if (madeByUs)
+            // A popup from an adopted tab is visible to the model, so it can be closed. The profile tab stays out of created.
+            if (madeByUs || this.openerIsOurs(target))
                 this.created.add(page);
             this.rememberTarget(page);
         }

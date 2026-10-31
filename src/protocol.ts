@@ -156,6 +156,7 @@ export const TabInfoSchema = z.object({
   title: z.string(),
   url: z.string(),
   active: z.boolean(),
+  adopted: z.boolean().optional(),
 });
 
 export type TabInfo = z.infer<typeof TabInfoSchema>;

@@ -1,7 +1,8 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import type { Browser } from 'puppeteer-core';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRelayMcpServer } from '../src/mcp/server.js';
 import { daemonLogPath } from '../src/config/paths.js';
 import {
@@ -30,6 +31,9 @@ import {
   shouldWarmOnStartup,
 } from '../src/session/connect.js';
 import { readDevToolsEndpoint } from '../src/session/launch.js';
+import { reuseLiveAttach } from '../src/session/browser.js';
+import { PageController } from '../src/session/page.js';
+import { formatTabList, formatUserTabText, TabSet } from '../src/session/tabs.js';
 
 const ORIGINAL_FETCH = globalThis.fetch;
 const envKeys = ['RELAYWRIGHT_TEST_ACCESS_DECISION', 'RELAYWRIGHT_TEST_ADOPT_DECISION', 'RELAYWRIGHT_NOTIFY'] as const;
@@ -255,4 +259,171 @@ describe('attach policy', () => {
     delete process.env.RELAYWRIGHT_TEST_ADOPT_DECISION;
     expect(presetAdoptDecision()).toBe('deny');
   });
+
+  it('reuses a live attach only when the endpoint is unchanged', () => {
+    const live = { connection: 'attached' as const, connected: true, endpoint: 'ws://127.0.0.1:9222/devtools/browser/abc' };
+    expect(reuseLiveAttach(live, live.endpoint)).toBe(true);
+    expect(reuseLiveAttach(live, 'ws://127.0.0.1:9222/devtools/browser/other')).toBe(false);
+    expect(reuseLiveAttach({ ...live, connected: false }, live.endpoint)).toBe(false);
+    expect(reuseLiveAttach({ ...live, connection: 'own' }, live.endpoint)).toBe(false);
+    expect(reuseLiveAttach({ ...live, endpoint: '' }, '')).toBe(false);
+  });
 });
+
+describe('adopted tabs', () => {
+  it('names adopted tabs and keeps the empty user-tab sentence', () => {
+    expect(formatTabList([{ index: 1, title: 'ICT大赛', url: 'https://example.test/c', active: true, adopted: true }])).toBe(
+      '*[1] ICT大赛 (adopted)  https://example.test/c',
+    );
+    expect(formatUserTabText('(no tabs)', 0, 0)).toBe('No user tabs. Tabs relaywright opened are listed with action=list.');
+    expect(formatUserTabText('[1] other  https://example.test/o', 1, 2)).toBe(
+      '[1] other  https://example.test/o\nAlready adopted: 2 tab(s), shown by action=list.',
+    );
+    expect(formatUserTabText('(no tabs)', 0, 1)).toBe(
+      'No user tabs. Tabs relaywright opened are listed with action=list.\nAlready adopted: 1 tab(s), shown by action=list.',
+    );
+  });
+
+  it('closes a popup from an adopted tab and leaves the profile tab open', async () => {
+    const attach = vi.spyOn(PageController, 'attach').mockImplementation(async () => {
+      return { forgetBaseline() {}, async dispose() {}, hasRef: () => false } as unknown as PageController;
+    });
+    const browser = new FakeBrowser();
+    const tabs = new TabSet(browser as unknown as Browser, { scope: 'owned' });
+    try {
+      await tabs.start();
+      const userTarget = new FakeTarget();
+      const user = new FakePage(userTarget, 'https://example.test/competition', 'ICT大赛');
+      browser.pagesList.push(user);
+      await tabs.adopt(1);
+      expect(tabs.adoptedCount()).toBe(1);
+      const adopted = await tabs.describe();
+      expect(adopted.find((tab) => tab.title === 'ICT大赛')).toMatchObject({ adopted: true });
+      const userIndex = adopted.find((tab) => tab.title === 'ICT大赛')?.index;
+      await expect(tabs.closeIndex(userIndex)).rejects.toMatchObject({
+        code: 'bad_request',
+        message: 'That tab belongs to the browser profile. relaywright only closes tabs it opened.',
+      });
+
+      const popupTarget = new FakeTarget(userTarget);
+      browser.pagesList.push(new FakePage(popupTarget, 'https://example.test/problems', 'problems'));
+      browser.emit('targetcreated', popupTarget);
+      const popup = await waitForTab(tabs, 'problems');
+      expect(popup.adopted).toBeUndefined();
+      expect(tabs.adoptedCount()).toBe(1);
+      await tabs.closeIndex(popup.index);
+      expect((await tabs.describe()).some((tab) => tab.title === 'problems')).toBe(false);
+      expect((await tabs.describe()).some((tab) => tab.title === 'ICT大赛' && tab.adopted)).toBe(true);
+    } finally {
+      await tabs.dispose();
+      attach.mockRestore();
+    }
+  });
+});
+
+class FakeTarget {
+  pageObj: FakePage | null = null;
+
+  constructor(private readonly openerTarget?: FakeTarget) {}
+
+  type(): string {
+    return 'page';
+  }
+
+  async page(): Promise<FakePage | null> {
+    return this.pageObj;
+  }
+
+  opener(): FakeTarget | undefined {
+    return this.openerTarget;
+  }
+}
+
+class FakePage {
+  closed = false;
+  private readonly listeners = new Map<string, Array<(...args: unknown[]) => void>>();
+
+  constructor(
+    readonly targetRef: FakeTarget,
+    private readonly pageUrl: string,
+    private readonly pageTitle: string,
+  ) {
+    targetRef.pageObj = this;
+  }
+
+  isClosed(): boolean {
+    return this.closed;
+  }
+
+  url(): string {
+    return this.pageUrl;
+  }
+
+  async title(): Promise<string> {
+    return this.pageTitle;
+  }
+
+  target(): FakeTarget {
+    return this.targetRef;
+  }
+
+  on(event: string, cb: (...args: unknown[]) => void): void {
+    const list = this.listeners.get(event) ?? [];
+    list.push(cb);
+    this.listeners.set(event, list);
+  }
+
+  off(): void {}
+
+  async bringToFront(): Promise<void> {}
+
+  async close(): Promise<void> {
+    this.closed = true;
+  }
+
+  async evaluate(): Promise<string> {
+    return 'complete';
+  }
+}
+
+class FakeBrowser {
+  pagesList: FakePage[] = [];
+  private readonly listeners = new Map<string, Array<(target: FakeTarget) => void>>();
+
+  on(event: string, cb: (target: FakeTarget) => void): this {
+    const list = this.listeners.get(event) ?? [];
+    list.push(cb);
+    this.listeners.set(event, list);
+    return this;
+  }
+
+  off(event: string, cb: (target: FakeTarget) => void): this {
+    const list = this.listeners.get(event) ?? [];
+    this.listeners.set(event, list.filter((item) => item !== cb));
+    return this;
+  }
+
+  async newPage(): Promise<FakePage> {
+    const page = new FakePage(new FakeTarget(), 'about:blank', '');
+    this.pagesList.push(page);
+    return page;
+  }
+
+  async pages(): Promise<FakePage[]> {
+    return this.pagesList.filter((page) => !page.closed);
+  }
+
+  emit(event: string, target: FakeTarget): void {
+    for (const cb of this.listeners.get(event) ?? []) cb(target);
+  }
+}
+
+async function waitForTab(tabs: TabSet, title: string): Promise<{ index: number; adopted?: boolean }> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const found = (await tabs.describe()).find((tab) => tab.title === title);
+    if (found) return found;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`tab ${title} did not appear`);
+}

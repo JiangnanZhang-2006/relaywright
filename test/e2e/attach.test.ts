@@ -95,6 +95,14 @@ describe.skipIf(!resolved.path)('attach to a test Chrome', () => {
     const visible = await cli(['tabs', 'list', '--json'], 'deny');
     expect(visible.stdout).toContain('USER-TAB-SECRET');
 
+    const attachCount = queryAudit({ event: 'attach' }).entries.length;
+    const again = await cli(['daemon', 'attach', '--user-data-dir', profile, '--json'], 'deny');
+    expect(again.code, again.stderr.slice(0, 800)).toBe(0);
+    expect(queryAudit({ event: 'attach' }).entries.length).toBe(attachCount);
+    const keptAdopted = await cli(['tabs', 'list', '--json'], 'deny');
+    expect(keptAdopted.stdout).toContain('USER-TAB-SECRET');
+    expect(keptAdopted.stdout).toContain('"adopted": true');
+
     const audit = queryAudit({ event: 'attach' });
     expect(audit.chain.ok).toBe(true);
     expect(audit.entries.at(-1)).toMatchObject({ event: 'attach', mode: 'daily', endpoint_kind: 'devtools-file' });

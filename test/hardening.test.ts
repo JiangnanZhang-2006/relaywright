@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { explainDaemonError, formatBuildMismatch, type BuildFingerprint } from '../src/daemon/build.js';
 import { staleTabRefMessage } from '../src/errors.js';
+import { appendDaemonWarning, resetDaemonWarningForTests } from '../src/mcp/server.js';
 import { pageHeader } from '../src/perception/snapshot.js';
 import { runPaint } from '../src/session/timeout.js';
 
@@ -11,12 +12,30 @@ describe('build fingerprint', () => {
   it('warns when the running daemon was built from somewhere else', () => {
     expect(formatBuildMismatch(here, here, here)).toBeNull();
     expect(formatBuildMismatch(here, other, other)).toBe(
-      `relaywright: warning: running daemon is from ${other.entry} (built ${other.builtAt}); this CLI is ${here.entry}. Run: relaywright daemon restart`,
+      `relaywright: warning: running daemon is from ${other.entry} (built ${other.builtAt}); this CLI is ${here.entry} (built ${here.builtAt}). Run: relaywright daemon restart`,
     );
-    expect(formatBuildMismatch(here, here, other)).toContain(`running daemon is from ${other.entry} (built ${other.builtAt})`);
+    const rebuilt: BuildFingerprint = { entry: here.entry, builtAt: '2026-10-30T09:14:02.000Z' };
+    expect(formatBuildMismatch(rebuilt, here, here)).toBe(
+      `relaywright: warning: running daemon is from ${here.entry} (built ${here.builtAt}); this CLI is ${rebuilt.entry} (built ${rebuilt.builtAt}). Run: relaywright daemon restart`,
+    );
+    expect(formatBuildMismatch(here, here, other)).toContain(`this CLI is ${here.entry} (built ${here.builtAt})`);
     expect(formatBuildMismatch(here)).toBe(
       `relaywright: warning: running daemon did not report a build fingerprint; this CLI is ${here.entry}. Run: relaywright daemon restart`,
     );
+  });
+
+  it('attaches a mismatch line to the first tool result only', () => {
+    resetDaemonWarningForTests();
+    const warning =
+      'relaywright: warning: running daemon is from a (built 1); this CLI is a (built 2). Run: relaywright daemon restart';
+    expect(appendDaemonWarning(`seen\n${warning}`, warning)).toBe(`seen\n${warning}`);
+    expect(appendDaemonWarning('page', warning)).toBe(`page\n${warning}`);
+    expect(appendDaemonWarning('page', warning)).toBe('page');
+    expect(appendDaemonWarning('page', null)).toBe('page');
+    const next = warning.replace('built 2', 'built 3');
+    expect(appendDaemonWarning('page', next)).toBe(`page\n${next}`);
+    expect(appendDaemonWarning('page', next)).toBe('page');
+    resetDaemonWarningForTests();
   });
 
   it('mentions a fingerprint mismatch only for a missing route', () => {

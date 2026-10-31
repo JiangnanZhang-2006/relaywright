@@ -8,6 +8,13 @@
 
 - 浏览器模式的存储名改为 `separate`、`daily`、`cdp`。已有配置里的 `own` 和 `attach` 在下次读取时改写。
 
+### 修复
+
+- 构建不一致的警告同时写出守护进程和当前命令的构建时间。MCP 里同一句警告只附在第一次工具结果上。
+- 已经连着同一个 Chrome 时，再次 attach 不再断开重连，已接管的标签页还在。
+- `browser_tabs action=user` 会说明有多少标签已经接管，那些标签在 `action=list` 里标成 `(adopted)`。
+- 从已接管标签打开的新页面可以关闭。用户原来的标签仍然不能关。
+
 ### 新增
 
 - DeepSeek Harness 通过官方 Add plugin 安装 `github:JiangnanZhang-2006/relaywright`。编译后的 `dist/` 随仓库分发，安装不再执行 `prepare`。包内启动 MCP，工具超时盖过转交真人的等待，并在密钥存在时传回被清掉的 `DEEPSEEK_API_KEY`。
