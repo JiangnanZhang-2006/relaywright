@@ -5,7 +5,8 @@ coverage/
 .env
 .env.*
 .DS_Store
-
+# Cursor
+.cursor/hooks
 # 本地运行数据，可能包含会话和个人信息
 .relaywright/
 downloads/
