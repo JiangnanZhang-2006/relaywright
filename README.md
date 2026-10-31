@@ -142,7 +142,7 @@ npm run licenses
 
 单元测试不需要浏览器。`test:e2e` 用本机浏览器打开 `fixtures/` 里的仿真页面，大约 4 分钟，并且使用临时的 `RELAYWRIGHT_HOME`，不会碰你自己的浏览器配置。
 
-设计说明见 [docs/architecture.md](docs/architecture.md)。参与贡献、报告漏洞和版本变化见 [CONTRIBUTING.md](CONTRIBUTING.md)、[SECURITY.md](SECURITY.md)、[CHANGELOG.md](CHANGELOG.md)，后续计划见 [ROADMAP.md](ROADMAP.md)。项目处于 0.1.0-rc.1。
+设计说明见 [docs/architecture.md](docs/architecture.md)。参与贡献、报告漏洞和版本变化见 [CONTRIBUTING.md](CONTRIBUTING.md)、[SECURITY.md](SECURITY.md)、[CHANGELOG.md](CHANGELOG.md)，后续计划见 [ROADMAP.md](ROADMAP.md)。项目处于 0.1.0-rc.2。
 
 ## 许可证
 

@@ -140,7 +140,7 @@ npm run licenses
 
 Unit tests need no browser. `test:e2e` drives the fixture pages under `fixtures/` for about four minutes, using a temporary `RELAYWRIGHT_HOME`, so it does not touch your own browser profile.
 
-See [docs/architecture.md](docs/architecture.md) for the design, and [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CHANGELOG.md](CHANGELOG.md), and [ROADMAP.md](ROADMAP.md). The project is at 0.1.0-rc.1.
+See [docs/architecture.md](docs/architecture.md) for the design, and [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CHANGELOG.md](CHANGELOG.md), and [ROADMAP.md](ROADMAP.md). The project is at 0.1.0-rc.2.
 
 ## License
 
